@@ -39,7 +39,9 @@ from app.enums import (
     QueryRunStatus,
     Severity,
     SourceType,
+    TriggeredBy,
     UsageStatus,
+    UserRole,
 )
 
 #: PostgreSQL 에서는 JSONB, 그 외(SQLite 테스트)에서는 JSON.
@@ -146,6 +148,19 @@ class AnalysisPolicy(TimestampMixin, Base):
     #: 정책별 일일 분석 횟수 상한. NULL 이면 전역 한도(app_settings)만 적용한다.
     daily_analysis_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # --- 스케줄 (revision 0004) ---
+    #: 켜져 있고 `schedule_interval_minutes` 가 있으면 스케줄러 tick 이 주기 실행한다.
+    schedule_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    #: 실행 주기(분). `schedule_enabled` 가 켜져 있으면 필수다 (서비스가 422 로 검증).
+    schedule_interval_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 스케줄 실행 직후, 그 회차 그룹 중 **분석 이력이 전혀 없는 fingerprint** 만 자동 분석한다.
+    #: 비용 상한은 기존 장치 그대로다 (allow_ai_analysis · 멱등 · 일일 한도 429).
+    auto_analyze_new: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
     #: DELETE 는 실제 삭제가 아니라 active=false 비활성화다.
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
 
@@ -186,6 +201,13 @@ class QueryRun(Base):
         JSONType, nullable=False, default=list, server_default="[]"
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 실행 주체 (revision 0004). "manual" | "schedule" — 이력·화면 배지용이다.
+    triggered_by: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=TriggeredBy.MANUAL.value,
+        server_default=TriggeredBy.MANUAL.value,
+    )
 
     policy: Mapped[AnalysisPolicy] = relationship(back_populates="query_runs")
     error_groups: Mapped[list[ErrorGroup]] = relationship(
@@ -307,6 +329,13 @@ class AnalysisJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 분석을 시작한 주체 (revision 0004). "manual" | "schedule".
+    triggered_by: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=TriggeredBy.MANUAL.value,
+        server_default=TriggeredBy.MANUAL.value,
+    )
 
     error_group: Mapped[ErrorGroup] = relationship(back_populates="analysis_jobs")
     result: Mapped[AnalysisResult | None] = relationship(
@@ -390,6 +419,64 @@ class AnalysisUsageRecord(Base):
     __table_args__ = (Index("ix_llm_usage_records_model_created", "model", "created_at"),)
 
 
+# -------------------------------------------------------------------- auth
+
+
+class User(Base):
+    """로그인 계정 (revision 0004).
+
+    `password_hash` 에는 `app.auth.passwords.hash_password()` 결과만 넣는다 —
+    salt 를 포함한 자체 포맷(`scrypt$n$r$p$salt$hash`)이며 stdlib `hashlib.scrypt`
+    만 쓴다 (새 의존성 없음). 평문은 어떤 컬럼에도 들어가지 않는다.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    #: "admin" | "viewer". viewer 는 GET 만 허용된다.
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=UserRole.VIEWER.value, server_default=UserRole.VIEWER.value
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    sessions: Mapped[list[UserSession]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class UserSession(Base):
+    """로그인 세션 (revision 0004).
+
+    쿠키에 실리는 것은 임의의 256 bit 토큰이고, DB 에는 그 **SHA-256 해시**만
+    남는다 — DB 를 읽어도 유효한 쿠키를 만들 수 없다. 로그아웃은 행 삭제이므로
+    무효화가 실제로 일어난다 (무상태 서명 토큰으로는 만료 전 회수가 불가능하다).
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    #: sha256(raw token) 의 hex. 원문 토큰은 저장하지 않는다.
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped[User] = relationship(back_populates="sessions")
+
+    __table_args__ = (Index("ix_user_sessions_expires_at", "expires_at"),)
+
+
 # ---------------------------------------------------------------- settings
 
 
@@ -438,4 +525,6 @@ __all__ = [
     "SETTING_MODEL_PRICING",
     "SETTING_SAMPLE_RETENTION_DAYS",
     "SETTING_TIMEZONE",
+    "User",
+    "UserSession",
 ]

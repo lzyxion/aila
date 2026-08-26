@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     # 미설정이면 앱은 뜨지만 암복호화 호출 시점에 예외가 난다.
     encryption_key: str | None = None
 
+    # --- 인증 (Phase 5) ---
+    #: 세션 쿠키 이름. httpOnly · SameSite=Lax 로 내려간다.
+    session_cookie_name: str = "aila_session"
+    #: 세션 수명(시간). 만료된 세션은 요청 시점에 거절되고 행이 지워진다.
+    session_ttl_hours: int = 12
+    #: HTTPS 전용 쿠키 여부. 로컬 데모는 http 라 기본 False — 외부 노출 시 반드시 True.
+    session_cookie_secure: bool = False
+    #: 앱 기동 시 이 계정이 없으면 admin 으로 만든다. **데모 기본값 그대로 두지 말 것.**
+    admin_username: str = "admin"
+    admin_password: str = "admin"
+
     # --- API ---
     api_prefix: str = "/api"
     # NoDecode: `AILA_CORS_ORIGINS=a,b` 같은 콤마 구분 문자열도 받기 위해 JSON 선파싱을 끈다.
@@ -71,6 +82,12 @@ class Settings(BaseSettings):
     prompt_max_samples: int = 3
     # 그룹당 대표 로그 수의 절대 상한. 정책이 프롬프트에 들어갈 양을 임의로 키우지 못하게 한다.
     max_samples_per_group_cap: int = 20
+
+    # --- 스케줄러 (Phase 5) ---
+    #: 백그라운드 tick 주기(초). due 판정 자체는 정책의 interval 이 한다.
+    scheduler_tick_seconds: int = 60
+    #: 스케줄러를 끌 수 있는 스위치 (테스트·마이그레이션 전 기동용).
+    scheduler_enabled: bool = True
 
     # --- 보존 ---
     # error_samples 기본 보존 일수 (app_settings 에 행이 없을 때).

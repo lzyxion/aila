@@ -6,8 +6,21 @@
  * - 분석 상태는 그룹 id 가 아니라 fingerprint 기준으로 온 값을 그대로 보여준다.
  */
 
-import type { AnalysisJobStatus, QueryRunStatus, Severity, UsageStatus } from '../api/types';
-import { jobStatusLabel, queryRunStatusLabel, severityLabel, usageStatusLabel } from '../lib/format';
+import type {
+  AnalysisJobStatus,
+  QueryRunStatus,
+  Severity,
+  TriggeredBy,
+  UsageStatus,
+  UserRole,
+} from '../api/types';
+import {
+  formatIntervalMinutes,
+  jobStatusLabel,
+  queryRunStatusLabel,
+  severityLabel,
+  usageStatusLabel,
+} from '../lib/format';
 import { Badge, Spinner } from './ui';
 
 export function AnalysisStatusBadge({
@@ -74,5 +87,83 @@ export function QueryRunStatusBadge({ status }: { status: QueryRunStatus }) {
 export function UsageStatusBadge({ status }: { status: UsageStatus }) {
   return (
     <Badge tone={status === 'succeeded' ? 'success' : 'danger'}>{usageStatusLabel(status)}</Badge>
+  );
+}
+
+// ------------------------------------------------------------------ 권한·역할
+
+export function RoleBadge({ role }: { role: UserRole }) {
+  return role === 'admin' ? (
+    <Badge tone="accent" title="정책 실행·AI 분석·설정 변경을 할 수 있습니다.">
+      admin
+    </Badge>
+  ) : (
+    <Badge
+      tone="neutral"
+      title="읽기 전용 계정입니다 — 조회는 할 수 있지만 실행·저장·삭제는 admin 만 할 수 있습니다."
+    >
+      viewer · 읽기 전용
+    </Badge>
+  );
+}
+
+// ------------------------------------------------------------------ 스케줄
+
+/**
+ * 정책의 스케줄 상태.
+ *
+ * 꺼져 있으면 아무것도 그리지 않는다 — 정책 목록에서 "수동" 배지가 모든 행에 붙으면
+ * 정작 켜진 정책이 눈에 띄지 않는다.
+ */
+export function ScheduleBadge({
+  enabled,
+  intervalMinutes,
+  autoAnalyze = false,
+}: {
+  enabled: boolean;
+  intervalMinutes: number | null;
+  autoAnalyze?: boolean;
+}) {
+  if (!enabled) return null;
+  return (
+    <>
+      <Badge
+        tone="info"
+        title={
+          intervalMinutes
+            ? `${formatIntervalMinutes(intervalMinutes)}마다 이 정책으로 Loki 를 조회합니다.`
+            : '스케줄이 켜져 있지만 주기가 설정되지 않았습니다.'
+        }
+      >
+        {intervalMinutes ? `스케줄 ${formatIntervalMinutes(intervalMinutes)}` : '스케줄 (주기 없음)'}
+      </Badge>
+      {autoAnalyze && (
+        <Badge
+          tone="warning"
+          title="스케줄 조회에서 처음 보는 오류에만 분석이 실행되고, 일일 분석 한도의 제한을 받습니다. 비용이 나가는 경로입니다."
+        >
+          신규 그룹 자동 분석
+        </Badge>
+      )}
+    </>
+  );
+}
+
+/**
+ * 실행 주체 배지 (수동/자동).
+ *
+ * 값이 없으면(백엔드가 아직 필드를 안 내려줌) 아무것도 그리지 않는다 — 없는 값을
+ * "수동"으로 채워 보여주면 스케줄이 돌기 시작한 뒤에도 전부 수동으로 보인다.
+ */
+export function TriggeredByBadge({ value }: { value: TriggeredBy | null | undefined }) {
+  if (value !== 'manual' && value !== 'schedule') return null;
+  return value === 'schedule' ? (
+    <Badge tone="info" title="스케줄러가 자동으로 실행했습니다.">
+      자동
+    </Badge>
+  ) : (
+    <Badge tone="neutral" title="사람이 화면에서 실행했습니다.">
+      수동
+    </Badge>
   );
 }

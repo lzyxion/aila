@@ -1,11 +1,21 @@
+/**
+ * 정책 하나의 상세 대시보드 (`/dashboard/:policyId`).
+ *
+ * 정책 **전체**를 훑는 화면은 홈(`/`)의 카드 그리드다. 여기는 카드에서 하나를 골라
+ * 들어오는 자리이고, 그래서 정책 선택은 상태가 아니라 **경로**다 — 링크를 붙여
+ * 공유하거나 브라우저 뒤로가기로 되짚을 수 있어야 한다.
+ */
+
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useNavigate, useParams } from 'react-router';
 
 import { useDashboardOverview, usePolicies, useRunPolicy } from '../api/queries';
-import type { DashboardOverviewParams, FetchWarning } from '../api/types';
+import { policySchedule, type DashboardOverviewParams, type FetchWarning } from '../api/types';
+import { useWriteAccess } from '../auth/AuthContext';
 import { ErrorTrendChart, ServiceBarChart } from '../components/chartsLazy';
-import { AnalysisStatusBadge, SeverityBadge } from '../components/StatusBadges';
+import { AnalysisStatusBadge, ScheduleBadge, SeverityBadge } from '../components/StatusBadges';
 import {
+  Badge,
   Button,
   Card,
   EmptyBlock,
@@ -34,7 +44,13 @@ const RANGES = [
 
 export function DashboardPage() {
   const [rangeIndex, setRangeIndex] = useState(0);
-  const [policyId, setPolicyId] = useState<number | null>(null);
+  const params = useParams<{ policyId?: string }>();
+  const navigate = useNavigate();
+  const write = useWriteAccess();
+
+  // 정책 선택은 상태가 아니라 경로다. `/dashboard` (id 없음)는 전체 조회 결과를 본다.
+  const parsed = params.policyId ? Number(params.policyId) : NaN;
+  const policyId = Number.isFinite(parsed) ? parsed : null;
 
   const policiesQuery = usePolicies();
   const runPolicy = useRunPolicy();
@@ -42,7 +58,7 @@ export function DashboardPage() {
   const range = RANGES[rangeIndex];
 
   // 파라미터를 rangeIndex/policyId 에서만 파생시켜야 캐시 키가 매 렌더 바뀌지 않는다.
-  const params = useMemo<DashboardOverviewParams>(() => {
+  const overviewParams = useMemo<DashboardOverviewParams>(() => {
     const end = new Date();
     const start = new Date(end.getTime() - range.minutes * 60_000);
     return {
@@ -55,15 +71,20 @@ export function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rangeIndex, policyId]);
 
-  const overview = useDashboardOverview(params);
+  const overview = useDashboardOverview(overviewParams);
 
-  const activePolicies = (policiesQuery.data ?? []).filter((policy) => policy.active);
-  const selectedPolicy = activePolicies.find((policy) => policy.id === policyId) ?? null;
+  const allPolicies = policiesQuery.data ?? [];
+  const activePolicies = allPolicies.filter((policy) => policy.active);
+  // 비활성 정책의 대시보드로 직접 들어올 수 있다 — 목록에 없다고 빈 화면을 주지 않는다.
+  const selectedPolicy = allPolicies.find((policy) => policy.id === policyId) ?? null;
+  const schedule = selectedPolicy ? policySchedule(selectedPolicy) : null;
 
   return (
     <div>
       <PageHeader
-        title="대시보드"
+        title={
+          selectedPolicy ? `대시보드 · ${selectedPolicy.name}` : '대시보드 · 전체'
+        }
         description={
           <>
             건수와 추이는 <code className="rounded bg-slate-200 px-1">count_over_time</code> metric
@@ -71,7 +92,36 @@ export function DashboardPage() {
             <strong>fingerprint 기준</strong>이라 이전 조회에서 분석한 오류도 "분석 완료"로 보입니다.
           </>
         }
+        actions={
+          <Link
+            to="/"
+            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
+          >
+            통합 대시보드로
+          </Link>
+        }
       />
+
+      {selectedPolicy && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <Badge tone={selectedPolicy.active ? 'success' : 'neutral'}>
+            {selectedPolicy.active ? '활성' : '비활성'}
+          </Badge>
+          {schedule && (
+            <ScheduleBadge
+              enabled={schedule.enabled}
+              intervalMinutes={schedule.intervalMinutes}
+              autoAnalyze={schedule.autoAnalyze}
+            />
+          )}
+          <Link
+            to={`/policies?policy=${selectedPolicy.id}`}
+            className="text-xs font-medium text-sky-800 hover:underline"
+          >
+            정책 설정 →
+          </Link>
+        </div>
+      )}
 
       <Card className="mb-6">
         <div className="grid gap-4 lg:grid-cols-3">
@@ -93,7 +143,9 @@ export function DashboardPage() {
                 <Select
                   value={policyId ?? ''}
                   onChange={(event) =>
-                    setPolicyId(event.target.value === '' ? null : Number(event.target.value))
+                    navigate(
+                      event.target.value === '' ? '/dashboard' : `/dashboard/${event.target.value}`,
+                    )
                   }
                 >
                   <option value="">전체</option>
@@ -102,6 +154,10 @@ export function DashboardPage() {
                       {policy.name}
                     </option>
                   ))}
+                  {/* 비활성 정책으로 직접 들어온 경우에도 선택 상태가 보여야 한다. */}
+                  {selectedPolicy && !selectedPolicy.active && (
+                    <option value={selectedPolicy.id}>{selectedPolicy.name} (비활성)</option>
+                  )}
                 </Select>
               </Field>
 
@@ -109,11 +165,12 @@ export function DashboardPage() {
                 variant="primary"
                 size="lg"
                 className="mb-6"
-                disabled={!selectedPolicy || runPolicy.isPending}
+                disabled={!write.allowed || !selectedPolicy || runPolicy.isPending}
                 title={
-                  selectedPolicy
+                  write.reason ??
+                  (selectedPolicy
                     ? `${selectedPolicy.name} 정책으로 Loki 를 조회합니다.`
-                    : '실행할 정책을 먼저 고르십시오.'
+                    : '실행할 정책을 먼저 고르십시오.')
                 }
                 onClick={() => {
                   if (!selectedPolicy) return;
@@ -135,7 +192,9 @@ export function DashboardPage() {
             </div>
 
             <p className="mt-1 text-xs text-slate-600">
-              {selectedPolicy ? (
+              {!write.allowed ? (
+                <>{write.reason}</>
+              ) : selectedPolicy ? (
                 <>
                   실행하면 이 정책의 LogQL 로 Loki 를 <strong>지금</strong> 조회하고 결과를
                   그룹으로 묶습니다. 분석(LLM 호출)은 그룹 상세에서 따로 실행합니다.

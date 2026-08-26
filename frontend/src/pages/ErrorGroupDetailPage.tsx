@@ -9,8 +9,13 @@ import {
   useStartAnalysis,
 } from '../api/queries';
 import type { AnalysisJobRead, ErrorGroupDetail, ErrorSampleRead } from '../api/types';
+import { useWriteAccess } from '../auth/AuthContext';
 import { ErrorTrendChart } from '../components/chartsLazy';
-import { AnalysisStatusBadge, SeverityBadge } from '../components/StatusBadges';
+import {
+  AnalysisStatusBadge,
+  SeverityBadge,
+  TriggeredByBadge,
+} from '../components/StatusBadges';
 import {
   Badge,
   Button,
@@ -44,6 +49,7 @@ export function ErrorGroupDetailPage() {
   const params = useParams<{ groupId: string }>();
   const groupId = params.groupId ? Number(params.groupId) : null;
 
+  const write = useWriteAccess();
   const groupQuery = useErrorGroup(groupId);
   const connectionsQuery = useLlmConnections();
   const startAnalysis = useStartAnalysis(groupId ?? 0);
@@ -189,6 +195,12 @@ export function ErrorGroupDetailPage() {
             description="수동 트리거만 존재합니다. 실행하면 마스킹된 대표 로그·추이·정책 정보만 LLM 으로 나갑니다."
           >
             <div className="space-y-4">
+              {!write.allowed && (
+                <Notice tone="neutral" title="권한 없음">
+                  {write.reason} 아래 분석 결과와 이력은 그대로 볼 수 있습니다.
+                </Notice>
+              )}
+
               <Field
                 label="사용할 LLM 연결"
                 hint={
@@ -198,6 +210,7 @@ export function ErrorGroupDetailPage() {
                 }
               >
                 <Select
+                  disabled={!write.allowed}
                   value={selectedConnectionId}
                   onChange={(event) =>
                     setSelectedConnectionId(
@@ -219,7 +232,11 @@ export function ErrorGroupDetailPage() {
               <Button
                 variant="primary"
                 className="w-full"
-                disabled={startAnalysis.isPending || isJobActive(jobQuery.data)}
+                disabled={!write.allowed || startAnalysis.isPending || isJobActive(jobQuery.data)}
+                title={
+                  write.reason ??
+                  '마스킹된 대표 로그만 LLM 으로 나갑니다. 비용이 발생하는 요청입니다.'
+                }
                 onClick={() =>
                   startAnalysis.mutate(
                     {
@@ -274,8 +291,17 @@ export function ErrorGroupDetailPage() {
         {!jobQuery.data && !jobQuery.isError && (activeJobId === null || !jobQuery.isLoading) && (
           <Card title="LLM 분석 결과">
             <EmptyBlock>
-              아직 이 오류 그룹에 대한 분석 결과가 없습니다. 오른쪽에서{' '}
-              <strong>AI 분석 실행</strong>을 누르십시오.
+              {write.allowed ? (
+                <>
+                  아직 이 오류 그룹에 대한 분석 결과가 없습니다. 오른쪽에서{' '}
+                  <strong>AI 분석 실행</strong>을 누르십시오.
+                </>
+              ) : (
+                <>
+                  아직 이 오류 그룹에 대한 분석 결과가 없습니다. 분석 실행은 admin 계정만 할 수
+                  있습니다.
+                </>
+              )}
             </EmptyBlock>
           </Card>
         )}
@@ -437,6 +463,8 @@ function PastAnalysesCard({
                   <div className="flex flex-wrap items-center gap-2">
                     <AnalysisStatusBadge status={status} />
                     <SeverityBadge severity={severity} />
+                    {/* 스케줄의 자동 분석과 사람이 누른 분석을 이력에서 구분한다. */}
+                    <TriggeredByBadge value={live?.triggered_by ?? analysis.triggered_by} />
                   </div>
                   <p className="mt-1 text-xs text-slate-600">
                     {analysis.provider} · <span className="font-mono">{analysis.model}</span> ·{' '}

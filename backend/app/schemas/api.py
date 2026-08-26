@@ -21,7 +21,9 @@ from app.enums import (
     QueryRunStatus,
     Severity,
     SourceType,
+    TriggeredBy,
     UsageStatus,
+    UserRole,
 )
 from app.schemas.analysis import AnalysisResultSchema
 from app.schemas.logrecord import CountPoint, FetchWarning
@@ -33,6 +35,36 @@ class ErrorResponse(BaseModel):
     """공통 오류 응답 (FastAPI HTTPException 형식)."""
 
     detail: str
+
+
+# ======================================================================= auth
+
+
+class LoginRequest(BaseModel):
+    """`POST /auth/login`. 비밀번호는 바디로만 받는다 (쿼리스트링 금지)."""
+
+    username: str = Field(max_length=128)
+    password: str
+
+
+class UserRead(BaseModel):
+    """로그인·`/auth/me`·계정 생성의 공통 응답.
+
+    계정 식별에 필요한 최소값만 싣는다 — id 도 해시도 내보내지 않는다.
+    """
+
+    model_config = ORM
+
+    username: str
+    role: UserRole
+
+
+class UserCreateRequest(BaseModel):
+    """`POST /auth/users` (admin 전용). viewer 계정을 만들기 위한 최소 입력."""
+
+    username: str = Field(max_length=128)
+    password: str = Field(min_length=1)
+    role: UserRole = UserRole.VIEWER
 
 
 class ConnectionTestResponse(BaseModel):
@@ -198,6 +230,15 @@ class PolicyBase(BaseModel):
     #: 정책별 일일 분석 상한. None 이면 전역 한도만 적용.
     daily_analysis_limit: int | None = Field(default=None, ge=0)
 
+    # --- 스케줄 (Phase 5) ---
+    #: 켜면 스케줄러가 주기 실행한다. `schedule_interval_minutes` 가 함께 있어야 한다(422).
+    schedule_enabled: bool = False
+    #: 실행 주기(분).
+    schedule_interval_minutes: int | None = Field(default=None, gt=0)
+    #: 스케줄 실행 직후 **분석 이력이 전혀 없는 fingerprint** 만 자동 분석한다.
+    #: 상한은 기존 장치가 그대로 건다 (allow_ai_analysis · 멱등 · 일일 한도 429).
+    auto_analyze_new: bool = False
+
 
 class PolicyCreate(PolicyBase):
     pass
@@ -214,6 +255,9 @@ class PolicyUpdate(BaseModel):
     max_samples_per_group: int | None = Field(default=None, gt=0)
     allow_ai_analysis: bool | None = None
     daily_analysis_limit: int | None = Field(default=None, ge=0)
+    schedule_enabled: bool | None = None
+    schedule_interval_minutes: int | None = Field(default=None, gt=0)
+    auto_analyze_new: bool | None = None
     active: bool | None = None
 
 
@@ -277,6 +321,8 @@ class QueryRunRead(BaseModel):
     warnings: list[FetchWarning] = Field(default_factory=list)
     error_message: str | None = None
     group_count: int = 0
+    #: 이 실행을 시작한 주체 (Phase 5). 화면 배지용이며 동작을 분기하지 않는다.
+    triggered_by: TriggeredBy = TriggeredBy.MANUAL
 
 
 class QueryRunListResponse(BaseModel):
@@ -349,6 +395,8 @@ class AnalysisJobSummary(BaseModel):
     completed_at: datetime | None = None
     severity: Severity | None = None
     summary: str | None = None
+    #: 이 분석을 시작한 주체 (Phase 5).
+    triggered_by: TriggeredBy = TriggeredBy.MANUAL
 
 
 class ErrorGroupDetail(ErrorGroupSummary):
@@ -404,6 +452,8 @@ class AnalysisJobRead(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    #: 이 분석을 시작한 주체 (Phase 5).
+    triggered_by: TriggeredBy = TriggeredBy.MANUAL
     result: AnalysisResultSchema | None = None
     usage: UsageRecordRead | None = None
 
@@ -461,6 +511,46 @@ class DashboardOverviewResponse(BaseModel):
     by_service: list[ServiceErrorCount] = Field(default_factory=list)
     top_groups: list[ErrorGroupSummary] = Field(default_factory=list)
     warnings: list[FetchWarning] = Field(default_factory=list)
+
+
+class DashboardSummaryLastRun(BaseModel):
+    """정책의 가장 최근 조회 이력 (성공·실패 무관). 없으면 상위에서 `null` 이다."""
+
+    id: int
+    started_at: datetime
+    status: QueryRunStatus
+    fetched_count: int = 0
+    group_count: int = 0
+    warnings: list[FetchWarning] = Field(default_factory=list)
+
+
+class DashboardPolicySummary(BaseModel):
+    """통합 대시보드의 정책 한 줄.
+
+    `total_errors_24h` 는 정책별 `count_over_time` 결과이며 **실패하면 0 이 아니라
+    `null`** 이다 (0 은 "오류가 없었다"로 읽힌다). 사유는 `warnings` 의 코드로 남는다.
+    """
+
+    policy_id: int
+    name: str
+    active: bool = True
+    schedule_enabled: bool = False
+    schedule_interval_minutes: int | None = None
+    last_run: DashboardSummaryLastRun | None = None
+    #: 최근 **성공** 조회의 그룹 중 fingerprint 분석 이력이 전혀 없는 그룹 수.
+    unanalyzed_group_count: int = 0
+    total_errors_24h: float | None = None
+    warnings: list[FetchWarning] = Field(default_factory=list)
+
+
+class DashboardSummaryResponse(BaseModel):
+    """`GET /dashboard/summary` — 정책 전체를 한 화면에 모은 운영 요약.
+
+    정책 상세(추이·상위 그룹)는 기존 `/dashboard/overview` 가 그대로 담당한다.
+    """
+
+    generated_at: datetime
+    policies: list[DashboardPolicySummary] = Field(default_factory=list)
 
 
 # ====================================================================== usage
@@ -539,6 +629,9 @@ __all__ = [
     "AppSettingUpdate",
     "ConnectionTestResponse",
     "DashboardOverviewResponse",
+    "DashboardPolicySummary",
+    "DashboardSummaryLastRun",
+    "DashboardSummaryResponse",
     "ErrorGroupDetail",
     "ErrorGroupListResponse",
     "ErrorGroupSummary",
@@ -551,6 +644,7 @@ __all__ = [
     "LLMModelListRequest",
     "LLMModelListResponse",
     "LabelValuesResponse",
+    "LoginRequest",
     "LokiConnectionCreate",
     "LokiConnectionRead",
     "LokiConnectionTestRequest",
@@ -568,4 +662,6 @@ __all__ = [
     "UsageAggregate",
     "UsageRecordRead",
     "UsageResponse",
+    "UserCreateRequest",
+    "UserRead",
 ]

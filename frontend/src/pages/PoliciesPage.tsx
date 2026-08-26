@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 
 import { isEndpointMissing } from '../api/client';
 import {
@@ -13,8 +13,13 @@ import {
   useTestLokiConnection,
   useUpdatePolicy,
 } from '../api/queries';
-import type { PolicyPreviewResponse, PolicyRead } from '../api/types';
-import { QueryRunStatusBadge } from '../components/StatusBadges';
+import { policySchedule, type PolicyPreviewResponse, type PolicyRead } from '../api/types';
+import { useWriteAccess } from '../auth/AuthContext';
+import {
+  QueryRunStatusBadge,
+  ScheduleBadge,
+  TriggeredByBadge,
+} from '../components/StatusBadges';
 import {
   Badge,
   Button,
@@ -36,11 +41,22 @@ import {
 } from '../components/ui';
 import {
   formatDateTime,
+  formatIntervalMinutes,
   formatNumber,
   formatRelative,
   truncate,
   warningCodeLabel,
 } from '../lib/format';
+
+/**
+ * 자동 분석의 비용 문구 — **계약**이다.
+ *
+ * 자동 분석은 비용이 나가는 유일한 자동 경로다. 두 가지 제한을 항상 함께 적는다:
+ * (1) 처음 보는 오류(fingerprint 이력 없음)에만 돈다, (2) 일일 분석 한도를 그대로 받는다.
+ * 둘 중 하나만 적으면 "자동으로 계속 돈다"로 읽힌다.
+ */
+const AUTO_ANALYZE_COST_NOTE =
+  '자동 분석은 처음 보는 오류에만 실행되고 일일 한도의 제한을 받습니다.';
 
 interface FormState {
   loki_connection_id: number | '';
@@ -55,6 +71,10 @@ interface FormState {
   daily_analysis_limit: string;
   /** 수정할 때만 의미가 있다 — 생성 API 에는 active 필드가 없다(항상 활성으로 생긴다). */
   active: boolean;
+  schedule_enabled: boolean;
+  /** 문자열로 들고 있다가 저장 시점에 숫자로 바꾼다 (빈 값 = 미설정). */
+  schedule_interval_minutes: string;
+  auto_analyze_new: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -69,9 +89,13 @@ const EMPTY_FORM: FormState = {
   allow_ai_analysis: true,
   daily_analysis_limit: '',
   active: true,
+  schedule_enabled: false,
+  schedule_interval_minutes: '60',
+  auto_analyze_new: false,
 };
 
 function toForm(policy: PolicyRead): FormState {
+  const schedule = policySchedule(policy);
   return {
     loki_connection_id: policy.loki_connection_id,
     name: policy.name,
@@ -85,6 +109,10 @@ function toForm(policy: PolicyRead): FormState {
     daily_analysis_limit:
       policy.daily_analysis_limit === null ? '' : String(policy.daily_analysis_limit),
     active: policy.active,
+    schedule_enabled: schedule.enabled,
+    schedule_interval_minutes:
+      schedule.intervalMinutes === null ? '' : String(schedule.intervalMinutes),
+    auto_analyze_new: schedule.autoAnalyze,
   };
 }
 
@@ -96,6 +124,8 @@ function parseExclusions(text: string): string[] {
 }
 
 export function PoliciesPage() {
+  const write = useWriteAccess();
+  const [searchParams] = useSearchParams();
   const policiesQuery = usePolicies();
   const connectionsQuery = useLokiConnections();
   const createPolicy = useCreatePolicy();
@@ -130,12 +160,14 @@ export function PoliciesPage() {
   // 목록은 활성·비활성을 **모두** 보여준다. 비활성이 사라지면 되살릴 경로도 같이 사라진다.
   const selectedPolicy = allPolicies.find((policy) => policy.id === selectedId) ?? null;
 
-  // 목록이 오면 첫 정책을 선택해 상세·이력 자리를 비워 두지 않는다.
+  // 통합 대시보드 카드의 "정책 설정"이 `?policy=` 로 들어온다 — 그 정책을 열어 준다.
+  // 없으면 첫 정책을 골라 상세·이력 자리를 비워 두지 않는다.
+  const requestedId = Number(searchParams.get('policy'));
   useEffect(() => {
-    if (selectedId === null && allPolicies.length > 0) {
-      setSelectedId(allPolicies[0].id);
-    }
-  }, [allPolicies, selectedId]);
+    if (selectedId !== null || allPolicies.length === 0) return;
+    const wanted = allPolicies.find((policy) => policy.id === requestedId);
+    setSelectedId(wanted?.id ?? allPolicies[0].id);
+  }, [allPolicies, requestedId, selectedId]);
 
   function startEdit(policy: PolicyRead) {
     setEditingId(policy.id);
@@ -170,6 +202,15 @@ export function PoliciesPage() {
         return `제외 정규식이 잘못되었습니다: ${pattern}`;
       }
     }
+    if (form.schedule_enabled) {
+      const interval = Number(form.schedule_interval_minutes);
+      if (form.schedule_interval_minutes.trim() === '' || !Number.isFinite(interval)) {
+        return '스케줄을 켰으면 실행 주기(분)를 입력하십시오.';
+      }
+      if (!Number.isInteger(interval) || interval < 1) {
+        return '실행 주기는 1분 이상의 정수여야 합니다.';
+      }
+    }
     return null;
   }
 
@@ -190,6 +231,15 @@ export function PoliciesPage() {
       allow_ai_analysis: form.allow_ai_analysis,
       daily_analysis_limit:
         form.daily_analysis_limit.trim() === '' ? null : Number(form.daily_analysis_limit),
+      schedule_enabled: form.schedule_enabled,
+      // 스케줄이 꺼져 있으면 주기를 비운다 — 꺼진 정책에 주기만 남아 있으면 다음에 켰을 때
+      // 예전 값으로 조용히 돌기 시작한다.
+      schedule_interval_minutes:
+        form.schedule_enabled && form.schedule_interval_minutes.trim() !== ''
+          ? Number(form.schedule_interval_minutes)
+          : null,
+      // 자동 분석은 스케줄 조회에 붙는 동작이다. 스케줄이 꺼져 있으면 켤 자리가 없다.
+      auto_analyze_new: form.schedule_enabled && form.auto_analyze_new,
     };
 
     if (isEditing) {
@@ -236,6 +286,17 @@ export function PoliciesPage() {
 
       <div className="grid gap-6 xl:grid-cols-5">
         <div className="space-y-6 xl:col-span-3">
+          {/*
+            viewer 는 정책을 만들거나 고칠 수 없다. 폼을 비활성 상태로 남겨 두면 "왜 저장이
+            안 되지"로 끝나므로, 자리 자체를 사유가 적힌 안내로 바꾼다.
+          */}
+          {!write.allowed ? (
+            <Card title="정책 생성·수정" description="읽기 전용 계정입니다.">
+              <Notice tone="neutral" title="권한 없음">
+                {write.reason} 정책의 LogQL·한도·스케줄은 아래 목록과 상세에서 볼 수 있습니다.
+              </Notice>
+            </Card>
+          ) : (
           <Card
             title={isEditing ? `정책 수정 · #${editingId}` : '새 정책'}
             description="기간·라인 수 상한은 서버가 다시 강제합니다. 여기 값은 정책의 기본값입니다."
@@ -405,6 +466,75 @@ export function PoliciesPage() {
                 />
               </div>
 
+              {/* ------------------------------------------------------ 스케줄 */}
+              <div className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-3">
+                <Checkbox
+                  label="스케줄 조회"
+                  hint="켜면 사람이 누르지 않아도 주기마다 이 정책으로 Loki 를 조회합니다. 조회 자체는 LLM 비용이 들지 않습니다."
+                  checked={form.schedule_enabled}
+                  onChange={(event) =>
+                    setForm({ ...form, schedule_enabled: event.target.checked })
+                  }
+                />
+
+                {form.schedule_enabled && (
+                  <div className="mt-3 space-y-3 border-t border-slate-200 pt-3">
+                    <Field
+                      label="실행 주기 (분)"
+                      required
+                      className="max-w-48"
+                      hint={
+                        form.schedule_interval_minutes.trim() === ''
+                          ? '비워 두면 저장할 수 없습니다.'
+                          : `${formatIntervalMinutes(Number(form.schedule_interval_minutes))}마다 실행`
+                      }
+                    >
+                      <Input
+                        type="number"
+                        min={1}
+                        value={form.schedule_interval_minutes}
+                        onChange={(event) =>
+                          setForm({ ...form, schedule_interval_minutes: event.target.value })
+                        }
+                      />
+                    </Field>
+
+                    <Checkbox
+                      label="신규 그룹 자동 분석"
+                      hint={
+                        <>
+                          <strong>{AUTO_ANALYZE_COST_NOTE}</strong> 이미 분석 이력이 있는
+                          fingerprint 는 다시 돌지 않으며, 전역·정책별 일일 분석 한도를 그대로
+                          받습니다.
+                        </>
+                      }
+                      checked={form.auto_analyze_new}
+                      disabled={!form.allow_ai_analysis}
+                      onChange={(event) =>
+                        setForm({ ...form, auto_analyze_new: event.target.checked })
+                      }
+                    />
+
+                    {form.auto_analyze_new && form.allow_ai_analysis && (
+                      <Notice tone="warning" title="비용이 나가는 자동 경로입니다">
+                        {AUTO_ANALYZE_COST_NOTE} 한도는{' '}
+                        {form.daily_analysis_limit.trim() === ''
+                          ? '전역 일일 한도'
+                          : `이 정책의 일 ${form.daily_analysis_limit}회`}
+                        가 적용됩니다. 실행된 분석은 <strong>분석 이력·사용량</strong> 화면에서{' '}
+                        <strong>자동</strong> 배지로 구분됩니다.
+                      </Notice>
+                    )}
+                    {!form.allow_ai_analysis && (
+                      <p className="text-xs text-slate-500">
+                        이 정책은 <strong>AI 분석 허용</strong>이 꺼져 있어 자동 분석을 켤 수
+                        없습니다.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
               {/*
                 비활성화는 삭제가 아니다 — 되돌릴 수 있어야 한다. 여기가 재활성 경로다
                 (Phase 4 피드백 3번). 생성 API 에는 active 필드가 없어 수정할 때만 보인다.
@@ -464,12 +594,16 @@ export function PoliciesPage() {
               )}
             </div>
           </Card>
+          )}
 
-          <PreviewPanel
-            data={preview.data}
-            error={preview.isError ? preview.error : null}
-            pending={preview.isPending}
-          />
+          {/* 미리보기도 POST 다 — viewer 에게는 누를 수 없는 카드를 띄우지 않는다. */}
+          {write.allowed && (
+            <PreviewPanel
+              data={preview.data}
+              error={preview.isError ? preview.error : null}
+              pending={preview.isPending}
+            />
+          )}
         </div>
 
         <div className="xl:col-span-2">
@@ -509,6 +643,7 @@ export function PoliciesPage() {
                             {!policy.allow_ai_analysis && (
                               <Badge tone="warning">AI 분석 불가</Badge>
                             )}
+                            <ScheduleBadge {...policySchedule(policy)} />
                           </p>
                           <p
                             className="mt-1 truncate font-mono text-xs text-slate-500"
@@ -528,6 +663,8 @@ export function PoliciesPage() {
                             수정 {formatDateTime(policy.updated_at)}
                           </p>
                         </button>
+                        {/* 쓰기 동작 묶음 — viewer 에게는 자리 자체를 감춘다. */}
+                        {write.allowed && (
                         <div className="flex shrink-0 flex-col gap-1">
                           <Button size="sm" onClick={() => startEdit(policy)}>
                             수정
@@ -554,6 +691,7 @@ export function PoliciesPage() {
                             </Button>
                           )}
                         </div>
+                        )}
                       </div>
                     </li>
                   );
@@ -566,7 +704,10 @@ export function PoliciesPage() {
 
       {selectedPolicy && (
         <div className="mt-6">
-          <PolicyDetailCard policy={selectedPolicy} onEdit={() => startEdit(selectedPolicy)} />
+          <PolicyDetailCard
+            policy={selectedPolicy}
+            onEdit={write.allowed ? () => startEdit(selectedPolicy) : null}
+          />
         </div>
       )}
     </div>
@@ -580,10 +721,12 @@ function PolicyDetailCard({
   onEdit,
 }: {
   policy: PolicyRead;
-  onEdit: () => void;
+  /** null 이면 쓰기 권한이 없다 — 수정 버튼 자체를 감춘다. */
+  onEdit: (() => void) | null;
 }) {
   const navigate = useNavigate();
   const runsQuery = usePolicyQueryRuns(policy.id);
+  const schedule = policySchedule(policy);
 
   return (
     <Card
@@ -593,13 +736,16 @@ function PolicyDetailCard({
           <span className="text-xs font-normal text-slate-400">#{policy.id}</span>
           {!policy.active && <Badge tone="neutral">비활성</Badge>}
           {!policy.allow_ai_analysis && <Badge tone="warning">AI 분석 불가</Badge>}
+          <ScheduleBadge {...schedule} />
         </span>
       }
       description={policy.description ?? '설명이 없습니다.'}
       actions={
-        <Button size="sm" onClick={onEdit}>
-          이 정책 수정
-        </Button>
+        onEdit && (
+          <Button size="sm" onClick={onEdit}>
+            이 정책 수정
+          </Button>
+        )
       }
     >
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
@@ -624,6 +770,20 @@ function PolicyDetailCard({
             <dt className="text-slate-500">제외 정규식</dt>
             <dd className="text-slate-800">
               {policy.exclusions.length === 0 ? '없음' : policy.exclusions.join(', ')}
+            </dd>
+            <dt className="text-slate-500">스케줄</dt>
+            <dd className="text-slate-800">
+              {schedule.enabled
+                ? `${formatIntervalMinutes(schedule.intervalMinutes)}마다 조회`
+                : '수동 실행만'}
+            </dd>
+            <dt className="text-slate-500">신규 그룹 자동 분석</dt>
+            <dd className="text-slate-800">
+              {schedule.enabled && schedule.autoAnalyze ? (
+                <span title={AUTO_ANALYZE_COST_NOTE}>켜짐 (처음 보는 오류·한도 내)</span>
+              ) : (
+                '꺼짐'
+              )}
             </dd>
           </dl>
         </div>
@@ -666,6 +826,7 @@ function PolicyDetailCard({
                 <thead>
                   <tr>
                     <Th>실행 시각</Th>
+                    <Th>실행 주체</Th>
                     <Th>상태</Th>
                     <Th align="right">조회 / 제외</Th>
                     <Th align="right">그룹</Th>
@@ -694,6 +855,11 @@ function PolicyDetailCard({
                         <p className="mt-0.5 text-xs text-slate-400">
                           #{run.id} · {formatRelative(run.started_at)}
                         </p>
+                      </Td>
+                      <Td>
+                        {/* 값이 없으면(백엔드 미배포) 배지 대신 `-` 다 — 수동으로 채우지 않는다. */}
+                        <TriggeredByBadge value={run.triggered_by} />
+                        {!run.triggered_by && <span className="text-xs text-slate-400">-</span>}
                       </Td>
                       <Td>
                         <QueryRunStatusBadge status={run.status} />

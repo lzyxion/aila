@@ -12,9 +12,12 @@ import type {
   AnalysisJobStatus,
   AppSettingListResponse,
   AppSettingRead,
+  AuthUser,
   ConnectionTestResponse,
   DashboardOverviewParams,
   DashboardOverviewResponse,
+  DashboardSummaryResponse,
+  LoginRequest,
   ErrorGroupDetail,
   ErrorGroupListResponse,
   LabelValuesResponse,
@@ -42,6 +45,23 @@ import type {
 } from './types';
 
 const P = '/api';
+
+// -------------------------------------------------------------------- auth
+
+/**
+ * 세션 인증. `/api/**` 는 auth 라우트와 `/health` 를 빼고 전부 인증이 필요하다.
+ *
+ * 토큰은 응답 본문에 오지 않는다 — 로그인이 성공하면 **httpOnly 세션 쿠키**(SameSite=Lax)
+ * 가 붙고 이후 요청은 브라우저가 알아서 싣는다. 자바스크립트가 읽을 수 있는 자리에
+ * 토큰을 두면 XSS 하나로 세션이 통째로 넘어간다.
+ */
+export const auth = {
+  login: (payload: LoginRequest) => api.post<AuthUser>(`${P}/auth/login`, payload),
+  /** 204 — 본문이 없다. */
+  logout: () => api.post<void>(`${P}/auth/logout`, undefined, { parse: 'void' }),
+  /** 미인증이면 401 이다. 부트스트랩 경로라 그 401 은 오류가 아니라 "로그인 안 함"이다. */
+  me: () => api.get<AuthUser>(`${P}/auth/me`),
+};
 
 // --------------------------------------------------------- loki connections
 
@@ -151,10 +171,19 @@ export const analysisJobs = {
 // ---------------------------------------------------------------- dashboard
 
 export const dashboard = {
+  /** 정책 하나의 상세 뷰 (`/dashboard/:policyId`). 추이·서비스별·상위 그룹. */
   overview: (params: DashboardOverviewParams) =>
     api.get<DashboardOverviewResponse>(`${P}/dashboard/overview`, {
       query: { ...params },
     }),
+  /**
+   * 홈의 정책 카드 그리드. 정책 하나당 한 줄 요약이라 `overview` 를 정책 수만큼
+   * 부르는 것과 다르다 — 카드에 필요한 값만 서버가 한 번에 모아 준다.
+   *
+   * 백엔드에 아직 이 경로가 없으면 호출부가 `GET /api/policies` 기반 축소 카드로
+   * 폴백한다 (`isEndpointMissing`).
+   */
+  summary: () => api.get<DashboardSummaryResponse>(`${P}/dashboard/summary`),
 };
 
 // -------------------------------------------------------------------- usage

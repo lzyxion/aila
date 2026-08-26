@@ -4,8 +4,13 @@ import { Link } from 'react-router';
 import { useAnalysisJobs, useModelPricing, useUpsertModelPricing, useUsage } from '../api/queries';
 import type { ModelPricingEntry, ModelPricingTable, UsageParams } from '../api/types';
 import { asModelPricingTable } from '../api/types';
+import { useWriteAccess } from '../auth/AuthContext';
 import { TokenByModelChart } from '../components/chartsLazy';
-import { AnalysisStatusBadge, SeverityBadge } from '../components/StatusBadges';
+import {
+  AnalysisStatusBadge,
+  SeverityBadge,
+  TriggeredByBadge,
+} from '../components/StatusBadges';
 import {
   Badge,
   Button,
@@ -48,6 +53,7 @@ const RANGES = [
 ];
 
 export function UsagePage() {
+  const write = useWriteAccess();
   const [rangeIndex, setRangeIndex] = useState(1);
 
   const params = useMemo<UsageParams>(() => {
@@ -207,10 +213,12 @@ export function UsagePage() {
                           </span>
                           {item.estimated_cost === null && (
                             <div className="mt-1 flex flex-col items-end gap-1">
+                              {/* 단가 등록은 PUT 이다 — viewer 는 누를 수 없다. */}
                               <Button
                                 size="sm"
                                 variant={open ? 'ghost' : 'secondary'}
-                                title={PRICING_TOOLTIP}
+                                disabled={!write.allowed}
+                                title={write.reason ?? PRICING_TOOLTIP}
                                 onClick={() => setPricingModel(open ? null : item.model)}
                               >
                                 {open ? '닫기' : registered ? '단가 수정' : '단가 등록'}
@@ -225,7 +233,7 @@ export function UsagePage() {
                         </Td>
                         <Td align="right">{formatDuration(item.avg_latency_ms)}</Td>
                       </tr>,
-                      open ? (
+                      open && write.allowed ? (
                         <tr key={`${item.provider}-${item.model}-pricing`}>
                           <Td colSpan={7} className="bg-slate-50">
                             <PricingForm
@@ -273,6 +281,7 @@ export function UsagePage() {
               <thead>
                 <tr>
                   <Th>요청 시각</Th>
+                  <Th>실행 주체</Th>
                   <Th>오류 그룹 · fingerprint</Th>
                   <Th>서비스 · 오류</Th>
                   <Th>모델</Th>
@@ -286,6 +295,10 @@ export function UsagePage() {
                     <Td>
                       <p>{formatDateTime(job.requested_at)}</p>
                       <p className="mt-0.5 text-xs text-slate-400">작업 #{job.id}</p>
+                    </Td>
+                    <Td>
+                      <TriggeredByBadge value={job.triggered_by} />
+                      {!job.triggered_by && <span className="text-xs text-slate-400">-</span>}
                     </Td>
                     <Td>
                       <Link

@@ -3,7 +3,12 @@
 Phase 2 담당 트랙: **분석 플로우·usage·보고서**
 
 계약상 제약:
-- 분석은 **수동 트리거**만 존재한다. 스케줄·임계치 자동 실행을 추가하지 않는다.
+- 분석 트리거는 **수동**이 기본이고, 유일한 예외가 정책의 `auto_analyze_new` 다
+  (Phase 5, 사용자 결정으로 "수동만" 원칙을 한 지점에서 완화했다). 그 경우에도
+  자동 분석은 **스케줄 실행 회차의 그룹 중 fingerprint 분석 이력이 전혀 없는 것**
+  으로 한정되고, 진입점은 이 파일의 `create_analysis_job` 하나뿐이다 —
+  `allow_ai_analysis` · 멱등(부분 유니크 인덱스) · 일일 한도(429)가 그대로 비용
+  상한으로 걸린다. **임계치 기반 자동 실행이나 재분석 자동화는 여전히 없다.**
 - 분석 시작은 **멱등**이다 — 같은 **fingerprint** 에 진행 중인 작업이 있으면 새로 만들지
   않고 기존 작업을 `reused=True` 로 돌려준다. 판정은 그룹 id 가 아니라 fingerprint 기준
   (`error_groups.latest_analysis_by_fingerprint`)이다. 그룹 id 로 판정하면 새 조회마다
@@ -32,7 +37,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.analysis import integrations, pricing
 from app.analysis.prompt import build_prompt, context_from_group
 from app.config import get_settings
-from app.enums import ACTIVE_JOB_STATUSES, AnalysisJobStatus, UsageStatus
+from app.enums import ACTIVE_JOB_STATUSES, AnalysisJobStatus, TriggeredBy, UsageStatus
 from app.error_groups.service import active_analysis_by_fingerprint, group_trend
 from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
@@ -195,6 +200,7 @@ def _job_read(db: Session, job: AnalysisJob) -> AnalysisJobRead:
         started_at=job.started_at,
         completed_at=job.completed_at,
         error_message=job.error_message,
+        triggered_by=job.triggered_by or TriggeredBy.MANUAL.value,
         result=(
             AnalysisResultSchema.model_validate(result.result_json) if result is not None else None
         ),
@@ -250,6 +256,7 @@ def list_analysis_jobs(
             completed_at=job.completed_at,
             severity=result.severity if result is not None else None,
             summary=result.summary if result is not None else None,
+            triggered_by=job.triggered_by or TriggeredBy.MANUAL.value,
             error_group_id=job.error_group_id,
             fingerprint=job.fingerprint,
             llm_connection_id=job.llm_connection_id,
@@ -400,8 +407,14 @@ def create_analysis_job(
     group_id: int,
     payload: AnalysisJobCreateRequest,
     background_tasks: BackgroundTasks | None = None,
+    *,
+    triggered_by: str = TriggeredBy.MANUAL.value,
 ) -> AnalysisJobCreateResponse:
     """분석 작업 생성 → BackgroundTasks 로 실행 예약. 상태는 GET 으로 폴링한다.
+
+    `triggered_by` 는 이력·화면 배지용이며 **어떤 검사도 건너뛰지 않는다**.
+    스케줄러의 자동 분석도 정확히 이 함수를 타므로 `allow_ai_analysis` · 멱등 ·
+    일일 한도가 동일하게 적용된다 (자동 실행에 별도 경로를 만들지 않는 이유).
 
     >>> 동시 요청 <<<
     두 사람이 같은 버튼을 동시에 누르면 "체크 -> 삽입" 사이가 경합 구간이 된다.
@@ -441,6 +454,7 @@ def create_analysis_job(
         model=connection.model,
         prompt_version=get_settings().prompt_version,
         requested_at=_now(),
+        triggered_by=triggered_by,
     )
     db.add(job)
     try:

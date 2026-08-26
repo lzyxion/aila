@@ -15,7 +15,8 @@ Loki 에 이미 쌓여 있는 애플리케이션 오류 로그를 운영자가 �
 생기면 마스킹을 먼저 완성한다.
 
 > 설계 원문: `Loki 기반 AI 로그 분석기 설계.md` (Obsidian vault)
-> MVP 에는 인증이 없다. 배포 대상은 **로컬·데모 환경으로 한정**한다.
+> `/api/**` 는 세션 쿠키 인증으로 막혀 있지만(Phase 5), 기본 계정이 `admin/admin`
+> 이고 쿠키가 `secure=false` 다. 배포 대상은 여전히 **로컬·데모 환경으로 한정**한다.
 
 ---
 
@@ -32,7 +33,18 @@ docker compose --profile app up -d --build
 
 # 2) 스키마 적용 — 기동 시 자동으로 돌리지 않는다 (스키마 변경 시점은 사람이 통제한다)
 docker compose --profile app exec backend alembic upgrade head
+
+# 3) 백엔드를 한 번 재기동한다 — 관리자 계정은 기동 시 시드된다
+#    (users 테이블이 생기기 전에 뜬 컨테이너는 시드를 건너뛰고 경고만 남긴다)
+docker compose --profile app restart backend
 ```
+
+> ⚠️ **기본 관리자 계정은 `admin` / `admin` 이다.** 저장소에 그대로 적힌 데모용
+> 값이고, 이 스택을 로컬 밖에 노출한다면 **반드시 바꾼다**. 저장소 루트 `.env` 에
+> `AILA_ADMIN_USERNAME` / `AILA_ADMIN_PASSWORD` 를 넣으면 된다(커밋 금지).
+> 이미 만들어진 계정의 비밀번호는 env 를 바꿔도 되돌아가지 **않는다** — 재기동마다
+> 기본값으로 리셋되면 운영자가 바꾼 값이 매번 사라지기 때문이다. 그 경우
+> `POST /api/auth/users` 로 새 admin 을 만들고 예전 계정을 쓰지 않으면 된다.
 
 떠 있는지 확인:
 
@@ -66,6 +78,8 @@ httpx 만 있으면 되므로 백엔드 가상환경의 python 으로 도는 게
 
 ### 3-B. UI 로 손으로 (같은 순서)
 
+0. **로그인** — `admin` / `admin` (위 경고 참고). 세션이 없으면 화면은 `/login` 으로
+   돌아간다(백엔드가 `/api/**` 에 401 을 주고 프런트가 그것을 가로챈다).
 1. **LLM 연결** 화면 → 새 연결
    `provider=OpenAI 호환`, `model=llm-mock-1`, `base URL=http://llm-mock:8000/v1`,
    `기본 연결로 지정` 체크 → **연결 테스트** → 저장.
@@ -120,8 +134,10 @@ aila/
     │   ├── versions/0001_initial_schema.py   # [freeze] models.py 와 1:1
     │   ├── versions/0002_active_job_guard_and_settings_seed.py
     │   │                         #   진행 중 분석 작업 부분 유니크 인덱스 + 설정 기본값 시드
-    │   └── versions/0003_timezone_setting.py
-    │                             #   app_settings 예약 키 timezone 시드 (스키마 변경 없음)
+    │   ├── versions/0003_timezone_setting.py
+    │   │                         #   app_settings 예약 키 timezone 시드 (스키마 변경 없음)
+    │   └── versions/0004_auth_and_scheduling.py
+    │                             #   users·user_sessions + 정책 스케줄 필드 + triggered_by
     ├── app/
     │   ├── main.py               # [freeze] 라우터 include 지점
     │   ├── config.py             # [freeze] AILA_* 환경변수
@@ -142,7 +158,11 @@ aila/
     │   ├── policies/router.py        # /api/policies, /api/query-runs
     │   ├── error_groups/router.py    # /api/query-runs/{id}/error-groups, /api/error-groups
     │   ├── analysis/router.py        # /api/analysis-jobs (+ report)
-    │   ├── dashboard/router.py       # /api/dashboard/overview
+    │   ├── dashboard/router.py       # /api/dashboard/overview (정책 상세)
+    │   │                             #   + /api/dashboard/summary (정책 전체 요약)
+    │   ├── auth/                     # /api/auth/login|logout|me|users
+    │   │                             #   passwords(scrypt) · service(세션) · dependencies(전역 보호)
+    │   ├── scheduler/                # 60 초 tick — 정책 주기 실행 + 신규 fingerprint 자동 분석
     │   ├── usage/router.py           # /api/usage
     │   ├── app_settings/router.py    # /api/settings (예약 4 종 화이트리스트)
     │   │                             #   + /api/maintenance/purge-samples (policies/router.py)
@@ -222,7 +242,13 @@ python -m venv .venv
 - 건수·추이는 로그 라인을 세지 않고 `count_over_time` metric 쿼리로 구한다.
 - 분석 상태 표시·중복 판정은 그룹 id 가 아니라 **fingerprint 기준**이다.
 - LLM 응답 Pydantic 검증은 **어댑터 밖 공통 경로에서 한 번만** 한다.
-- 분석은 수동 트리거만 존재한다. 자동 실행을 추가하지 않는다.
+- 분석 트리거는 **수동이 기본**이고, 유일한 예외가 정책의 `auto_analyze_new` 다
+  (Phase 5). 그 경우에도 대상은 **fingerprint 분석 이력이 전혀 없는 그룹**뿐이고,
+  진입점은 수동과 같은 `create_analysis_job` 하나라 `allow_ai_analysis`·멱등·일일
+  한도가 그대로 상한이 된다. 임계치 기반 자동 실행·자동 재분석은 추가하지 않는다.
+- `/api/**` 는 **전부 인증이 필요하다**(로그인·로그아웃·`/health` 제외). 라우터마다
+  의존성을 붙이지 않고 앱 전역 의존성 한 곳에서 강제한다 — 기본값이 "닫힘"이어야
+  새 라우터가 조용히 열리지 않는다. `viewer` 는 GET 만 할 수 있다.
 - `estimated_cost` 는 추정이다. 화면에서 "추정" 표기를 유지한다.
   단가표에 모델이 없으면 값은 **`null` 이며 0 이 아니다** — 0 으로 적으면 "쌌다"로 읽힌다.
   항목 전부가 `null` 이면 합계(`total_estimated_cost`)도 `null` 이고, 화면은 `-` 로 쓴다.
@@ -241,3 +267,105 @@ python -m venv .venv
   `AILA_MAX_QUERY_RANGE_MINUTES` 중 작은 쪽)으로 **clamp** 한다. 422 로 튕기지 않고
   조용히 줄이지도 않는다 — 조정 사실은 `query_runs.warnings` 에 `range_clamped` 로 남는다.
   더 넓은 기간을 조회하려면 정책의 값을 올려야 한다.
+
+---
+
+## 인증 (Phase 5)
+
+`/api/**` 는 세션 쿠키 인증이 필요하다. 예외는 로그인·로그아웃과 `/api` 밖의 경로
+(`/health`, `/docs`, `/openapi.json`)뿐이다. **문서(`/docs`)는 로컬 편의상 열어 둔다.**
+
+| 라우트 | 계약 |
+| --- | --- |
+| `POST /api/auth/login` | `{username, password}` → `200 {username, role}` + httpOnly 세션 쿠키 / 실패 `401` |
+| `POST /api/auth/logout` | `204` — **서버의 세션 행을 지운다**(쿠키 삭제만이 아니다) |
+| `GET /api/auth/me` | `200 {username, role}` / 미인증 `401` |
+| `POST /api/auth/users` | `{username, password, role}` → `201 {username, role}` (admin 전용) |
+
+- `role` 은 `admin` | `viewer` 다. **viewer 는 GET 만** 할 수 있고 그 외 메서드는
+  `403 {detail}` 이다. 미인증은 `401 {detail}` 이며, 프런트는 401 을 가로채 `/login`
+  으로 보낸다.
+- 쿠키는 `httpOnly` + `SameSite=Lax` 다. JS 가 읽을 수 없고, 타 사이트에서 시작된
+  POST 에 쿠키가 실리지 않는다. HTTPS 뒤에 둘 때는 `AILA_SESSION_COOKIE_SECURE=true`.
+- 세션 수명은 기본 12 시간(`AILA_SESSION_TTL_HOURS`). 만료된 세션은 요청 시점에
+  거절되고 행이 지워진다.
+- 비밀번호는 stdlib `hashlib.scrypt` 로 salt 와 함께 해시한다(새 의존성 없음).
+  저장 형식은 `scrypt$n$r$p$salt$hash` 로 파라미터를 값 안에 담아, 나중에 비용을
+  올려도 기존 계정이 그대로 로그인된다.
+- 쿠키 토큰의 **SHA-256 해시만** DB(`user_sessions`)에 저장한다 — 테이블을 읽어도
+  유효한 쿠키를 만들 수 없다.
+
+> ⚠️ **기본 관리자 계정은 `admin` / `admin`** (`AILA_ADMIN_USERNAME` /
+> `AILA_ADMIN_PASSWORD`). 앱 기동 시 해당 계정이 없으면 만들어진다. 이미 있으면
+> **아무것도 하지 않는다** — 재기동마다 env 값으로 되돌리면 운영자가 바꾼 비밀번호가
+> 매번 사라지기 때문이다. 로컬 밖에 노출한다면 반드시 교체한다.
+
+viewer 계정 만들기:
+
+```powershell
+curl.exe -c admin.jar -X POST http://localhost:8000/api/auth/login `
+  -H "Content-Type: application/json" -d '{\"username\":\"admin\",\"password\":\"admin\"}'
+curl.exe -b admin.jar -X POST http://localhost:8000/api/auth/users `
+  -H "Content-Type: application/json" -d '{\"username\":\"watcher\",\"password\":\"...\",\"role\":\"viewer\"}'
+```
+
+---
+
+## 스케줄러 (Phase 5)
+
+정책에 세 필드가 붙었다 (`analysis_policies`, revision 0004).
+
+| 필드 | 뜻 |
+| --- | --- |
+| `schedule_enabled` | 주기 실행 켜기. 켜면 `schedule_interval_minutes` 가 **필수**(없으면 422) |
+| `schedule_interval_minutes` | 실행 주기(분) |
+| `auto_analyze_new` | 실행 직후 **신규 fingerprint 만** 자동 분석 |
+
+- 백엔드 lifespan 이 60 초 주기(`AILA_SCHEDULER_TICK_SECONDS`)로 tick 을 돈다.
+  due 판정은 **마지막 `query_run` 의 `started_at` 이후 interval 경과** 다 —
+  수동 실행도 같은 테이블에 남으므로, 방금 손으로 돌린 정책은 한 주기 미뤄진다.
+  실패한 회차도 "돌았다"로 친다(`finished_at` 이 아니라 `started_at` 기준인 이유).
+- 스케줄이 만든 행은 `query_runs.triggered_by` / `analysis_jobs.triggered_by` 가
+  `"schedule"` 이다(수동은 `"manual"`). 이력·화면 배지용이며 **동작을 분기하지 않는다** —
+  분기가 생기는 순간 "스케줄 실행만 한도를 안 탄다" 같은 구멍이 열린다.
+- `auto_analyze_new` 의 대상은 그 회차 그룹 중 **fingerprint 분석 이력이 전혀 없는
+  것**뿐이다. 실패한 분석도 "이력 있음"으로 친다 — 실패를 미분석으로 세면 같은 실패를
+  매 회차 다시 태운다. 진입점은 수동과 같은 `create_analysis_job` 이라
+  `allow_ai_analysis`·멱등·일일 한도(429)가 그대로 비용 상한이다. 한도 초과·LLM
+  연결 부재는 예외 없이 **스킵**하고 tick 로그로만 남긴다.
+- **단일 uvicorn 워커 전제다.** 겹침 방지가 in-process 락이라, 워커를 늘리면 같은
+  정책이 동시에 두 번 돌 수 있다(겉으로는 정상 동작처럼 보인다). 끄려면
+  `AILA_SCHEDULER_ENABLED=false`.
+
+---
+
+## 통합 대시보드 (Phase 5)
+
+`GET /api/dashboard/summary` 는 **정책 전체**를 한 줄씩 준다 (첫 화면).
+정책 하나의 추이·상위 그룹은 기존 `GET /api/dashboard/overview` 가 그대로 담당한다.
+
+```jsonc
+{
+  "generated_at": "...",
+  "policies": [{
+    "policy_id": 1, "name": "...", "active": true,
+    "schedule_enabled": true, "schedule_interval_minutes": 30,
+    "last_run": {"id": 12, "started_at": "...", "status": "succeeded",
+                 "fetched_count": 263, "group_count": 3, "warnings": [...]},
+    "unanalyzed_group_count": 2,   // 최근 성공 run 의 그룹 중 분석 이력이 없는 수
+    "total_errors_24h": 1596.0,    // count_over_time 최근 24h. 실패하면 null
+    "warnings": [{"code": "count_query_failed", "message": "..."}]
+  }]
+}
+```
+
+- `total_errors_24h` 는 실패 시 **0 이 아니라 `null`** 이다 (0 은 "오류가 없었다"로
+  읽힌다). 사유는 `warnings` 의 코드로 남는다 — `policy_inactive`,
+  `connection_unavailable`, `count_unsupported`, `count_query_failed`,
+  `count_query_timeout`.
+- 정책 수만큼 Loki 호출이 나가므로 **정책별 타임아웃 + 실패 격리**가 걸려 있다.
+  한 정책의 Loki 가 죽어도 나머지 줄은 그대로 나온다.
+- `unanalyzed_group_count` 는 **최근 성공 회차**의 그룹을 fingerprint 로 LEFT JOIN 해
+  센다(그룹 id 기준이 아니다 — id 는 회차마다 새로 생긴다). 성공 회차가 없으면 0 이고
+  `no_successful_run` 경고가 붙는다.
+- 비활성 정책도 목록에서 빼지 않는다 — 빼면 "지웠나?"와 구분되지 않는다.

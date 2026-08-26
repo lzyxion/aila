@@ -35,6 +35,10 @@ include = ["app*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    # 기본 admin 세션(conftest._default_admin_session)에서 빠져나와 실제 인증 경로를 탄다.
+    "real_auth: 인증·권한 자체를 검증하는 테스트 (쿠키·401·403·만료)",
+]
 
 [tool.ruff]
 line-length = 100

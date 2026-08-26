@@ -6,7 +6,7 @@
 MVP 성공 기준은 "Docker Compose 만으로 데모 환경과 장애 시나리오를 재현할 수 있다"이다.
 이 스크립트는 그 문장을 **실행 가능한 단언**으로 바꾼 것이다.
 
-    연결 등록 → 시나리오 트리거 → 정책 조회 → 그룹화 → 마스킹 → LLM 분석 → 보고서
+    로그인 → 연결 등록 → 시나리오 트리거 → 정책 조회 → 그룹화 → 마스킹 → LLM 분석 → 보고서
 
 중에서 되돌릴 수 없는 위험 하나(민감정보 유출)는 두 지점에서 따로 단언한다.
 
@@ -27,6 +27,10 @@ MVP 성공 기준은 "Docker Compose 만으로 데모 환경과 장애 시나리
 
 httpx 만 있으면 되므로 백엔드 가상환경의 python 으로 돌리는 게 가장 간단하다.
 (다른 python 을 쓰려면 `pip install httpx`.)
+
+Phase 5 부터 `/api/**` 는 세션 쿠키 인증이 필요하다 — 사전 점검 단계에서 먼저
+로그인한다 (기본 `admin/admin`, 바꿨으면 `--username/--password`).
+llm-mock·Loki·demo-api 는 인증 대상이 아니다.
 
 멱등하다 — 같은 이름의 연결·정책이 있으면 새로 만들지 않고 재사용한다. 몇 번을 다시
 돌려도 된다. 다만 분석은 **매번 실제 호출**이므로 일일 분석 한도를 소모한다.
@@ -75,6 +79,9 @@ DEFAULT_LLM_DEBUG = "http://localhost:8090"
 DEFAULT_LOKI_URL = "http://loki:3100"
 DEFAULT_LLM_BASE_URL = "http://llm-mock:8000/v1"
 DEFAULT_LLM_MODEL = "llm-mock-1"
+#: Phase 5 부터 `/api/**` 는 세션 쿠키 인증이 필요하다. compose 기본 관리자 계정.
+DEFAULT_USERNAME = "admin"
+DEFAULT_PASSWORD = "admin"
 
 LOKI_CONNECTION_NAME = "demo-loki"
 LLM_CONNECTION_NAME = "demo-llm-mock"
@@ -229,6 +236,12 @@ class Api:
     def patch(self, path: str, body: Any = None, **kwargs: Any) -> Any:
         return self.request("PATCH", path, json=body, **kwargs).json()
 
+    def login(self, username: str, password: str) -> dict:
+        """세션 쿠키를 받아 이후 요청에 자동으로 싣는다 (`httpx.Client` 가 보관한다)."""
+        return self.post(
+            "/api/auth/login", {"username": username, "password": password}, expect=(200,)
+        )
+
 
 def wait_for(
     label: str, probe: Any, *, timeout: float = 60.0, interval: float = 2.0
@@ -275,6 +288,22 @@ def step_preflight(api: Api, args: argparse.Namespace) -> None:
         # 감사 대상을 이번 실행분으로 한정한다 (재실행 시 이전 프롬프트가 섞이지 않게).
         cleared = client.post(f"{args.llm_debug}/debug/reset").json()
         info(f"llm-mock 요청 이력 초기화: {cleared}")
+
+    # Phase 5: `/api/**` 는 세션 쿠키 인증이 필요하다. 로그인부터 한다.
+    # (llm-mock·Loki·demo-api 는 인증 대상이 아니라 위 검사에는 로그인이 필요 없다.)
+    try:
+        me = api.login(args.username, args.password)
+    except Fail as exc:
+        raise Fail(
+            "로그인에 실패했습니다. 관리자 계정을 확인하십시오 "
+            "(compose 기본값 admin/admin, env AILA_ADMIN_USERNAME/AILA_ADMIN_PASSWORD).\n"
+            "      users 테이블이 없다면 마이그레이션이 먼저입니다:\n"
+            "      docker compose --profile app exec backend alembic upgrade head\n"
+            f"      원인: {exc}"
+        ) from exc
+    check(me.get("role") == "admin", f"로그인 성공: {me}")
+    if args.username == DEFAULT_USERNAME and args.password == DEFAULT_PASSWORD:
+        info("기본 관리자 계정(admin/admin)으로 로그인했습니다 — 데모 밖에서는 반드시 교체하십시오.")
 
     # 마이그레이션이 안 돌았으면 여기서 명확히 죽는 편이 낫다.
     try:
@@ -718,6 +747,21 @@ def step_report_usage_dashboard(
     ]
     info(f"상위 그룹 중 분석 상태가 붙은 것 {len(analyzed)} 건 (fingerprint 기준 조인)")
 
+    # Phase 5 통합 대시보드 — 정책 전체를 한 줄씩. 정책 하나의 metric 실패가
+    # 나머지 줄을 죽이지 않는지도 여기서 함께 확인된다 (실패 시 total_errors_24h=null).
+    summary = api.get("/api/dashboard/summary")
+    row = next(
+        (item for item in summary["policies"] if item["policy_id"] == policy["id"]), None
+    )
+    check(row is not None, f"통합 대시보드에 정책 {len(summary['policies'])} 건", detail=_short(summary))
+    check(
+        row["last_run"] is not None,
+        f"정책 '{row['name']}': last_run={row['last_run'] and row['last_run']['status']} "
+        f"미분석 그룹={row['unanalyzed_group_count']} "
+        f"24h 오류={row['total_errors_24h']} 스케줄={row['schedule_enabled']}",
+        detail=_short(row),
+    )
+
 
 # ------------------------------------------------------------------- 진입점
 
@@ -740,6 +784,12 @@ def main() -> int:
         help="백엔드가 보는 llm-mock OpenAI 호환 엔드포인트",
     )
     parser.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    parser.add_argument(
+        "--username", default=DEFAULT_USERNAME, help="백엔드 로그인 계정 (기본 admin)"
+    )
+    parser.add_argument(
+        "--password", default=DEFAULT_PASSWORD, help="백엔드 로그인 비밀번호 (기본 admin)"
+    )
     args = parser.parse_args()
 
     print("=" * 72)

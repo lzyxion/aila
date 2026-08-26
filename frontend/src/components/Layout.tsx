@@ -1,7 +1,9 @@
 import { NavLink, Outlet } from 'react-router';
 
 import { USE_MOCK } from '../api/client';
-import { cx } from './ui';
+import { useAuth } from '../auth/AuthContext';
+import { RoleBadge } from './StatusBadges';
+import { Button, cx } from './ui';
 
 const NAV = [
   { to: '/', label: '대시보드', end: true },
@@ -11,6 +13,8 @@ const NAV = [
 ];
 
 export function Layout() {
+  const { status, user, logout, logoutPending } = useAuth();
+
   return (
     <div className="min-h-screen bg-slate-100">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
@@ -50,6 +54,29 @@ export function Layout() {
               MOCK 데이터
             </span>
           )}
+
+          {/*
+            인증 미배포(백엔드에 /api/auth 가 없음)는 실패가 아니라 폴백 상태다.
+            그렇다고 조용히 넘어가면 "로그인 없이 쓰는 중"이라는 사실이 화면에서 사라진다.
+          */}
+          {status === 'disabled' && (
+            <span
+              className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200 ring-inset"
+              title="백엔드에 /api/auth 경로가 아직 없습니다. 인증 없이 동작하는 중이며 로컬·데모 환경 전용입니다."
+            >
+              인증 미배포
+            </span>
+          )}
+
+          {user && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-800">{user.username}</span>
+              <RoleBadge role={user.role} />
+              <Button size="sm" variant="ghost" disabled={logoutPending} onClick={logout}>
+                {logoutPending ? '로그아웃 중…' : '로그아웃'}
+              </Button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -64,7 +91,9 @@ export function Layout() {
         </p>
         <p className="mt-1">
           LLM 분석 결과는 <strong>원인 가설</strong>이고 비용은 <strong>추정</strong>값입니다.
-          MVP 에는 인증이 없으므로 로컬·데모 환경에서만 사용하십시오.
+          {status === 'disabled'
+            ? ' 이 백엔드에는 인증이 없으므로 로컬·데모 환경에서만 사용하십시오.'
+            : ' 권한 판정은 서버가 합니다 — 화면의 버튼 상태는 편의일 뿐입니다.'}
         </p>
       </footer>
     </div>

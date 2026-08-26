@@ -30,6 +30,20 @@ class LLMProviderName(StrEnum):
     OPENAI_COMPATIBLE = "openai_compatible"
 
 
+class UserRole(StrEnum):
+    """계정 권한. `viewer` 는 GET 만, `admin` 은 전부 허용한다 (Phase 5)."""
+
+    ADMIN = "admin"
+    VIEWER = "viewer"
+
+
+class TriggeredBy(StrEnum):
+    """실행을 시작한 주체. 이력·화면 배지용이며 동작을 분기하지 않는다 (Phase 5)."""
+
+    MANUAL = "manual"
+    SCHEDULE = "schedule"
+
+
 class QueryRunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"

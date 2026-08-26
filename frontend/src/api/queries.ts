@@ -10,6 +10,7 @@ import {
 
 import {
   analysisJobs,
+  auth,
   dashboard,
   errorGroups,
   llmConnections,
@@ -22,7 +23,9 @@ import {
 import type {
   AnalysisJobCreateRequest,
   AnalysisJobRead,
+  AuthUser,
   DashboardOverviewParams,
+  LoginRequest,
   LLMConnectionCreate,
   LLMConnectionUpdate,
   LLMModelListRequest,
@@ -39,6 +42,7 @@ import type {
 import { asModelPricingTable, isActiveJobStatus, SETTING_MODEL_PRICING } from './types';
 
 export const queryKeys = {
+  authMe: ['auth', 'me'] as const,
   lokiConnections: ['loki-connections'] as const,
   lokiLabels: (id: number) => ['loki-connections', id, 'labels'] as const,
   llmConnections: ['llm-connections'] as const,
@@ -52,10 +56,50 @@ export const queryKeys = {
   analysisJobs: ['analysis-jobs'] as const,
   analysisJob: (id: number) => ['analysis-jobs', id] as const,
   dashboard: (params: DashboardOverviewParams) => ['dashboard', 'overview', params] as const,
+  dashboardSummary: ['dashboard', 'summary'] as const,
   usage: (params: UsageParams) => ['usage', params] as const,
   settings: ['settings'] as const,
   setting: (key: string) => ['settings', key] as const,
 };
+
+// ---------------------------------------------------------------------- auth
+
+/**
+ * 세션 부트스트랩. 401(미로그인)·404(인증 미배포) 둘 다 **정상 경로**이므로
+ * 재시도하지 않는다 — 그 구분은 `AuthProvider` 가 한다.
+ */
+export function useAuthMe() {
+  return useQuery<AuthUser>({
+    queryKey: queryKeys.authMe,
+    queryFn: () => auth.me(),
+    retry: false,
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useLogin() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: LoginRequest) => auth.login(payload),
+    onSuccess: (user) => {
+      client.setQueryData(queryKeys.authMe, user);
+      // 로그인 전 401 로 비어 있던 캐시를 전부 다시 읽는다.
+      client.invalidateQueries();
+    },
+  });
+}
+
+export function useLogout() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => auth.logout(),
+    onSuccess: () => {
+      // 다른 계정으로 다시 들어올 수 있다 — 이전 세션이 본 데이터를 남기지 않는다.
+      client.clear();
+    },
+  });
+}
 
 // --------------------------------------------------------------- connections
 
@@ -309,6 +353,20 @@ export function useDashboardOverview(params: DashboardOverviewParams) {
   return useQuery({
     queryKey: queryKeys.dashboard(params),
     queryFn: () => dashboard.overview(params),
+  });
+}
+
+/**
+ * 홈의 정책 카드 그리드.
+ *
+ * 백엔드에 아직 경로가 없을 수 있으므로(404/405/501) 재시도하지 않는다 —
+ * 화면이 `GET /api/policies` 기반 축소 카드로 폴백한다.
+ */
+export function useDashboardSummary() {
+  return useQuery({
+    queryKey: queryKeys.dashboardSummary,
+    queryFn: () => dashboard.summary(),
+    retry: false,
   });
 }
 

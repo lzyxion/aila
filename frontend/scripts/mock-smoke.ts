@@ -4,23 +4,27 @@
  *   npx vite build --ssr scripts/mock-smoke.ts --outDir <out>
  *   node <out>/mock-smoke.js
  *
- * 확인 대상: 라우팅, 분석 작업의 pending -> running -> succeeded 전이,
- * 멱등 재사용, fingerprint 기준 분석 상태, 보고서 렌더링.
+ * 확인 대상: 인증·역할, 라우팅, 분석 작업의 pending -> running -> succeeded 전이,
+ * 멱등 재사용, fingerprint 기준 분석 상태, 스케줄 필드, 통합 대시보드 요약, 보고서 렌더링.
  */
 
 import { ApiError } from '../src/api/client';
 import { mockRequest } from '../src/api/mock/handler';
 import type {
   AnalysisJobCreateResponse,
+  AnalysisJobListResponse,
   AnalysisJobRead,
   AppSettingRead,
+  AuthUser,
   DashboardOverviewResponse,
+  DashboardSummaryResponse,
   ErrorGroupDetail,
   ErrorGroupListResponse,
   LLMModelListResponse,
   PolicyPreviewResponse,
   PolicyRead,
   QueryRunListResponse,
+  QueryRunRead,
   UsageResponse,
 } from '../src/api/types';
 import { asModelPricingTable } from '../src/api/types';
@@ -46,7 +50,242 @@ async function expectStatus(call: () => Promise<unknown>, status: number): Promi
   }
 }
 
+/** admin 세션으로 되돌린다 — viewer 시나리오 뒤에 나머지 단언이 이어지므로. */
+async function loginAsAdmin(): Promise<void> {
+  await mockRequest<AuthUser>('POST', '/api/auth/login', {
+    body: { username: 'admin', password: 'admin' },
+  });
+}
+
 async function main(): Promise<void> {
+  console.log('auth (계약 — 세션·역할)');
+  // 로그인 전에는 데이터 경로가 전부 401 이다. 화면은 이 401 을 가로채 /login 으로 간다.
+  check(
+    '미인증 요청은 401',
+    await expectStatus(() => mockRequest('GET', '/api/policies', {}), 401),
+  );
+  check(
+    '미인증이면 /api/auth/me 도 401',
+    await expectStatus(() => mockRequest('GET', '/api/auth/me', {}), 401),
+  );
+  check(
+    '잘못된 자격 증명은 401',
+    await expectStatus(
+      () =>
+        mockRequest('POST', '/api/auth/login', {
+          body: { username: 'admin', password: 'wrong' },
+        }),
+      401,
+    ),
+  );
+
+  const admin = await mockRequest<AuthUser>('POST', '/api/auth/login', {
+    body: { username: 'admin', password: 'admin' },
+  });
+  check('로그인 응답 {username, role}', admin.username === 'admin' && admin.role === 'admin');
+  const me = await mockRequest<AuthUser>('GET', '/api/auth/me', {});
+  check('로그인 후 me 가 200', me.username === 'admin' && me.role === 'admin');
+  check(
+    '로그인 후 데이터 경로가 열린다',
+    (await mockRequest<PolicyRead[]>('GET', '/api/policies', {})).length > 0,
+  );
+
+  // viewer 는 GET 만 — 판정은 서버(여기서는 mock)가 한다. 화면이 버튼을 감추는 것은 편의다.
+  const viewer = await mockRequest<AuthUser>('POST', '/api/auth/login', {
+    body: { username: 'viewer', password: 'viewer' },
+  });
+  check('viewer 계정의 role', viewer.role === 'viewer');
+  check(
+    'viewer 의 GET 은 통과',
+    (await mockRequest<PolicyRead[]>('GET', '/api/policies', {})).length > 0,
+  );
+  check(
+    'viewer 의 정책 생성은 403',
+    await expectStatus(
+      () =>
+        mockRequest('POST', '/api/policies', {
+          body: {
+            loki_connection_id: 1,
+            name: 'viewer-should-fail',
+            logql: '{service="payment-api"}',
+            default_range_minutes: 30,
+            max_lines: 100,
+            exclusions: [],
+            max_samples_per_group: 2,
+            allow_ai_analysis: true,
+            daily_analysis_limit: null,
+          },
+        }),
+      403,
+    ),
+  );
+  check(
+    'viewer 의 정책 실행(POST query-run)은 403',
+    await expectStatus(() => mockRequest('POST', '/api/policies/1/query-runs', { body: {} }), 403),
+  );
+  check(
+    'viewer 의 AI 분석 실행은 403',
+    await expectStatus(
+      () => mockRequest('POST', '/api/error-groups/103/analysis-jobs', { body: {} }),
+      403,
+    ),
+  );
+  check(
+    'viewer 의 설정 변경(PUT)은 403',
+    await expectStatus(
+      () => mockRequest('PUT', '/api/settings/daily_analysis_limit', { body: { value: 10 } }),
+      403,
+    ),
+  );
+  check(
+    'viewer 의 비활성화(DELETE)는 403',
+    await expectStatus(() => mockRequest('DELETE', '/api/policies/2', {}), 403),
+  );
+
+  await mockRequest<void>('POST', '/api/auth/logout', {});
+  check(
+    '로그아웃하면 다시 401',
+    await expectStatus(() => mockRequest('GET', '/api/policies', {}), 401),
+  );
+  await loginAsAdmin();
+
+  console.log('dashboard summary (계약 3 — 통합 대시보드)');
+  const summary = await mockRequest<DashboardSummaryResponse>(
+    'GET',
+    '/api/dashboard/summary',
+    {},
+  );
+  check('generated_at 존재', typeof summary.generated_at === 'string');
+  check('정책 카드가 정책 수만큼', summary.policies.length === 3);
+  check(
+    '카드 모양이 계약대로',
+    summary.policies.every(
+      (policy) =>
+        typeof policy.policy_id === 'number' &&
+        typeof policy.name === 'string' &&
+        typeof policy.active === 'boolean' &&
+        typeof policy.schedule_enabled === 'boolean' &&
+        (policy.schedule_interval_minutes === null ||
+          typeof policy.schedule_interval_minutes === 'number') &&
+        typeof policy.unanalyzed_group_count === 'number' &&
+        Array.isArray(policy.warnings),
+    ),
+  );
+  check(
+    'last_run 은 {id, started_at, status, fetched_count, group_count, warnings} 또는 null',
+    summary.policies.every(
+      (policy) =>
+        policy.last_run === null ||
+        (typeof policy.last_run.id === 'number' &&
+          typeof policy.last_run.started_at === 'string' &&
+          typeof policy.last_run.status === 'string' &&
+          typeof policy.last_run.fetched_count === 'number' &&
+          typeof policy.last_run.group_count === 'number' &&
+          Array.isArray(policy.last_run.warnings)),
+    ),
+  );
+  // metric 실패는 0 이 아니라 null 이다 — 화면이 `-` 로 그리는 경로.
+  check(
+    'metric 실패 정책의 total_errors_24h 는 null',
+    summary.policies.some((policy) => policy.total_errors_24h === null),
+  );
+  check(
+    '나머지 정책의 24h 건수는 숫자',
+    summary.policies.some((policy) => typeof policy.total_errors_24h === 'number'),
+  );
+  check(
+    '미분석 신규 그룹 수가 0 보다 큰 정책이 있다',
+    summary.policies.some((policy) => policy.unanalyzed_group_count > 0),
+  );
+  check(
+    '경고는 {code, message} 형식',
+    summary.policies
+      .flatMap((policy) => policy.warnings)
+      .every((warning) => typeof warning.code === 'string' && typeof warning.message === 'string'),
+  );
+  check(
+    '기존 overview 는 그대로 남아 있다 (정책 상세 뷰용)',
+    (await mockRequest<DashboardOverviewResponse>('GET', '/api/dashboard/overview', {}))
+      .series.length > 0,
+  );
+
+  console.log('스케줄 필드 (계약 — 0004)');
+  const scheduled = await mockRequest<PolicyRead[]>('GET', '/api/policies', {});
+  check(
+    '정책에 스케줄 3 필드가 있다',
+    scheduled.every(
+      (policy) =>
+        typeof policy.schedule_enabled === 'boolean' &&
+        typeof policy.auto_analyze_new === 'boolean' &&
+        (policy.schedule_interval_minutes === null ||
+          typeof policy.schedule_interval_minutes === 'number'),
+    ),
+  );
+  check(
+    '스케줄 + 자동 분석이 켜진 정책이 있다',
+    scheduled.some((policy) => policy.schedule_enabled && policy.auto_analyze_new),
+  );
+  const withSchedule = await mockRequest<PolicyRead>('POST', '/api/policies', {
+    body: {
+      loki_connection_id: 1,
+      name: 'smoke-schedule',
+      logql: '{service="payment-api"}',
+      default_range_minutes: 30,
+      max_lines: 100,
+      exclusions: [],
+      max_samples_per_group: 2,
+      allow_ai_analysis: true,
+      daily_analysis_limit: null,
+      schedule_enabled: true,
+      schedule_interval_minutes: 15,
+      auto_analyze_new: true,
+    },
+  });
+  check(
+    '스케줄을 켜서 저장하면 그대로 남는다',
+    withSchedule.schedule_enabled === true &&
+      withSchedule.schedule_interval_minutes === 15 &&
+      withSchedule.auto_analyze_new === true,
+  );
+  // 스케줄을 끄면 주기·자동 분석도 함께 내려가야 한다 — 다음에 켰을 때 예전 값으로
+  // 조용히 돌기 시작하는 것을 막는 규칙이다.
+  const scheduleOff = await mockRequest<PolicyRead>('PATCH', `/api/policies/${withSchedule.id}`, {
+    body: { schedule_enabled: false },
+  });
+  check(
+    '스케줄을 끄면 주기·자동 분석도 내려간다',
+    scheduleOff.schedule_interval_minutes === null && scheduleOff.auto_analyze_new === false,
+  );
+  await mockRequest<void>('DELETE', `/api/policies/${withSchedule.id}`, {});
+
+  console.log('triggered_by 배지 (수동/자동)');
+  const historyRuns = await mockRequest<QueryRunListResponse>(
+    'GET',
+    '/api/policies/1/query-runs',
+    {},
+  );
+  check(
+    '실행 이력에 triggered_by 가 있다',
+    historyRuns.items.every(
+      (run) => run.triggered_by === 'manual' || run.triggered_by === 'schedule',
+    ),
+  );
+  check(
+    '수동·자동 실행이 모두 있다',
+    historyRuns.items.some((run) => run.triggered_by === 'schedule') &&
+      historyRuns.items.some((run) => run.triggered_by === 'manual'),
+  );
+  const manualRun = await mockRequest<QueryRunRead>('POST', '/api/policies/1/query-runs', {
+    body: {},
+  });
+  check('화면에서 누른 실행은 manual', manualRun.triggered_by === 'manual');
+  const jobList = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {});
+  check(
+    '분석 이력에도 triggered_by 가 실린다',
+    jobList.items.some((job) => job.triggered_by === 'schedule') &&
+      jobList.items.some((job) => job.triggered_by === 'manual'),
+  );
+
   console.log('dashboard');
   const overview = await mockRequest<DashboardOverviewResponse>('GET', '/api/dashboard/overview', {
     query: { step_seconds: 300, top: 10 },

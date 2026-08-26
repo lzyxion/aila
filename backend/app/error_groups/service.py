@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.analysis.report import selector_from_labels
-from app.enums import ACTIVE_JOB_STATUSES
+from app.enums import ACTIVE_JOB_STATUSES, TriggeredBy
 from app.models import (
     AnalysisJob,
     AnalysisPolicy,
@@ -189,6 +189,7 @@ def analysis_history(db: Session, fingerprint: str) -> list[AnalysisJobSummary]:
             completed_at=job.completed_at,
             severity=result.severity if result is not None else None,
             summary=result.summary if result is not None else None,
+            triggered_by=job.triggered_by or TriggeredBy.MANUAL.value,
         )
         for job, result in rows
     ]

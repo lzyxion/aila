@@ -5,6 +5,7 @@ import { BrowserRouter } from 'react-router';
 
 import { App } from './App';
 import { ApiError } from './api/client';
+import { AuthProvider } from './auth/AuthContext';
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -28,7 +29,10 @@ createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        {/* AuthProvider 는 라우터 안에 있어야 한다 — 401 인터셉트가 navigate 를 쓴다. */}
+        <AuthProvider>
+          <App />
+        </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,

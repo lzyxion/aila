@@ -55,6 +55,43 @@ export function isEndpointMissing(error: unknown): boolean {
   );
 }
 
+/** 미인증 (세션이 없거나 만료). 화면은 이 경우 /login 으로 보낸다. */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
+
+/**
+ * 권한 부족. `viewer` 계정이 GET 이 아닌 요청을 보냈을 때 서버가 준다.
+ *
+ * **판정은 서버가 한다.** 화면이 쓰기 버튼을 감추는 것은 편의이고, 여기 잡히는 403 은
+ * 그 편의를 우회했을 때의 진짜 방어선이다 — 오류로 그대로 보여준다.
+ */
+export function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403;
+}
+
+// ------------------------------------------------------------ 401 인터셉트
+
+/**
+ * 미인증 응답을 받았을 때 한 번만 도는 콜백. **여기 한 곳**에서만 가로챈다 —
+ * 화면마다 401 을 따로 처리하면 어떤 화면은 리다이렉트하고 어떤 화면은 오류를
+ * 그대로 보여주는 상태가 된다.
+ *
+ * auth 라우트 자신은 제외한다: 부트스트랩(`GET /api/auth/me`)의 401 은 "아직 로그인
+ * 안 함"이라는 **정상 응답**이고, 로그인 실패의 401 은 폼이 직접 보여줘야 한다.
+ */
+type UnauthorizedHandler = () => void;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
+function isAuthPath(path: string): boolean {
+  return path.startsWith('/api/auth/');
+}
+
 function buildUrl(path: string, query?: RequestOptions['query']): string {
   const url = `${API_BASE}${path}`;
   if (!query) return url;
@@ -99,6 +136,21 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
+  try {
+    return await performRequest<T>(method, path, options);
+  } catch (error) {
+    // mock 과 라이브 양쪽이 같은 지점을 지나야 한다 — mock 모드에서만 로그인 화면이
+    // 안 뜨거나, 그 반대가 되면 인증 동작을 화면에서 검증할 수 없다.
+    if (isUnauthorized(error) && !isAuthPath(path)) unauthorizedHandler?.();
+    throw error;
+  }
+}
+
+async function performRequest<T>(
+  method: HttpMethod,
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
   if (USE_MOCK) {
     const { mockRequest } = await import('./mock/handler');
     return mockRequest<T>(method, path, options);
@@ -108,6 +160,9 @@ export async function apiRequest<T>(
     method,
     headers: { Accept: options.parse === 'text' ? 'text/markdown, text/plain' : 'application/json' },
     signal: options.signal,
+    // 세션은 httpOnly 쿠키다. 같은 오리진(dev 프록시·compose)이면 기본값으로도 붙지만
+    // VITE_API_BASE 로 다른 오리진을 가리키는 배치에서는 이 옵션이 없으면 쿠키가 빠진다.
+    credentials: 'include',
   };
 
   if (options.body !== undefined) {

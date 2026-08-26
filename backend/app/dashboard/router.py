@@ -14,13 +14,24 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.dashboard import service
+from app.dashboard import service, summary as summary_service
 from app.db import get_db
-from app.schemas.api import DashboardOverviewResponse
+from app.schemas.api import DashboardOverviewResponse, DashboardSummaryResponse
 
 TRACK = "정책 API"
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+@router.get("/summary", response_model=DashboardSummaryResponse)
+def get_summary(db: Session = Depends(get_db)) -> DashboardSummaryResponse:
+    """정책 전체 요약 (Phase 5). 정책 상세 뷰는 `/overview` 가 그대로 담당한다.
+
+    정책 수만큼 metric 호출이 나가므로 정책별 타임아웃·실패 격리가 걸려 있다 —
+    한 정책의 Loki 가 죽어도 나머지 줄은 그대로 나온다 (`total_errors_24h=null`
+    + 경고 코드).
+    """
+    return summary_service.get_summary(db)
 
 
 @router.get("/overview", response_model=DashboardOverviewResponse)

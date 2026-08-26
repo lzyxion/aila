@@ -343,6 +343,17 @@ PHASE_4_ROUTES: set[tuple[str, str]] = {
 }
 
 
+#: Phase 5 (인증·스케줄러·통합 대시보드) 에서 추가한 라우트.
+#: 프론트가 401 을 가로채 `/login` 으로 보내는 계약이 이 세 개 위에 서 있다.
+PHASE_5_ROUTES: set[tuple[str, str]] = {
+    ("POST", "/api/auth/login"),
+    ("POST", "/api/auth/logout"),
+    ("GET", "/api/auth/me"),
+    ("POST", "/api/auth/users"),
+    ("GET", "/api/dashboard/summary"),
+}
+
+
 def test_app_boots_and_health_is_ok(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
@@ -356,7 +367,9 @@ def test_openapi_schema_generates(api: FastAPI) -> None:
 
 
 def test_all_design_doc_routes_exist(api: FastAPI) -> None:
-    missing = (DESIGN_DOC_ROUTES | ADDITIONAL_ROUTES | PHASE_4_ROUTES) - _routes(api)
+    missing = (
+        DESIGN_DOC_ROUTES | ADDITIONAL_ROUTES | PHASE_4_ROUTES | PHASE_5_ROUTES
+    ) - _routes(api)
     assert not missing, f"누락된 라우트: {sorted(missing)}"
 
 
@@ -381,6 +394,10 @@ def test_models_cover_design_doc_tables() -> None:
         "analysis_results",
         "llm_usage_records",
         "app_settings",
+        # Phase 5 인증 (revision 0004). 세션은 서버 행으로 둔다 —
+        # 무상태 서명 토큰으로는 "로그아웃 무효화" 를 만들 수 없다.
+        "users",
+        "user_sessions",
     }
     assert expected == set(Base.metadata.tables)
 

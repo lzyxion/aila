@@ -15,6 +15,7 @@ import {
   type LLMModelListRequest,
   type LLMProviderName,
 } from '../api/types';
+import { useWriteAccess } from '../auth/AuthContext';
 import {
   Badge,
   Button,
@@ -70,6 +71,7 @@ function usesBaseUrl(provider: LLMProviderName): boolean {
 const MANUAL_MODEL = '\u0000manual';
 
 export function LlmConnectionsPage() {
+  const write = useWriteAccess();
   const connectionsQuery = useLlmConnections();
   const createConnection = useCreateLlmConnection();
   const updateConnection = useUpdateLlmConnection();
@@ -211,6 +213,14 @@ export function LlmConnectionsPage() {
 
       <div className="grid gap-6 xl:grid-cols-5">
         <div className="xl:col-span-2">
+          {/* 연결 등록·수정·테스트는 전부 쓰기다 (테스트도 실제 과금 호출을 한다). */}
+          {!write.allowed ? (
+            <Card title="LLM 연결 등록" description="읽기 전용 계정입니다.">
+              <Notice tone="neutral" title="권한 없음">
+                {write.reason} 등록된 연결과 기본 연결 지정 상태는 오른쪽에서 볼 수 있습니다.
+              </Notice>
+            </Card>
+          ) : (
           <Card
             title={isEditing ? `연결 수정 · ${editing?.name ?? `#${editingId}`}` : '새 LLM 연결'}
             actions={
@@ -443,6 +453,7 @@ export function LlmConnectionsPage() {
               )}
             </div>
           </Card>
+          )}
         </div>
 
         <div className="xl:col-span-3">
@@ -501,6 +512,11 @@ export function LlmConnectionsPage() {
                         </div>
                       </Td>
                       <Td align="right">
+                        {!write.allowed ? (
+                          <span className="text-xs text-slate-400" title={write.reason ?? undefined}>
+                            읽기 전용
+                          </span>
+                        ) : (
                         <div className="flex flex-wrap justify-end gap-1">
                           <Button size="sm" onClick={() => startEdit(connection)}>
                             수정
@@ -529,6 +545,7 @@ export function LlmConnectionsPage() {
                             </Button>
                           )}
                         </div>
+                        )}
                       </Td>
                     </tr>
                   ))}

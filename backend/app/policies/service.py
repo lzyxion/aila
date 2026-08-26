@@ -30,7 +30,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.enums import QueryRunStatus
+from app.enums import QueryRunStatus, TriggeredBy
 from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
     SETTING_SAMPLE_RETENTION_DAYS,
@@ -291,6 +291,31 @@ def validate_limits(
         raise _unprocessable(" ".join(problems))
 
 
+#: 스케줄 최소 주기(분). 스케줄러 tick 이 60 초라 그보다 촘촘한 값은 의미가 없다.
+MIN_SCHEDULE_INTERVAL_MINUTES = 1
+
+
+def validate_schedule(
+    *, schedule_enabled: bool | None, schedule_interval_minutes: int | None
+) -> None:
+    """스케줄을 켜면서 주기를 주지 않는 조합을 저장 시점에 막는다.
+
+    한도 값과 같은 원칙이다 — 저장은 사람이 고칠 수 있는 순간이므로 조용히 기본값을
+    끼워 넣지 않는다. 주기 없이 켜진 정책은 스케줄러가 영원히 건너뛰므로, 화면에는
+    "켜짐" 으로 보이는데 아무것도 돌지 않는 상태가 된다.
+    """
+    if not schedule_enabled:
+        return
+    if schedule_interval_minutes is None:
+        raise _unprocessable(
+            "schedule_enabled 를 켜려면 schedule_interval_minutes 가 필요합니다."
+        )
+    if schedule_interval_minutes < MIN_SCHEDULE_INTERVAL_MINUTES:
+        raise _unprocessable(
+            f"schedule_interval_minutes 는 {MIN_SCHEDULE_INTERVAL_MINUTES} 분 이상이어야 합니다."
+        )
+
+
 def _require_connection(db: Session, connection_id: int) -> LokiConnection:
     connection = db.get(LokiConnection, connection_id)
     if connection is None:
@@ -341,6 +366,10 @@ def create_policy(db: Session, payload: PolicyCreate) -> PolicyRead:
         max_samples_per_group=payload.max_samples_per_group,
         daily_analysis_limit=payload.daily_analysis_limit,
     )
+    validate_schedule(
+        schedule_enabled=payload.schedule_enabled,
+        schedule_interval_minutes=payload.schedule_interval_minutes,
+    )
     _reject_duplicate_name(db, payload.name)
 
     policy = AnalysisPolicy(**payload.model_dump())
@@ -365,11 +394,25 @@ def update_policy(db: Session, policy_id: int, payload: PolicyUpdate) -> PolicyR
         max_samples_per_group=changes.get("max_samples_per_group"),
         daily_analysis_limit=changes.get("daily_analysis_limit"),
     )
+    # 스케줄은 "켜짐 + 주기" 가 한 쌍이라 병합 후의 **실효값**으로 검증해야 한다.
+    # 요청 하나만 보면 "주기만 지운" 요청이 이미 켜진 정책을 무주기로 만든다.
+    merged_enabled = changes.get("schedule_enabled")
+    if merged_enabled is None:
+        merged_enabled = policy.schedule_enabled
+    merged_interval = (
+        changes["schedule_interval_minutes"]
+        if "schedule_interval_minutes" in changes
+        else policy.schedule_interval_minutes
+    )
+    validate_schedule(
+        schedule_enabled=merged_enabled, schedule_interval_minutes=merged_interval
+    )
+
     if changes.get("name") is not None:
         _reject_duplicate_name(db, changes["name"], exclude_id=policy.id)
 
     #: 명시적 null 을 허용하는 필드 (나머지는 NOT NULL 이라 null 을 무시한다).
-    nullable_fields = {"description", "daily_analysis_limit"}
+    nullable_fields = {"description", "daily_analysis_limit", "schedule_interval_minutes"}
     for field, value in changes.items():
         if value is None and field not in nullable_fields:
             continue
@@ -494,6 +537,7 @@ def _query_run_read(db: Session, run: QueryRun, group_count: int | None = None) 
         warnings=run.warnings or [],
         error_message=run.error_message,
         group_count=group_count,
+        triggered_by=run.triggered_by or TriggeredBy.MANUAL.value,
     )
 
 
@@ -598,8 +642,18 @@ def _persist_groups(db: Session, run_id: int, groups: Sequence[object], max_samp
     return stored
 
 
-def create_query_run(db: Session, policy_id: int, payload: QueryRunCreateRequest) -> QueryRunRead:
+def create_query_run(
+    db: Session,
+    policy_id: int,
+    payload: QueryRunCreateRequest,
+    *,
+    triggered_by: str = TriggeredBy.MANUAL.value,
+) -> QueryRunRead:
     """정책 실행 → 조회 → (마스킹 → 정규화 → fingerprint) → 그룹 저장.
+
+    `triggered_by` 는 이력·화면 배지용 값이며 **동작을 분기하지 않는다** —
+    스케줄러가 부르든 사람이 부르든 한도·마스킹·저장 경로는 완전히 같다.
+    분기가 생기는 순간 "스케줄 실행만 한도를 안 탄다" 같은 구멍이 열린다.
 
     실패해도 `query_runs` 행은 남는다 (`status=failed` + `error_message`) — 조회가
     왜 비었는지 나중에 확인할 수 있어야 하기 때문이다.
@@ -641,6 +695,7 @@ def create_query_run(db: Session, policy_id: int, payload: QueryRunCreateRequest
         range_end=range_end,
         status=QueryRunStatus.RUNNING.value,
         warnings=_dump_warnings(warnings),
+        triggered_by=triggered_by,
     )
     db.add(run)
     db.commit()
@@ -789,6 +844,7 @@ def preview_policy(db: Session, payload: PolicyPreviewRequest) -> PolicyPreviewR
 __all__ = [
     "MAX_PREVIEW_SAMPLE_LINES",
     "MAX_SAMPLES_PER_GROUP_CAP",
+    "MIN_SCHEDULE_INTERVAL_MINUTES",
     "PURGE_INTERVAL",
     "SETTING_SAMPLE_PURGE_LAST_RUN",
     "WARN_EXCLUDED",
@@ -816,4 +872,5 @@ __all__ = [
     "update_policy",
     "validate_exclusions",
     "validate_limits",
+    "validate_schedule",
 ]

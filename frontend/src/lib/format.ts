@@ -5,6 +5,7 @@ import type {
   LLMProviderName,
   QueryRunStatus,
   Severity,
+  TriggeredBy,
   UsageStatus,
 } from '../api/types';
 
@@ -86,6 +87,15 @@ export function formatTokens(value: number | null | undefined): string {
   return `${value.toLocaleString('ko-KR')} tok`;
 }
 
+/** 스케줄 주기 표기. 분 단위로 저장되지만 화면에서는 "6시간"이 읽기 쉽다. */
+export function formatIntervalMinutes(minutes: number | null | undefined): string {
+  if (minutes === null || minutes === undefined || !Number.isFinite(minutes)) return '-';
+  if (minutes < 60) return `${minutes}분`;
+  if (minutes % (60 * 24) === 0) return `${minutes / (60 * 24)}일`;
+  if (minutes % 60 === 0) return `${minutes / 60}시간`;
+  return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`;
+}
+
 // ------------------------------------------------------------------ 라벨
 
 export function severityLabel(severity: Severity | null | undefined): string {
@@ -133,6 +143,11 @@ export function queryRunStatusLabel(status: QueryRunStatus | null | undefined): 
     default:
       return '-';
   }
+}
+
+/** 실행 주체. 값이 없으면 배지를 감추므로 여기서도 `-` 를 준다. */
+export function triggeredByLabel(value: TriggeredBy | null | undefined): string {
+  return value === 'schedule' ? '자동' : value === 'manual' ? '수동' : '-';
 }
 
 export function usageStatusLabel(status: UsageStatus | null | undefined): string {
@@ -189,6 +204,15 @@ export function warningCodeLabel(code: string): string {
       return 'metric 쿼리 실패';
     case 'by_service_from_lines':
       return '서비스별 집계 폴백';
+    // 통합 대시보드(summary)의 정책 단위 경고
+    case 'policy_inactive':
+      return '비활성 정책';
+    case 'schedule_without_interval':
+      return '스케줄 주기 없음';
+    case 'last_run_failed':
+      return '최근 실행 실패';
+    case 'no_successful_run':
+      return '성공한 실행 없음';
     default:
       return code;
   }

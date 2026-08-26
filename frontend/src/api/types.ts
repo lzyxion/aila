@@ -40,6 +40,15 @@ export type UsageStatus = 'succeeded' | 'failed';
 /** app.enums.Severity — LLM 이 추정한 심각도. 발생량 기반 지표가 아니다. */
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
+/**
+ * 실행 주체. 이력 화면의 배지로만 쓴다 — "이 조회·분석을 사람이 눌렀는가, 스케줄러가
+ * 돌렸는가"를 나중에 되짚을 수 있어야 비용 추적이 된다.
+ *
+ * 백엔드가 아직 이 필드를 내려주지 않을 수 있으므로 소비하는 쪽은 `undefined` 를
+ * `manual` 과 같게 다루지 말고 **배지를 생략**한다 (`triggeredByLabel` 참고).
+ */
+export type TriggeredBy = 'manual' | 'schedule';
+
 /** app.enums.ACTIVE_JOB_STATUSES — 진행 중으로 간주하는 상태 (폴링 대상). */
 export const ACTIVE_JOB_STATUSES: AnalysisJobStatus[] = ['pending', 'running'];
 
@@ -86,6 +95,32 @@ export interface AnalysisResultSchema {
   mitigation: string[];
   /** 최소 1 개 — 로그만으로 알 수 없는 것을 명시. */
   limitations: string[];
+}
+
+// ======================================================================= auth
+
+/**
+ * app.enums.UserRole — `viewer` 는 **GET 만** 할 수 있다.
+ *
+ * 판정은 서버가 한다 (viewer 의 비-GET 요청은 403). 화면이 쓰기 UI 를 감추는 것은
+ * 편의일 뿐 보안 장치가 아니다 — 기간·라인 수 상한과 같은 규칙이다.
+ */
+export type UserRole = 'admin' | 'viewer';
+
+/** `GET /api/auth/me` · `POST /api/auth/login` 응답. 비밀번호는 어느 응답에도 없다. */
+export interface AuthUser {
+  username: string;
+  role: UserRole;
+}
+
+/**
+ * `POST /api/auth/login` — 성공하면 httpOnly 세션 쿠키(SameSite=Lax)가 붙는다.
+ * 토큰을 응답 본문으로 받지 않는다 — 자바스크립트가 읽을 수 있는 자리에 두면
+ * XSS 하나로 세션이 통째로 넘어간다.
+ */
+export interface LoginRequest {
+  username: string;
+  password: string;
 }
 
 // ============================================================ 공통 API 모델
@@ -236,6 +271,19 @@ export interface PolicyBase {
   allow_ai_analysis: boolean;
   /** 정책별 일일 분석 상한. null 이면 전역 한도만 적용. */
   daily_analysis_limit?: number | null;
+
+  // --- 스케줄 (0004 마이그레이션, additive) ---
+  /** 스케줄 조회를 켠다. 끄면 아래 두 값은 무시된다. */
+  schedule_enabled?: boolean;
+  /** 조회 주기(분). `schedule_enabled` 가 true 일 때만 의미가 있다. */
+  schedule_interval_minutes?: number | null;
+  /**
+   * 스케줄 조회에서 **처음 보는 fingerprint** 만 자동 분석한다.
+   *
+   * 비용이 나가는 경로다 — 이미 분석 이력이 있는 그룹은 다시 돌지 않고, 일일 분석
+   * 한도(전역·정책별)가 그대로 적용된다. 화면 문구도 이 두 가지를 반드시 함께 적는다.
+   */
+  auto_analyze_new?: boolean;
 }
 
 export type PolicyCreate = PolicyBase;
@@ -252,6 +300,9 @@ export interface PolicyUpdate {
   allow_ai_analysis?: boolean | null;
   daily_analysis_limit?: number | null;
   active?: boolean | null;
+  schedule_enabled?: boolean | null;
+  schedule_interval_minutes?: number | null;
+  auto_analyze_new?: boolean | null;
 }
 
 export interface PolicyRead extends PolicyBase {
@@ -259,6 +310,28 @@ export interface PolicyRead extends PolicyBase {
   active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * 정책의 스케줄 설정을 화면 표시용으로 정규화한다.
+ *
+ * 백엔드가 아직 0004 를 배포하지 않았으면 필드 자체가 없다 — 그 경우 "스케줄 없음"으로
+ * 접는다(배지를 감춘다). `schedule_enabled` 가 켜졌는데 주기가 비어 있는 상태도
+ * 화면에서 구분해야 하므로 `intervalMinutes` 를 null 로 남긴다.
+ */
+export function policySchedule(policy: {
+  schedule_enabled?: boolean;
+  schedule_interval_minutes?: number | null;
+  auto_analyze_new?: boolean;
+}): { enabled: boolean; intervalMinutes: number | null; autoAnalyze: boolean } {
+  return {
+    enabled: policy.schedule_enabled === true,
+    intervalMinutes:
+      typeof policy.schedule_interval_minutes === 'number'
+        ? policy.schedule_interval_minutes
+        : null,
+    autoAnalyze: policy.auto_analyze_new === true,
+  };
 }
 
 /** 저장 전 실행 결과 미리보기. 잘못 쓴 쿼리가 정책으로 굳는 것을 막는다. */
@@ -301,6 +374,8 @@ export interface QueryRunRead {
   warnings: FetchWarning[];
   error_message?: string | null;
   group_count: number;
+  /** 수동 실행인지 스케줄인지. 백엔드가 아직 안 내려주면 `undefined` — 배지를 감춘다. */
+  triggered_by?: TriggeredBy;
 }
 
 /**
@@ -363,6 +438,8 @@ export interface AnalysisJobSummary {
   completed_at?: string | null;
   severity?: Severity | null;
   summary?: string | null;
+  /** 수동 트리거인지 스케줄의 자동 분석인지. 없으면 배지를 감춘다. */
+  triggered_by?: TriggeredBy;
 }
 
 export interface ErrorGroupDetail extends ErrorGroupSummary {
@@ -414,6 +491,7 @@ export interface AnalysisJobRead {
   error_message?: string | null;
   result?: AnalysisResultSchema | null;
   usage?: UsageRecordRead | null;
+  triggered_by?: TriggeredBy;
 }
 
 /** 분석 시작은 멱등이다 — 진행 중인 작업이 있으면 `reused=true` 로 기존 작업을 반환한다. */
@@ -476,6 +554,55 @@ export interface DashboardOverviewParams {
   range_end?: string;
   step_seconds?: number;
   top?: number;
+}
+
+// ------------------------------------------------- 통합 대시보드 (summary)
+
+/**
+ * `GET /api/dashboard/summary` — 정책 전체를 한 화면에서 훑기 위한 요약.
+ *
+ * `overview` 와 역할이 다르다. `overview` 는 **정책 하나**의 상세(추이·서비스별·상위 그룹)이고
+ * 여기 있는 값은 **정책 목록**에 붙는 한 줄 요약이다. 정책이 스무 개가 되어도 "지금 무엇을
+ * 봐야 하는가"를 카드 하나 크기로 답할 수 있어야 한다.
+ */
+export interface DashboardSummaryLastRun {
+  id: number;
+  started_at: string;
+  status: QueryRunStatus;
+  fetched_count: number;
+  group_count: number;
+  warnings: FetchWarning[];
+}
+
+/** 정책 단위 경고 (`{code, message}`). 조회 경고와 같은 코드 사전을 쓴다. */
+export interface SummaryWarning {
+  code: string;
+  message: string;
+}
+
+export interface DashboardSummaryPolicy {
+  policy_id: number;
+  name: string;
+  active: boolean;
+  schedule_enabled: boolean;
+  schedule_interval_minutes: number | null;
+  last_run: DashboardSummaryLastRun | null;
+  /**
+   * 최근 **성공한** 조회의 그룹 중 fingerprint 분석 이력이 **전혀 없는** 수.
+   *
+   * 이 화면에서 가장 중요한 숫자다 — "새로 나타났는데 아무도 보지 않은 오류"의 개수이고,
+   * 카드 정렬의 기본 기준이다. 그룹 id 가 아니라 fingerprint 기준이므로 이전 회차에서
+   * 분석한 오류는 여기에 세지 않는다.
+   */
+  unanalyzed_group_count: number;
+  /** `count_over_time` 최근 24h. metric 쿼리에 실패하면 **null** 이며 0 이 아니다. */
+  total_errors_24h: number | null;
+  warnings: SummaryWarning[];
+}
+
+export interface DashboardSummaryResponse {
+  generated_at: string;
+  policies: DashboardSummaryPolicy[];
 }
 
 // ===================================================================== usage

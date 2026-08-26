@@ -10,6 +10,9 @@
  * - `analysis_status` 는 그룹 id 가 아니라 **fingerprint 기준**으로 채운다.
  * - 응답에 실리는 로그는 전부 마스킹된 값이고 secret 은 절대 평문으로 나가지 않는다.
  * - 건수·추이는 metric 시리즈에서 오며 로그 라인 수를 세지 않는다.
+ * - **인증**: auth 라우트와 `/health` 를 뺀 `/api/**` 는 세션이 필요하고(미인증 401),
+ *   `viewer` 는 GET 만 할 수 있다(그 외 403). 판정은 라우팅 **앞**에서 한 번에 한다 —
+ *   라우트마다 검사하면 새 라우트를 추가할 때 조용히 빠진다.
  */
 
 import { ApiError, type HttpMethod, type RequestOptions } from '../client';
@@ -22,8 +25,11 @@ import type {
   AnalysisJobSummary,
   AppSettingListResponse,
   AppSettingRead,
+  AuthUser,
   ConnectionTestResponse,
   DashboardOverviewResponse,
+  DashboardSummaryPolicy,
+  DashboardSummaryResponse,
   ErrorGroupDetail,
   ErrorGroupListResponse,
   ErrorGroupSummary,
@@ -35,6 +41,7 @@ import type {
   LLMModelListRequest,
   LLMModelListResponse,
   LLMProviderName,
+  LoginRequest,
   LokiConnectionCreate,
   LokiConnectionRead,
   LokiConnectionTestRequest,
@@ -49,6 +56,7 @@ import type {
   QueryRunListResponse,
   QueryRunRead,
   ServiceErrorCount,
+  SummaryWarning,
   SettingValue,
   UsageAggregate,
   UsageResponse,
@@ -80,6 +88,11 @@ const LATENCY = Number(import.meta.env.VITE_MOCK_LATENCY_MS ?? 250);
 // ------------------------------------------------------------------- state
 
 interface MockState {
+  /**
+   * 지금 로그인한 사용자. 실제 세션은 httpOnly 쿠키이고 여기서는 메모리다 —
+   * 화면 입장에서는 "로그인 요청 후 이어지는 요청이 통한다"는 모양만 같으면 된다.
+   */
+  session: AuthUser | null;
   lokiConnections: LokiConnectionRead[];
   llmConnections: LLMConnectionRead[];
   policies: PolicyRead[];
@@ -120,7 +133,44 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
   [SETTING_TIMEZONE]: '일일 분석 한도의 리셋 기준 시간대 (IANA 이름).',
 };
 
+/**
+ * mock 계정. **viewer 가 하나 있어야** 읽기 전용 화면을 실제로 눌러 볼 수 있다 —
+ * 쓰기 UI 를 감추는 코드가 맞는지는 admin 화면만 봐서는 검증되지 않는다.
+ */
+const ACCOUNTS: Array<{ username: string; password: string; role: AuthUser['role'] }> = [
+  { username: 'admin', password: 'admin', role: 'admin' },
+  { username: 'viewer', password: 'viewer', role: 'viewer' },
+];
+
+/**
+ * mock 세션을 `sessionStorage` 에 둔다.
+ *
+ * 실제 세션은 쿠키라 **새로고침해도 살아 있다.** 메모리에만 두면 F5 한 번에 로그인
+ * 화면으로 튕겨서, mock 으로는 "세션이 유지되는 화면"을 확인할 수 없다. 브라우저가
+ * 아닌 곳(smoke 는 node 에서 돈다)에서는 조용히 메모리만 쓴다.
+ */
+const SESSION_KEY = 'aila.mock.session';
+
+function loadSession(): AuthUser | null {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(SESSION_KEY);
+    return raw ? (JSON.parse(raw) as AuthUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistSession(user: AuthUser | null): void {
+  try {
+    if (user) globalThis.sessionStorage?.setItem(SESSION_KEY, JSON.stringify(user));
+    else globalThis.sessionStorage?.removeItem(SESSION_KEY);
+  } catch {
+    /* 브라우저가 아니거나 저장이 막혀 있다 — 메모리 세션으로 충분하다. */
+  }
+}
+
 const state: MockState = {
+  session: loadSession(),
   lokiConnections: structuredClone(lokiConnectionSeed),
   llmConnections: structuredClone(llmConnectionSeed),
   policies: structuredClone(policySeed),
@@ -144,6 +194,7 @@ const state: MockState = {
       ],
       error_message: null,
       group_count: groupSeeds.length,
+      triggered_by: 'schedule',
     },
     // 이력 화면이 상태·경고·실패를 모두 보여줘야 하므로 과거 실행을 몇 개 더 둔다.
     {
@@ -170,6 +221,7 @@ const state: MockState = {
       ],
       error_message: null,
       group_count: 4,
+      triggered_by: 'manual',
     },
     {
       id: 4997,
@@ -184,6 +236,7 @@ const state: MockState = {
       warnings: [],
       error_message: 'Loki 응답이 500 입니다: parse error at line 1: syntax error',
       group_count: 0,
+      triggered_by: 'schedule',
     },
     {
       id: 4996,
@@ -198,6 +251,7 @@ const state: MockState = {
       warnings: [],
       error_message: null,
       group_count: 3,
+      triggered_by: 'manual',
     },
   ],
   jobs: new Map(analysisJobSeed.map((job) => [job.id, structuredClone(job)])),
@@ -313,6 +367,7 @@ function toJobSummary(job: AnalysisJobRead): AnalysisJobSummary {
     completed_at: job.completed_at ?? null,
     severity: job.result?.severity ?? null,
     summary: job.result?.summary ?? null,
+    triggered_by: job.triggered_by,
   };
 }
 
@@ -389,6 +444,37 @@ const routes: Route[] = [];
 function route(method: HttpMethod, pattern: RegExp, handler: Handler): void {
   routes.push({ method, pattern, handler });
 }
+
+// --- auth -------------------------------------------------------------------
+
+/**
+ * 실패는 **401** 이고 사용자명·비밀번호 중 무엇이 틀렸는지 구분해 알리지 않는다 —
+ * 구분해 주면 존재하는 계정 이름을 확인하는 데 쓰인다.
+ */
+route('POST', /^\/api\/auth\/login$/, (_p, { body }) => {
+  const payload = (body ?? {}) as Partial<LoginRequest>;
+  const found = ACCOUNTS.find(
+    (account) =>
+      account.username === (payload.username ?? '').trim() && account.password === payload.password,
+  );
+  if (!found) {
+    throw new ApiError(401, '사용자명 또는 비밀번호가 올바르지 않습니다.');
+  }
+  state.session = { username: found.username, role: found.role };
+  persistSession(state.session);
+  return state.session satisfies AuthUser;
+});
+
+route('POST', /^\/api\/auth\/logout$/, () => {
+  state.session = null;
+  persistSession(null);
+  return undefined;
+});
+
+route('GET', /^\/api\/auth\/me$/, () => {
+  if (!state.session) throw new ApiError(401, '로그인이 필요합니다.');
+  return state.session satisfies AuthUser;
+});
 
 // --- loki connections -------------------------------------------------------
 
@@ -622,6 +708,12 @@ route('POST', /^\/api\/policies$/, (_p, { body }) => {
     allow_ai_analysis: payload.allow_ai_analysis,
     daily_analysis_limit: payload.daily_analysis_limit ?? null,
     active: true,
+    schedule_enabled: payload.schedule_enabled ?? false,
+    // 스케줄이 꺼져 있으면 주기를 남기지 않는다 (백엔드 기본값과 같은 판정).
+    schedule_interval_minutes: payload.schedule_enabled
+      ? (payload.schedule_interval_minutes ?? null)
+      : null,
+    auto_analyze_new: (payload.schedule_enabled && payload.auto_analyze_new) ?? false,
     created_at: nowIso(),
     updated_at: nowIso(),
   };
@@ -725,6 +817,16 @@ route('PATCH', /^\/api\/policies\/(\d+)$/, ([id], { body }) => {
   if (payload.daily_analysis_limit !== undefined)
     found.daily_analysis_limit = payload.daily_analysis_limit;
   if (payload.active != null) found.active = payload.active;
+  if (payload.schedule_enabled != null) found.schedule_enabled = payload.schedule_enabled;
+  if (payload.schedule_interval_minutes !== undefined)
+    found.schedule_interval_minutes = payload.schedule_interval_minutes;
+  if (payload.auto_analyze_new != null) found.auto_analyze_new = payload.auto_analyze_new;
+  // 스케줄을 끄면 주기·자동 분석도 함께 내려간다 — 꺼진 정책에 설정만 남아 있으면
+  // 다음에 켰을 때 예전 값으로 조용히 돌기 시작한다.
+  if (found.schedule_enabled === false) {
+    found.schedule_interval_minutes = null;
+    found.auto_analyze_new = false;
+  }
   found.updated_at = nowIso();
   return found;
 });
@@ -767,6 +869,8 @@ route('POST', /^\/api\/policies\/(\d+)\/query-runs$/, ([id], { body }) => {
     ],
     error_message: null,
     group_count: groupSeeds.length,
+    // 화면에서 누른 실행은 언제나 manual 이다. schedule 은 스케줄러만 만든다.
+    triggered_by: 'manual',
   };
   state.queryRuns.push(run);
   return run;
@@ -855,6 +959,8 @@ route('POST', /^\/api\/error-groups\/(\d+)\/analysis-jobs$/, ([id], { body }) =>
     model: connection.model,
     prompt_version: 'v1',
     requested_at: nowIso(),
+    // 화면에서 누른 분석은 언제나 manual 이다 (계약: 분석의 자동 실행은 스케줄 경로뿐).
+    triggered_by: 'manual',
     started_at: null,
     completed_at: null,
     error_message: null,
@@ -902,6 +1008,88 @@ route('GET', /^\/api\/analysis-jobs\/(\d+)\/report$/, ([id]) => {
 });
 
 // --- dashboard --------------------------------------------------------------
+
+/**
+ * `GET /api/dashboard/summary` — 홈의 정책 카드 그리드 (계약 3).
+ *
+ * 계약대로 만들어야 하는 지점 몇 가지:
+ * - `unanalyzed_group_count` 는 **최근 성공한 run** 의 그룹 중 fingerprint 분석 이력이
+ *   전혀 없는 수다. 실패한 run 은 기준이 되지 않는다 (그룹이 없으니 0 이 아니라 무의미).
+ * - `total_errors_24h` 는 metric 실패를 **null** 로 표현한다. 화면이 `-` 와 0 을 다르게
+ *   그리는지 확인해야 하므로 정책 하나는 일부러 null 로 둔다.
+ * - `last_run` 이 없는 정책(한 번도 실행 안 함)도 카드가 되어야 한다.
+ */
+route('GET', /^\/api\/dashboard\/summary$/, () => {
+  const jobs = allJobs();
+  const analyzedFingerprints = new Set(jobs.map((job) => job.fingerprint));
+
+  const policies: DashboardSummaryPolicy[] = state.policies.map((policy) => {
+    const runs = state.queryRuns
+      .filter((run) => run.policy_id === policy.id)
+      .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
+    const lastRun = runs[0] ?? null;
+    const lastSucceeded = runs.find((run) => run.status === 'succeeded') ?? null;
+
+    // 최근 성공 run 의 그룹 중 fingerprint 이력이 전혀 없는 것만 센다.
+    const unanalyzed = lastSucceeded
+      ? groupSeeds
+          .slice(0, Math.min(lastSucceeded.group_count, groupSeeds.length))
+          .filter((seed) => !analyzedFingerprints.has(seed.fingerprint)).length
+      : 0;
+
+    const warnings: SummaryWarning[] = [];
+    if (!policy.active) {
+      warnings.push({
+        code: 'policy_inactive',
+        message: '비활성 정책이라 스케줄·실행이 돌지 않습니다.',
+      });
+    }
+    if (policy.schedule_enabled && policy.schedule_interval_minutes == null) {
+      warnings.push({
+        code: 'schedule_without_interval',
+        message: '스케줄이 켜져 있지만 실행 주기가 설정되지 않았습니다.',
+      });
+    }
+    if (lastRun?.status === 'failed') {
+      warnings.push({
+        code: 'last_run_failed',
+        message: lastRun.error_message ?? '최근 실행이 실패했습니다.',
+      });
+    }
+
+    // 정책 3 은 metric 쿼리가 실패한 상태로 둔다 — null 과 0 이 화면에서 갈리는지 본다.
+    const metricFailed = policy.id === 3;
+    if (metricFailed) {
+      warnings.push({
+        code: 'count_query_failed',
+        message: '최근 24시간 metric 쿼리에 실패했습니다. 0 건이라는 뜻이 아닙니다.',
+      });
+    }
+
+    return {
+      policy_id: policy.id,
+      name: policy.name,
+      active: policy.active,
+      schedule_enabled: policy.schedule_enabled ?? false,
+      schedule_interval_minutes: policy.schedule_interval_minutes ?? null,
+      last_run: lastRun
+        ? {
+            id: lastRun.id,
+            started_at: lastRun.started_at,
+            status: lastRun.status,
+            fetched_count: lastRun.fetched_count,
+            group_count: lastRun.group_count,
+            warnings: lastRun.warnings,
+          }
+        : null,
+      unanalyzed_group_count: unanalyzed,
+      total_errors_24h: metricFailed ? null : 1200 + policy.id * 317,
+      warnings,
+    };
+  });
+
+  return { generated_at: nowIso(), policies } satisfies DashboardSummaryResponse;
+});
 
 route('GET', /^\/api\/dashboard\/overview$/, (_p, { query }) => {
   const stepSeconds = Number(query.step_seconds ?? 300);
@@ -1129,12 +1317,34 @@ route('PUT', /^\/api\/settings\/([A-Za-z0-9_]+)$/, ([key], { body }) => {
 
 // ------------------------------------------------------------------ 진입점
 
+/**
+ * 인증·권한 판정. **라우팅보다 먼저** 한 번에 한다 — 라우트마다 검사하면 새 라우트를
+ * 추가할 때 조용히 빠지고, 그러면 mock 에서만 통과하는 경로가 생긴다.
+ *
+ * - auth 라우트·`/health` 는 통과
+ * - 세션 없음 → 401 (화면은 client 의 인터셉트로 /login 으로 간다)
+ * - `viewer` 의 비-GET → 403 (읽기 전용 계정의 진짜 방어선)
+ */
+function authorize(method: HttpMethod, pathname: string): void {
+  if (pathname.startsWith('/api/auth/') || pathname === '/health') return;
+  if (!state.session) {
+    throw new ApiError(401, '로그인이 필요합니다.');
+  }
+  if (state.session.role === 'viewer' && method !== 'GET') {
+    throw new ApiError(
+      403,
+      '읽기 전용(viewer) 계정은 조회만 할 수 있습니다. 실행·저장·삭제는 admin 권한이 필요합니다.',
+    );
+  }
+}
+
 export async function mockRequest<T>(
   method: HttpMethod,
   path: string,
   options: RequestOptions,
 ): Promise<T> {
   const pathname = path.split('?')[0];
+  authorize(method, pathname);
   for (const entry of routes) {
     if (entry.method !== method) continue;
     const match = entry.pattern.exec(pathname);

@@ -12,7 +12,12 @@
 import { Link, useParams } from 'react-router';
 
 import { useErrorGroups, useQueryRun } from '../api/queries';
-import { AnalysisStatusBadge, QueryRunStatusBadge, SeverityBadge } from '../components/StatusBadges';
+import {
+  AnalysisStatusBadge,
+  QueryRunStatusBadge,
+  SeverityBadge,
+  TriggeredByBadge,
+} from '../components/StatusBadges';
 import {
   Badge,
   Card,
@@ -85,7 +90,12 @@ export function QueryRunPage() {
             <Stat label="오류 그룹" value={formatNumber(run.group_count)} sub="fingerprint 단위" />
             <Stat
               label="상태"
-              value={<QueryRunStatusBadge status={run.status} />}
+              value={
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <QueryRunStatusBadge status={run.status} />
+                  <TriggeredByBadge value={run.triggered_by} />
+                </span>
+              }
               sub={run.finished_at ? `종료 ${formatRelative(run.finished_at)}` : '진행 중'}
             />
           </div>
