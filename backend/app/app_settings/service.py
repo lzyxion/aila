@@ -6,13 +6,15 @@
 >>> 왜 화이트리스트인가 <<<
 `app_settings` 는 키-값 테이블이라 아무 키나 만들 수 있다. 열어 두면 오타(`daily_limit`)
 가 조용히 새 행으로 저장되고, 읽는 쪽은 기본값을 계속 쓰면서 화면에는 "설정했다"고
-보인다 — 비용 한도에서 이런 실패는 요금으로 돌아온다. 예약 3 종만 받는다.
+보인다 — 비용 한도에서 이런 실패는 요금으로 돌아온다. 예약 4 종만 받는다
+(`DESCRIPTIONS` 의 키가 곧 화이트리스트다).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -23,6 +25,7 @@ from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
     SETTING_MODEL_PRICING,
     SETTING_SAMPLE_RETENTION_DAYS,
+    SETTING_TIMEZONE,
     AppSetting,
 )
 from app.schemas.api import AppSettingListResponse, AppSettingRead
@@ -34,7 +37,8 @@ PRICING_RATE_FIELDS = ("input_per_1k", "output_per_1k")
 
 DESCRIPTIONS: dict[str, str] = {
     SETTING_DAILY_ANALYSIS_LIMIT: (
-        "전역 일일 분석 횟수 상한 (UTC 자정 기준). 0 이면 분석을 시작할 수 없다."
+        "전역 일일 분석 횟수 상한 (`timezone` 설정의 로컬 자정 기준). "
+        "0 이면 분석을 시작할 수 없다."
     ),
     SETTING_SAMPLE_RETENTION_DAYS: (
         "error_samples 보존 일수. 지난 샘플은 삭제한다. 0 이면 자동 삭제를 끈다."
@@ -42,6 +46,10 @@ DESCRIPTIONS: dict[str, str] = {
     SETTING_MODEL_PRICING: (
         "모델 단가표 {model: {input_per_1k, output_per_1k, currency}}. "
         "표에 없는 모델의 추정 비용은 0 이 아니라 None 으로 남는다."
+    ),
+    SETTING_TIMEZONE: (
+        "일일 분석 한도의 '하루' 를 세는 기준 타임존 (IANA 이름, 예: Asia/Seoul). "
+        "이 타임존의 자정에 카운터가 리셋된다."
     ),
 }
 
@@ -103,6 +111,26 @@ def _validate_model_pricing(value: Any) -> dict[str, Any]:
     return value
 
 
+def _validate_timezone(value: Any) -> str:
+    """IANA 타임존 이름인지 `zoneinfo` 로 실제 로드해 확인한다.
+
+    문자열이기만 하면 받아 주면, 오타(`Asia/Seaoul`)가 저장된 뒤 **한도 판정 시점에**
+    터진다 — 비용 차단 장치가 조용히 멈추는 셈이라 쓰기 시점에 막는다.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise _unprocessable(
+            f"{SETTING_TIMEZONE} 은 IANA 타임존 이름 문자열이어야 합니다 (받은 값: {value!r})."
+        )
+    name = value.strip()
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise _unprocessable(
+            f"'{name}' 은 알 수 없는 타임존입니다 (예: Asia/Seoul, UTC)."
+        ) from exc
+    return name
+
+
 def validate_value(key: str, value: Any) -> Any:
     """예약 키별 값 형식 검증. 통과하면 저장할 값을 그대로 돌려준다."""
     if key not in DESCRIPTIONS:
@@ -112,6 +140,8 @@ def validate_value(key: str, value: Any) -> Any:
         return None
     if key in (SETTING_DAILY_ANALYSIS_LIMIT, SETTING_SAMPLE_RETENTION_DAYS):
         return _validate_non_negative_int(key, value)
+    if key == SETTING_TIMEZONE:
+        return _validate_timezone(value)
     return _validate_model_pricing(value)
 
 
@@ -125,6 +155,8 @@ def default_value(key: str) -> Any:
         return settings.default_daily_analysis_limit
     if key == SETTING_SAMPLE_RETENTION_DAYS:
         return settings.default_sample_retention_days
+    if key == SETTING_TIMEZONE:
+        return settings.default_timezone
     return {}
 
 
@@ -140,7 +172,7 @@ def _read(key: str, row: AppSetting | None) -> AppSettingRead:
 
 
 def list_settings(db: Session) -> AppSettingListResponse:
-    """예약 3 종만 돌려준다 (행이 없어도 기본값과 함께 자리를 만든다)."""
+    """예약 키만 돌려준다 (행이 없어도 기본값과 함께 자리를 만든다)."""
     rows = {
         row.key: row
         for row in db.scalars(

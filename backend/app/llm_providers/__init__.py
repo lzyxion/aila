@@ -11,6 +11,7 @@ from app.llm_providers.factory import (
     SUPPORTED_PROVIDERS,
     build_llm_provider,
     build_llm_provider_from_values,
+    list_models,
 )
 from app.llm_providers.openai_provider import OpenAIProvider
 from app.llm_providers.schema import to_strict_json_schema
@@ -21,5 +22,6 @@ __all__ = [
     "OpenAIProvider",
     "build_llm_provider",
     "build_llm_provider_from_values",
+    "list_models",
     "to_strict_json_schema",
 ]

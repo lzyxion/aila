@@ -9,7 +9,7 @@
 export const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/$/, '');
 
-export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 export interface RequestOptions {
   query?: Record<string, string | number | boolean | undefined | null>;
@@ -38,6 +38,21 @@ export class ApiError extends Error {
  */
 export function isNotImplemented(error: unknown): boolean {
   return error instanceof ApiError && error.status === 501;
+}
+
+/**
+ * 라이브 백엔드에 **아직 그 경로가 없는가**. 화면은 이 경우 기능을 실패로 보여주지 않고
+ * 폴백한다 (모델 목록 → 자유 입력, 실행 이력 → 안내 문구).
+ *
+ * 404·501 뿐 아니라 405·422 도 포함한다 — 같은 prefix 의 기존 라우트가 먼저 잡아
+ * "메서드 없음"이나 "경로 파라미터 파싱 실패"로 응답하는 경우가 있기 때문이다.
+ * (예: `POST /api/llm-connections/models` 를 모르는 백엔드는 같은 경로의 다른 메서드
+ * 때문에 404 가 아니라 405 를 준다)
+ */
+export function isEndpointMissing(error: unknown): boolean {
+  return (
+    error instanceof ApiError && [404, 405, 422, 501].includes(error.status)
+  );
 }
 
 function buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -121,6 +136,10 @@ export const api = {
     apiRequest<T>('POST', path, { ...options, body }),
   patch: <T>(path: string, body?: unknown, options?: RequestOptions) =>
     apiRequest<T>('PATCH', path, { ...options, body }),
+  put: <T>(path: string, body?: unknown, options?: RequestOptions) =>
+    apiRequest<T>('PUT', path, { ...options, body }),
   delete: (path: string, options?: RequestOptions) =>
     apiRequest<void>('DELETE', path, { ...options, parse: 'void' }),
+  /** 메서드를 값으로 넘겨야 할 때. 위 헬퍼로 표현되지 않는 경우에만 쓴다. */
+  request: apiRequest,
 };

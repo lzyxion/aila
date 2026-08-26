@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 
 from fastapi import BackgroundTasks, HTTPException, status
 from pydantic import ValidationError
@@ -46,7 +46,11 @@ from app.models import (
     LLMConnection,
     QueryRun,
 )
-from app.policies.service import global_daily_analysis_limit
+from app.policies.service import (
+    analysis_timezone,
+    analysis_timezone_name,
+    global_daily_analysis_limit,
+)
 from app.schemas.analysis import AnalysisResultSchema, parse_analysis_result
 from app.schemas.api import (
     AnalysisJobCreateRequest,
@@ -93,8 +97,16 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC)
 
 
-def _start_of_day(moment: datetime) -> datetime:
-    return moment.replace(hour=0, minute=0, second=0, microsecond=0)
+def _start_of_day(moment: datetime, tz: tzinfo) -> datetime:
+    """`tz` 기준 오늘 00:00 을 **UTC** 로 돌려준다.
+
+    `requested_at` 은 UTC 로 저장되므로 비교값도 UTC 여야 한다. 로컬 자정을 먼저
+    구한 뒤 UTC 로 변환하는 순서가 중요하다 — UTC 자정을 로컬로 옮기면 KST 기준
+    오전 9 시가 되어 "하루" 가 9 시간 어긋난다 (1 차 피드백에서 나온 그 증상).
+    """
+    local = moment.astimezone(tz)
+    local_midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(UTC)
 
 
 def _short(text: object) -> str:
@@ -292,8 +304,13 @@ def _resolve_connection(db: Session, connection_id: int | None) -> LLMConnection
 
 
 def daily_usage(db: Session, policy: AnalysisPolicy | None) -> tuple[int, int]:
-    """(오늘 전역 분석 작업 수, 오늘 이 정책의 분석 작업 수)."""
-    today = _start_of_day(_now())
+    """(오늘 전역 분석 작업 수, 오늘 이 정책의 분석 작업 수).
+
+    "오늘" 의 경계는 `app_settings.timezone` (기본 `Asia/Seoul`) 의 로컬 자정이다.
+    UTC 자정 기준이면 한국에서는 업무 시작 시각인 오전 9 시에 카운터가 리셋돼
+    "어제 저녁에 쓴 분량이 아침까지 남아 있다" 는 상태가 된다.
+    """
+    today = _start_of_day(_now(), analysis_timezone(db))
     global_used = (
         db.scalar(select(func.count(AnalysisJob.id)).where(AnalysisJob.requested_at >= today)) or 0
     )
@@ -338,12 +355,14 @@ def _enforce_daily_limits(db: Session, policy: AnalysisPolicy | None) -> None:
     """전역·정책별 일일 한도. 사용량 대시보드는 사후 확인일 뿐이라 여기서 막아야 한다."""
     global_used, policy_used = daily_usage(db, policy)
     global_limit = global_daily_analysis_limit(db)
+    # 언제 풀리는지가 안 보이면 "왜 막혔는지" 를 화면에서 알 수 없다 — 기준 타임존을 싣는다.
+    tz_name = analysis_timezone_name(db)
     if global_used >= global_limit:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
                 f"오늘 전역 일일 분석 한도 {global_limit} 회를 모두 사용했습니다 "
-                f"(사용 {global_used} 회)."
+                f"(사용 {global_used} 회). {tz_name} 자정에 리셋됩니다."
             ),
         )
     if policy is not None and policy.daily_analysis_limit is not None:
@@ -352,7 +371,8 @@ def _enforce_daily_limits(db: Session, policy: AnalysisPolicy | None) -> None:
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=(
                     f"정책 '{policy.name}' 의 일일 분석 한도 {policy.daily_analysis_limit} 회를 "
-                    f"모두 사용했습니다 (사용 {policy_used} 회)."
+                    f"모두 사용했습니다 (사용 {policy_used} 회). "
+                    f"{tz_name} 자정에 리셋됩니다."
                 ),
             )
 

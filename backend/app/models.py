@@ -418,6 +418,8 @@ class AppSetting(Base):
 SETTING_DAILY_ANALYSIS_LIMIT = "daily_analysis_limit"
 SETTING_MODEL_PRICING = "model_pricing"
 SETTING_SAMPLE_RETENTION_DAYS = "sample_retention_days"
+#: 일일 한도의 "하루" 를 세는 기준 타임존 (IANA 이름). 서버 로케일과 무관하게 여기가 기준이다.
+SETTING_TIMEZONE = "timezone"
 
 
 __all__ = [
@@ -435,4 +437,5 @@ __all__ = [
     "SETTING_DAILY_ANALYSIS_LIMIT",
     "SETTING_MODEL_PRICING",
     "SETTING_SAMPLE_RETENTION_DAYS",
+    "SETTING_TIMEZONE",
 ]

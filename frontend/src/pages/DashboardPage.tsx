@@ -14,7 +14,9 @@ import {
   LoadingBlock,
   Notice,
   PageHeader,
+  PlayIcon,
   Select,
+  Spinner,
   Stat,
   TableWrap,
   Td,
@@ -69,22 +71,81 @@ export function DashboardPage() {
             <strong>fingerprint 기준</strong>이라 이전 조회에서 분석한 오류도 "분석 완료"로 보입니다.
           </>
         }
-        actions={
-          <Button
-            variant="primary"
-            disabled={!selectedPolicy || runPolicy.isPending}
-            onClick={() => {
-              if (!selectedPolicy) return;
-              runPolicy.mutate({ id: selectedPolicy.id, payload: {} });
-            }}
-          >
-            {runPolicy.isPending ? '조회 중…' : '정책 실행'}
-          </Button>
-        }
       />
 
       <Card className="mb-6">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 lg:grid-cols-3">
+          {/*
+            정책 선택과 실행 버튼은 한 동작의 두 반쪽이다 — 떨어뜨려 놓으면 "고르기만 하고
+            실행을 못 찾는" 화면이 된다 (Phase 4 피드백 1번). 강조 배경으로 묶어 둔다.
+          */}
+          <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-4 lg:col-span-2">
+            <div className="flex flex-wrap items-end gap-3">
+              <Field
+                label="정책"
+                className="min-w-56 flex-1"
+                hint={
+                  selectedPolicy
+                    ? `상한 ${formatNumber(selectedPolicy.max_lines)} 라인 · 대표 로그 ${selectedPolicy.max_samples_per_group} 개`
+                    : '선택하지 않으면 전체 조회 결과를 보여줍니다.'
+                }
+              >
+                <Select
+                  value={policyId ?? ''}
+                  onChange={(event) =>
+                    setPolicyId(event.target.value === '' ? null : Number(event.target.value))
+                  }
+                >
+                  <option value="">전체</option>
+                  {activePolicies.map((policy) => (
+                    <option key={policy.id} value={policy.id}>
+                      {policy.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Button
+                variant="primary"
+                size="lg"
+                className="mb-6"
+                disabled={!selectedPolicy || runPolicy.isPending}
+                title={
+                  selectedPolicy
+                    ? `${selectedPolicy.name} 정책으로 Loki 를 조회합니다.`
+                    : '실행할 정책을 먼저 고르십시오.'
+                }
+                onClick={() => {
+                  if (!selectedPolicy) return;
+                  runPolicy.mutate({ id: selectedPolicy.id, payload: {} });
+                }}
+              >
+                {runPolicy.isPending ? (
+                  <>
+                    <Spinner className="size-4 border-sky-200 border-t-white" />
+                    조회 중…
+                  </>
+                ) : (
+                  <>
+                    <PlayIcon />
+                    정책 실행
+                  </>
+                )}
+              </Button>
+            </div>
+
+            <p className="mt-1 text-xs text-slate-600">
+              {selectedPolicy ? (
+                <>
+                  실행하면 이 정책의 LogQL 로 Loki 를 <strong>지금</strong> 조회하고 결과를
+                  그룹으로 묶습니다. 분석(LLM 호출)은 그룹 상세에서 따로 실행합니다.
+                </>
+              ) : (
+                <>정책을 골라야 실행할 수 있습니다.</>
+              )}
+            </p>
+          </div>
+
           <Field label="기간">
             <Select
               value={rangeIndex}
@@ -97,52 +158,55 @@ export function DashboardPage() {
               ))}
             </Select>
           </Field>
-
-          <Field
-            label="정책"
-            hint={
-              selectedPolicy
-                ? `상한 ${formatNumber(selectedPolicy.max_lines)} 라인 · 대표 로그 ${selectedPolicy.max_samples_per_group} 개`
-                : '선택하지 않으면 전체 조회 결과를 보여줍니다.'
-            }
-          >
-            <Select
-              value={policyId ?? ''}
-              onChange={(event) =>
-                setPolicyId(event.target.value === '' ? null : Number(event.target.value))
-              }
-            >
-              <option value="">전체</option>
-              {activePolicies.map((policy) => (
-                <option key={policy.id} value={policy.id}>
-                  {policy.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-
-          <div className="sm:col-span-2 lg:col-span-2">
-            {selectedPolicy && (
-              <Field label="LogQL">
-                <pre className="aila-scroll overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs whitespace-pre text-slate-100">
-                  {selectedPolicy.logql}
-                </pre>
-              </Field>
-            )}
-          </div>
         </div>
 
+        {selectedPolicy && (
+          <div className="mt-4">
+            <Field label="LogQL">
+              <pre className="aila-scroll overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs whitespace-pre text-slate-100">
+                {selectedPolicy.logql}
+              </pre>
+            </Field>
+          </div>
+        )}
+
+        {runPolicy.isPending && (
+          <div className="mt-4">
+            <Notice tone="info">
+              <span className="inline-flex items-center gap-2">
+                <Spinner />
+                정책 <strong>{selectedPolicy?.name}</strong> 으로 조회하는 중입니다. 기간·라인 수
+                상한은 서버가 강제합니다.
+              </span>
+            </Notice>
+          </div>
+        )}
         {runPolicy.isError && (
           <div className="mt-4">
             <ErrorBlock error={runPolicy.error} />
           </div>
         )}
-        {runPolicy.isSuccess && (
+        {runPolicy.isSuccess && !runPolicy.isPending && (
           <div className="mt-4">
             <Notice tone="success" title={`조회 #${runPolicy.data.id} 완료`}>
               {formatNumber(runPolicy.data.fetched_count)} 라인 조회 ·{' '}
               {formatNumber(runPolicy.data.dropped_count)} 라인 제외 ·{' '}
               {runPolicy.data.group_count} 개 그룹
+              <Link
+                to={`/query-runs/${runPolicy.data.id}`}
+                className="ml-2 font-medium text-emerald-900 underline"
+              >
+                이 조회의 오류 그룹 보기 →
+              </Link>
+              {runPolicy.data.warnings.length > 0 && (
+                <ul className="mt-1 list-disc pl-4 text-xs">
+                  {runPolicy.data.warnings.map((warning, index) => (
+                    <li key={`${warning.code}-${index}`}>
+                      {warningCodeLabel(warning.code)} — {warning.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Notice>
           </div>
         )}

@@ -334,6 +334,14 @@ ADDITIONAL_ROUTES: set[tuple[str, str]] = {
     ("GET", "/health"),
 }
 
+#: Phase 4 (1 차 사용 피드백) 에서 추가한 라우트. 프론트 트랙이 소비하는 계약이라
+#: 한쪽이 조용히 없애면 화면이 폴백 상태로 굳는다 — 여기서 존재를 못 박는다.
+PHASE_4_ROUTES: set[tuple[str, str]] = {
+    # 조회지만 POST 다 — api_key 를 쿼리스트링에 실으면 평문 키가 액세스 로그에 남는다.
+    ("POST", "/api/llm-connections/models"),
+    ("GET", "/api/policies/{policy_id}/query-runs"),
+}
+
 
 def test_app_boots_and_health_is_ok(client: TestClient) -> None:
     response = client.get("/health")
@@ -348,7 +356,7 @@ def test_openapi_schema_generates(api: FastAPI) -> None:
 
 
 def test_all_design_doc_routes_exist(api: FastAPI) -> None:
-    missing = (DESIGN_DOC_ROUTES | ADDITIONAL_ROUTES) - _routes(api)
+    missing = (DESIGN_DOC_ROUTES | ADDITIONAL_ROUTES | PHASE_4_ROUTES) - _routes(api)
     assert not missing, f"누락된 라우트: {sorted(missing)}"
 
 

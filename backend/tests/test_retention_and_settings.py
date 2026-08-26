@@ -20,6 +20,7 @@ from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
     SETTING_MODEL_PRICING,
     SETTING_SAMPLE_RETENTION_DAYS,
+    SETTING_TIMEZONE,
     AppSetting,
     ErrorSample,
 )
@@ -175,12 +176,17 @@ def test_due_check_runs_again_after_the_interval(db) -> None:
 # ------------------------------------------------------------ 설정 API 읽기
 
 
-def test_list_settings_shows_the_three_reserved_keys(client, db) -> None:
+def test_list_settings_shows_the_reserved_keys(client, db) -> None:
     body = client.get("/api/settings").json()
 
     keys = [item["key"] for item in body["items"]]
     assert keys == sorted(
-        [SETTING_DAILY_ANALYSIS_LIMIT, SETTING_MODEL_PRICING, SETTING_SAMPLE_RETENTION_DAYS]
+        [
+            SETTING_DAILY_ANALYSIS_LIMIT,
+            SETTING_MODEL_PRICING,
+            SETTING_SAMPLE_RETENTION_DAYS,
+            SETTING_TIMEZONE,
+        ]
     )
     # 행이 없어도 실제로 적용되는 값(기본값)을 함께 알려 준다.
     by_key = {item["key"]: item for item in body["items"]}
@@ -189,6 +195,7 @@ def test_list_settings_shows_the_three_reserved_keys(client, db) -> None:
         get_settings().default_daily_analysis_limit
     )
     assert by_key[SETTING_MODEL_PRICING]["effective_value"] == {}
+    assert by_key[SETTING_TIMEZONE]["effective_value"] == get_settings().default_timezone
 
 
 def test_get_unknown_setting_key_is_404(client) -> None:

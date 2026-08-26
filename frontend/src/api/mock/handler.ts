@@ -20,6 +20,8 @@ import type {
   AnalysisJobListResponse,
   AnalysisJobRead,
   AnalysisJobSummary,
+  AppSettingListResponse,
+  AppSettingRead,
   ConnectionTestResponse,
   DashboardOverviewResponse,
   ErrorGroupDetail,
@@ -30,20 +32,33 @@ import type {
   LLMConnectionRead,
   LLMConnectionTestRequest,
   LLMConnectionUpdate,
+  LLMModelListRequest,
+  LLMModelListResponse,
+  LLMProviderName,
   LokiConnectionCreate,
   LokiConnectionRead,
   LokiConnectionTestRequest,
   LokiConnectionUpdate,
+  ModelPricingTable,
   PolicyCreate,
   PolicyPreviewRequest,
   PolicyPreviewResponse,
   PolicyRead,
   PolicyUpdate,
   QueryRunCreateRequest,
+  QueryRunListResponse,
   QueryRunRead,
   ServiceErrorCount,
+  SettingValue,
   UsageAggregate,
   UsageResponse,
+} from '../types';
+import {
+  asModelPricingTable,
+  SETTING_DAILY_ANALYSIS_LIMIT,
+  SETTING_MODEL_PRICING,
+  SETTING_SAMPLE_RETENTION_DAYS,
+  SETTING_TIMEZONE,
 } from '../types';
 import {
   analysisJobSeed,
@@ -73,8 +88,37 @@ interface MockState {
   jobs: Map<number, AnalysisJobRead>;
   /** job.id -> 시뮬레이션 시작 시각(ms). 진행 상태를 시간으로 계산한다. */
   jobStartedAtMs: Map<number, number>;
+  /** 예약 설정 3 종. 행이 없는 키는 값이 null 이고 기본값이 적용된다. */
+  settings: Record<string, { value: SettingValue; updated_at: string | null }>;
   nextId: number;
 }
+
+/**
+ * 단가표 초깃값. **claude 만 있고 gpt 는 없다** — 단가 미등록 모델의 추정 비용이
+ * `-` 로 남는 상태(계약)와 사용량 화면의 "단가 등록" 인라인 UI 를 둘 다 확인하기 위해서다.
+ */
+const MODEL_PRICING_SEED: ModelPricingTable = {
+  'claude-sonnet-4-6': { input_per_1k: 0.003, output_per_1k: 0.015, currency: 'USD' },
+};
+
+/** 설정 키별 서버 기본값 (`app.app_settings.service.default_value`). */
+const SETTING_DEFAULTS: Record<string, SettingValue> = {
+  [SETTING_DAILY_ANALYSIS_LIMIT]: 50,
+  [SETTING_MODEL_PRICING]: {},
+  [SETTING_SAMPLE_RETENTION_DAYS]: 14,
+  [SETTING_TIMEZONE]: 'Asia/Seoul',
+};
+
+const SETTING_DESCRIPTIONS: Record<string, string> = {
+  [SETTING_DAILY_ANALYSIS_LIMIT]:
+    '전역 일일 분석 횟수 상한 (로컬 자정 기준). 0 이면 분석을 시작할 수 없다.',
+  [SETTING_MODEL_PRICING]:
+    '모델 단가표 {model: {input_per_1k, output_per_1k, currency}}. ' +
+    '표에 없는 모델의 추정 비용은 0 이 아니라 None 으로 남는다.',
+  [SETTING_SAMPLE_RETENTION_DAYS]:
+    'error_samples 보존 일수. 지난 샘플은 삭제한다. 0 이면 자동 삭제를 끈다.',
+  [SETTING_TIMEZONE]: '일일 분석 한도의 리셋 기준 시간대 (IANA 이름).',
+};
 
 const state: MockState = {
   lokiConnections: structuredClone(lokiConnectionSeed),
@@ -101,9 +145,69 @@ const state: MockState = {
       error_message: null,
       group_count: groupSeeds.length,
     },
+    // 이력 화면이 상태·경고·실패를 모두 보여줘야 하므로 과거 실행을 몇 개 더 둔다.
+    {
+      id: 4998,
+      policy_id: 1,
+      status: 'succeeded',
+      started_at: iso(-370),
+      finished_at: iso(-369),
+      range_start: iso(-430),
+      range_end: iso(-370),
+      fetched_count: 500,
+      dropped_count: 12,
+      warnings: [
+        {
+          code: 'range_clamped',
+          message: '요청 기간이 정책 기본 기간(60분)으로 조정되었습니다.',
+          count: null,
+        },
+        {
+          code: 'limit_reached',
+          message: '요청 한도(500)에 도달했습니다. 건수 집계에 이 값을 쓰지 마십시오.',
+          count: 500,
+        },
+      ],
+      error_message: null,
+      group_count: 4,
+    },
+    {
+      id: 4997,
+      policy_id: 1,
+      status: 'failed',
+      started_at: iso(-1500),
+      finished_at: iso(-1500),
+      range_start: iso(-1560),
+      range_end: iso(-1500),
+      fetched_count: 0,
+      dropped_count: 0,
+      warnings: [],
+      error_message: 'Loki 응답이 500 입니다: parse error at line 1: syntax error',
+      group_count: 0,
+    },
+    {
+      id: 4996,
+      policy_id: 2,
+      status: 'succeeded',
+      started_at: iso(-240),
+      finished_at: iso(-239),
+      range_start: iso(-420),
+      range_end: iso(-240),
+      fetched_count: 318,
+      dropped_count: 5,
+      warnings: [],
+      error_message: null,
+      group_count: 3,
+    },
   ],
   jobs: new Map(analysisJobSeed.map((job) => [job.id, structuredClone(job)])),
   jobStartedAtMs: new Map(),
+  settings: {
+    [SETTING_MODEL_PRICING]: {
+      value: structuredClone(MODEL_PRICING_SEED) as SettingValue,
+      updated_at: iso(-60 * 24 * 4),
+    },
+  },
   nextId: 9100,
 };
 
@@ -150,27 +254,41 @@ function advanceJob(job: AnalysisJobRead): AnalysisJobRead {
   job.result = analysisResultByFingerprint[job.fingerprint] ?? fallbackAnalysisResult;
   const inputTokens = 2400 + (job.id % 7) * 130;
   const outputTokens = 560 + (job.id % 5) * 45;
-  const pricing =
-    job.provider === 'anthropic'
-      ? { input: 3.0, output: 15.0 }
-      : { input: 1.25, output: 10.0 };
-  const cost = (inputTokens / 1e6) * pricing.input + (outputTokens / 1e6) * pricing.output;
+  // 단가는 **완료 시점 표**로 계산하고 쓴 단가를 스냅샷으로 복사한다. 표에 없으면
+  // 값을 지어내지 않고 null 로 남긴다 (0 은 "쌌다"로 읽힌다). 나중에 단가를 등록해도
+  // 이미 기록된 이 값은 바뀌지 않는다 — 소급 계산은 없다.
+  const entry = modelPricingTable()[job.model];
+  const inputRate = numericRate(entry?.input_per_1k);
+  const outputRate = numericRate(entry?.output_per_1k);
+  const priced = inputRate !== null || outputRate !== null;
+  const cost = ((inputTokens / 1000) * (inputRate ?? 0) + (outputTokens / 1000) * (outputRate ?? 0));
   job.usage = {
     provider: job.provider,
     model: job.model,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
-    estimated_cost: cost.toFixed(4),
-    pricing_snapshot: {
-      input_per_mtok: pricing.input.toFixed(2),
-      output_per_mtok: pricing.output.toFixed(2),
-      currency: 'USD',
-    },
+    estimated_cost: priced ? cost.toFixed(4) : null,
+    pricing_snapshot: priced
+      ? {
+          model: job.model,
+          input_per_1k: entry?.input_per_1k ?? null,
+          output_per_1k: entry?.output_per_1k ?? null,
+          currency: entry?.currency ?? 'USD',
+        }
+      : null,
     latency_ms: Math.round(elapsed),
     status: 'succeeded',
     failure_reason: null,
   };
   return job;
+}
+
+function modelPricingTable(): ModelPricingTable {
+  return asModelPricingTable(state.settings[SETTING_MODEL_PRICING]?.value);
+}
+
+function numericRate(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function allJobs(): AnalysisJobRead[] {
@@ -406,6 +524,46 @@ route('POST', /^\/api\/llm-connections\/test$/, (_p, { body }) => {
   return response;
 });
 
+/**
+ * `POST /api/llm-connections/models` — 프로바이더 모델 목록 (계약 1).
+ *
+ * **조회지만 POST 다** — api_key 를 쿼리스트링에 실으면 평문 키가 액세스 로그에 남는다.
+ * 라이브 백엔드와 같은 모양 `{provider, models}` 로 준다. 실패 경로도 흉내 낸다 —
+ * 키/base URL 이 없으면 400 이고, 화면은 오류로 막는 대신 **자유 입력으로 폴백**한다.
+ */
+route('POST', /^\/api\/llm-connections\/models$/, (_p, { body }) => {
+  const payload = (body ?? {}) as LLMModelListRequest;
+  const saved =
+    payload.connection_id != null
+      ? state.llmConnections.find((c) => c.id === payload.connection_id)
+      : undefined;
+  const provider = (payload.provider ?? saved?.provider ?? '') as LLMProviderName;
+  const apiKey = payload.api_key || (saved?.api_key_masked ?? null);
+  const baseUrl = payload.base_url || (saved?.base_url ?? null);
+
+  if (!provider) throw new ApiError(400, 'provider 를 지정하십시오.');
+
+  if (provider === 'openai_compatible') {
+    if (!baseUrl) {
+      throw new ApiError(400, 'OpenAI 호환 엔드포인트는 base URL 이 필요합니다.');
+    }
+    return {
+      provider,
+      models: ['llm-mock-1', 'qwen3-32b-instruct', 'llama-3.3-70b-instruct'],
+    } satisfies LLMModelListResponse;
+  }
+
+  if (!apiKey) {
+    throw new ApiError(400, 'API 키가 없어 모델 목록을 조회할 수 없습니다.');
+  }
+
+  const models =
+    provider === 'anthropic'
+      ? ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-6']
+      : ['gpt-5.2', 'gpt-5.2-mini', 'o5-mini'];
+  return { provider, models } satisfies LLMModelListResponse;
+});
+
 route('GET', /^\/api\/llm-connections\/(\d+)$/, ([id]) => {
   const found = state.llmConnections.find((c) => c.id === Number(id));
   if (!found) throw new ApiError(404, `LLM 연결 ${id} 을(를) 찾을 수 없습니다.`);
@@ -612,6 +770,28 @@ route('POST', /^\/api\/policies\/(\d+)\/query-runs$/, ([id], { body }) => {
   };
   state.queryRuns.push(run);
   return run;
+});
+
+/**
+ * `GET /api/policies/{id}/query-runs` — 정책 실행 이력 (계약 2, 최신순 페이지네이션).
+ * 라이브 백엔드와 같은 봉투 `{total, limit, offset, items}` 로 준다.
+ */
+route('GET', /^\/api\/policies\/(\d+)\/query-runs$/, ([id], { query }) => {
+  const policyId = Number(id);
+  if (!state.policies.some((policy) => policy.id === policyId)) {
+    throw new ApiError(404, `정책 ${id} 을(를) 찾을 수 없습니다.`);
+  }
+  const limit = Number(query.limit ?? 20);
+  const offset = Number(query.offset ?? 0);
+  const items = state.queryRuns
+    .filter((run) => run.policy_id === policyId)
+    .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
+  return {
+    total: items.length,
+    limit,
+    offset,
+    items: items.slice(offset, offset + limit),
+  } satisfies QueryRunListResponse;
 });
 
 route('GET', /^\/api\/query-runs\/(\d+)$/, ([id]) => {
@@ -854,6 +1034,97 @@ route('GET', /^\/api\/usage$/, (_p, { query }) => {
       : null,
   };
   return response;
+});
+
+// --- settings ---------------------------------------------------------------
+
+/**
+ * 예약 설정 3 종. 라이브와 같은 규칙을 흉내 낸다 —
+ * 화이트리스트 밖 키는 404, 단가표 형식이 깨지면 422, `PUT` 은 키를 **통째로 교체**한다.
+ * (그래서 화면이 병합해서 보내지 않으면 다른 모델 단가가 사라지는 것도 그대로 재현된다.)
+ */
+function settingRead(key: string): AppSettingRead {
+  const row = state.settings[key];
+  const value = row?.value ?? null;
+  return {
+    key,
+    value,
+    description: SETTING_DESCRIPTIONS[key],
+    updated_at: row?.updated_at ?? null,
+    effective_value: value !== null ? value : SETTING_DEFAULTS[key],
+  };
+}
+
+function requireSettingKey(key: string): void {
+  if (!(key in SETTING_DEFAULTS)) {
+    const allowed = Object.keys(SETTING_DEFAULTS).sort().join(', ');
+    throw new ApiError(404, `'${key}' 는 설정 키가 아닙니다. 사용할 수 있는 키: ${allowed}.`);
+  }
+}
+
+/** 단가표 형식 검증 — 깨진 표는 저장 자체를 막는다 (백엔드와 같은 판정). */
+function validateSettingValue(key: string, value: SettingValue): SettingValue {
+  if (value === null || value === undefined) return null;
+  if (key === SETTING_DAILY_ANALYSIS_LIMIT || key === SETTING_SAMPLE_RETENTION_DAYS) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      throw new ApiError(422, `${key} 는 0 이상의 정수여야 합니다.`);
+    }
+    return value;
+  }
+  if (key === SETTING_TIMEZONE) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new ApiError(422, 'timezone 은 IANA 시간대 이름이어야 합니다.');
+    }
+    return value;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(422, 'model_pricing 은 객체여야 합니다.');
+  }
+  for (const [model, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!model.trim()) {
+      throw new ApiError(422, 'model_pricing 의 키는 비어 있지 않은 모델명이어야 합니다.');
+    }
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new ApiError(422, `model_pricing['${model}'] 은 객체여야 합니다.`);
+    }
+    const row = entry as Record<string, unknown>;
+    if (row.input_per_1k === undefined && row.output_per_1k === undefined) {
+      throw new ApiError(
+        422,
+        `model_pricing['${model}'] 에 input_per_1k 또는 output_per_1k 가 있어야 합니다.`,
+      );
+    }
+    for (const field of ['input_per_1k', 'output_per_1k'] as const) {
+      const rate = row[field];
+      if (rate === undefined || rate === null) continue;
+      if (typeof rate !== 'number' || Number.isNaN(rate)) {
+        throw new ApiError(422, `model_pricing['${model}'].${field} 는 숫자여야 합니다.`);
+      }
+      if (rate < 0) {
+        throw new ApiError(422, `model_pricing['${model}'].${field} 는 0 이상이어야 합니다.`);
+      }
+    }
+  }
+  return value;
+}
+
+route('GET', /^\/api\/settings$/, () => {
+  return {
+    items: Object.keys(SETTING_DEFAULTS).sort().map(settingRead),
+  } satisfies AppSettingListResponse;
+});
+
+route('GET', /^\/api\/settings\/([A-Za-z0-9_]+)$/, ([key]) => {
+  requireSettingKey(key);
+  return settingRead(key);
+});
+
+route('PUT', /^\/api\/settings\/([A-Za-z0-9_]+)$/, ([key], { body }) => {
+  requireSettingKey(key);
+  const payload = (body ?? {}) as { value?: SettingValue };
+  const validated = validateSettingValue(key, payload.value ?? null);
+  state.settings[key] = { value: validated, updated_at: nowIso() };
+  return settingRead(key);
 });
 
 // ------------------------------------------------------------------ 진입점

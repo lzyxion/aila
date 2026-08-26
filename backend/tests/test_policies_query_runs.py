@@ -28,7 +28,9 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     grouped_sample,
     log_record,
     make_connection,
+    make_error_group,
     make_policy,
+    make_query_run,
     no_real_log_source,
     session_factory,
 )
@@ -475,3 +477,124 @@ def test_real_grouping_stores_only_masked_logs(client, db) -> None:
     assert secret not in sample.masked_log
     assert secret not in group.normalized_message
     assert sample.masking_rule_version
+
+
+# ------------------------------------------------- 실행 이력 목록 (Phase 4)
+#
+# 1 차 피드백: 실행 직후에만 보이던 조회 결과로 **다시 들어갈 방법**이 없었다.
+# `GET /api/policies/{id}/query-runs` 가 그 백엔드 몫이다.
+
+
+def _make_runs(db, policy, count: int, *, base=NOW):
+    """오래된 것부터 만든다 — 응답은 그 역순이어야 한다."""
+    return [
+        make_query_run(db, policy, started_at=base - timedelta(minutes=count - index))
+        for index in range(count)
+    ]
+
+
+def test_query_run_history_is_newest_first(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    runs = _make_runs(db, policy, 3)
+
+    response = client.get(f"/api/policies/{policy.id}/query-runs")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 3
+    assert body["offset"] == 0
+    assert [item["id"] for item in body["items"]] == [run.id for run in reversed(runs)]
+
+
+def test_query_run_history_paginates_without_gaps_or_repeats(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    runs = _make_runs(db, policy, 5)
+    newest_first = [run.id for run in reversed(runs)]
+
+    first = client.get(f"/api/policies/{policy.id}/query-runs?limit=2&offset=0").json()
+    second = client.get(f"/api/policies/{policy.id}/query-runs?limit=2&offset=2").json()
+    third = client.get(f"/api/policies/{policy.id}/query-runs?limit=2&offset=4").json()
+
+    assert first["limit"] == 2 and first["offset"] == 0
+    assert [item["id"] for item in first["items"]] == newest_first[:2]
+    assert [item["id"] for item in second["items"]] == newest_first[2:4]
+    assert [item["id"] for item in third["items"]] == newest_first[4:]
+    # total 은 페이지가 아니라 정책 전체 건수다.
+    assert first["total"] == second["total"] == third["total"] == 5
+
+
+def test_query_run_history_orders_ties_by_id(client, db) -> None:
+    """같은 `started_at` 두 건도 순서가 흔들리면 안 된다 (페이지 경계에서 유실·중복)."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    same_moment = [make_query_run(db, policy, started_at=NOW) for _ in range(4)]
+    expected = [run.id for run in reversed(same_moment)]
+
+    first = client.get(f"/api/policies/{policy.id}/query-runs?limit=2&offset=0").json()
+    second = client.get(f"/api/policies/{policy.id}/query-runs?limit=2&offset=2").json()
+
+    assert [item["id"] for item in first["items"] + second["items"]] == expected
+
+
+def test_query_run_history_includes_group_count(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    with_groups = make_query_run(db, policy, started_at=NOW)
+    make_error_group(db, with_groups, fingerprint="fp-a")
+    make_error_group(db, with_groups, fingerprint="fp-b")
+    empty = make_query_run(db, policy, started_at=NOW - timedelta(minutes=5))
+
+    body = client.get(f"/api/policies/{policy.id}/query-runs").json()
+
+    counts = {item["id"]: item["group_count"] for item in body["items"]}
+    assert counts == {with_groups.id: 2, empty.id: 0}
+
+
+def test_query_run_history_keeps_failed_runs(client, db) -> None:
+    """실패한 실행을 빼면 "왜 결과가 없는지" 를 화면에서 알 방법이 사라진다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    failed = make_query_run(db, policy, status=QueryRunStatus.FAILED.value)
+
+    body = client.get(f"/api/policies/{policy.id}/query-runs").json()
+
+    assert [item["id"] for item in body["items"]] == [failed.id]
+    assert body["items"][0]["status"] == QueryRunStatus.FAILED.value
+
+
+def test_query_run_history_is_scoped_to_the_policy(client, db) -> None:
+    connection = make_connection(db)
+    mine = make_policy(db, connection)
+    other = make_policy(db, connection, name="다른 정책")
+    my_run = make_query_run(db, mine)
+    make_query_run(db, other)
+
+    body = client.get(f"/api/policies/{mine.id}/query-runs").json()
+
+    assert body["total"] == 1
+    assert [item["id"] for item in body["items"]] == [my_run.id]
+
+
+def test_query_run_history_for_unknown_policy_is_404(client, db) -> None:
+    """빈 목록으로 답하면 오타 난 policy_id 가 "이력 없음" 으로 보인다."""
+    assert client.get("/api/policies/9999/query-runs").status_code == 404
+
+
+def test_query_run_history_rejects_out_of_range_pagination(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+
+    assert client.get(f"/api/policies/{policy.id}/query-runs?limit=0").status_code == 422
+    assert client.get(f"/api/policies/{policy.id}/query-runs?limit=201").status_code == 422
+    assert client.get(f"/api/policies/{policy.id}/query-runs?offset=-1").status_code == 422
+
+
+def test_query_run_history_empty_policy_returns_empty_page(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+
+    body = client.get(f"/api/policies/{policy.id}/query-runs").json()
+
+    assert body == {"total": 0, "limit": 20, "offset": 0, "items": []}

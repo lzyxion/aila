@@ -1,10 +1,13 @@
 """`/api/settings` 라우터.
 
 계약상 제약:
-- 예약 3 종(`daily_analysis_limit`, `model_pricing`, `sample_retention_days`)만 쓸 수 있다.
+- 예약 4 종(`daily_analysis_limit`, `model_pricing`, `sample_retention_days`,
+  `timezone`)만 쓸 수 있다. 화이트리스트의 단일 출처는
+  `app.app_settings.service.DESCRIPTIONS` 다 — 라우터가 목록을 따로 들고 있으면
+  두 곳이 어긋난다.
 - 값 형식 검증은 서비스 계층 한 곳에서만 한다 (라우터는 HTTP 경계만).
 - 일일 분석 한도는 **비용 차단 장치**다. 여기서 바꾼 값이 곧바로 `POST /analysis-jobs`
-  의 429 판정에 쓰인다.
+  의 429 판정에 쓰인다. `timezone` 은 그 한도의 "하루" 경계를 정한다.
 """
 
 from __future__ import annotations

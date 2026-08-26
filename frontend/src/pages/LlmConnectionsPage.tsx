@@ -1,13 +1,20 @@
 import { useState } from 'react';
 
+import { ApiError, isEndpointMissing } from '../api/client';
 import {
   useCreateLlmConnection,
   useDeactivateLlmConnection,
   useLlmConnections,
+  useLlmModels,
   useTestLlmConnection,
   useUpdateLlmConnection,
 } from '../api/queries';
-import { LLM_PROVIDERS, type LLMConnectionRead, type LLMProviderName } from '../api/types';
+import {
+  LLM_PROVIDERS,
+  type LLMConnectionRead,
+  type LLMModelListRequest,
+  type LLMProviderName,
+} from '../api/types';
 import {
   Badge,
   Button,
@@ -19,8 +26,10 @@ import {
   Input,
   LoadingBlock,
   Notice,
+  OneLineCode,
   PageHeader,
   Select,
+  Spinner,
   TableWrap,
   Td,
   Th,
@@ -52,6 +61,14 @@ const MODEL_PLACEHOLDER: Record<LLMProviderName, string> = {
   openai_compatible: 'qwen3-32b-instruct',
 };
 
+/** base URL 을 쓰는 프로바이더는 하나뿐이다 — 나머지는 필드 자체를 감춘다. */
+function usesBaseUrl(provider: LLMProviderName): boolean {
+  return provider === 'openai_compatible';
+}
+
+/** 드롭다운의 "직접 입력" 항목 값. 모델명과 겹치지 않는 표식을 쓴다. */
+const MANUAL_MODEL = '\u0000manual';
+
 export function LlmConnectionsPage() {
   const connectionsQuery = useLlmConnections();
   const createConnection = useCreateLlmConnection();
@@ -62,22 +79,51 @@ export function LlmConnectionsPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
+  /**
+   * 모델 목록을 조회할 조건. **폼 상태와 분리해 둔다** — API 키를 한 글자 칠 때마다
+   * 프로바이더를 두드리면 안 되므로, 프로바이더 변경·키 입력 종료(blur)·새로고침에서만 바뀐다.
+   */
+  const [modelQuery, setModelQuery] = useState<LLMModelListRequest | null>(null);
+  /** 목록이 있어도 사용자가 "직접 입력"을 고르면 자유 입력이 이긴다. */
+  const [manualModel, setManualModel] = useState(false);
 
   const isEditing = editingId !== null;
   const editing = connectionsQuery.data?.find((connection) => connection.id === editingId) ?? null;
   const saving = createConnection.isPending || updateConnection.isPending;
-  const requiresBaseUrl = form.provider === 'openai_compatible';
+  const requiresBaseUrl = usesBaseUrl(form.provider);
+
+  const modelsQuery = useLlmModels(
+    modelQuery ?? { provider: form.provider },
+    modelQuery !== null,
+  );
+  // 프로바이더는 자기 순서대로 준다(OpenAI 는 100 개가 넘는다) — 정렬은 표시 계층의 몫이다.
+  const models = [...(modelsQuery.data?.models ?? [])].sort((a, b) => a.localeCompare(b));
+  // 목록을 못 받았으면(미지원·키 없음·프로바이더 오류) 조용히 자유 입력으로 돌아간다.
+  const useModelDropdown = !manualModel && models.length > 0;
+
+  /** 지금 폼 값으로 모델 목록을 다시 조회한다. */
+  function refreshModels(next: FormState, connectionId: number | null = editingId) {
+    setModelQuery({
+      provider: next.provider,
+      // 새 키를 입력했으면 그 키로, 아니면 저장된 연결로 조회한다.
+      connection_id: next.api_key.trim() ? null : connectionId,
+      api_key: next.api_key.trim() || null,
+      base_url: usesBaseUrl(next.provider) ? next.base_url.trim() || null : null,
+    });
+  }
 
   function resetForm() {
     setEditingId(null);
     setForm(EMPTY_FORM);
     setFormError(null);
+    setModelQuery(null);
+    setManualModel(false);
     testConnection.reset();
   }
 
   function startEdit(connection: LLMConnectionRead) {
     setEditingId(connection.id);
-    setForm({
+    const next: FormState = {
       name: connection.name,
       provider: connection.provider,
       model: connection.model,
@@ -85,7 +131,10 @@ export function LlmConnectionsPage() {
       // 저장된 키는 평문으로 오지 않는다. 비워 두면 기존 키를 유지한다.
       api_key: '',
       is_default: connection.is_default,
-    });
+    };
+    setForm(next);
+    setManualModel(false);
+    refreshModels(next, connection.id);
     setFormError(null);
     testConnection.reset();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -110,7 +159,9 @@ export function LlmConnectionsPage() {
       name: form.name.trim(),
       provider: form.provider,
       model: form.model.trim(),
-      base_url: form.base_url.trim() || null,
+      // 감춘 필드의 값은 보내지 않는다 — provider 를 바꿨는데 예전 base URL 이 남으면
+      // 화면에는 없는 설정으로 호출이 나간다.
+      base_url: requiresBaseUrl ? form.base_url.trim() || null : null,
       is_default: form.is_default,
     };
 
@@ -140,7 +191,7 @@ export function LlmConnectionsPage() {
       connection_id: isEditing && !form.api_key.trim() ? editingId : null,
       provider: form.provider,
       model: form.model.trim() || null,
-      base_url: form.base_url.trim() || null,
+      base_url: requiresBaseUrl ? form.base_url.trim() || null : null,
       api_key: form.api_key.trim() || null,
     });
   }
@@ -182,9 +233,19 @@ export function LlmConnectionsPage() {
               <Field label="프로바이더" required>
                 <Select
                   value={form.provider}
-                  onChange={(event) =>
-                    setForm({ ...form, provider: event.target.value as LLMProviderName })
-                  }
+                  onChange={(event) => {
+                    const provider = event.target.value as LLMProviderName;
+                    // provider 를 바꾸면 모델도 base URL 도 의미가 달라진다.
+                    const next: FormState = {
+                      ...form,
+                      provider,
+                      model: '',
+                      base_url: usesBaseUrl(provider) ? form.base_url : '',
+                    };
+                    setForm(next);
+                    setManualModel(false);
+                    refreshModels(next);
+                  }}
                 >
                   {LLM_PROVIDERS.map((provider) => (
                     <option key={provider} value={provider}>
@@ -194,48 +255,140 @@ export function LlmConnectionsPage() {
                 </Select>
               </Field>
 
-              <Field label="모델" required>
-                <Input
-                  value={form.model}
-                  placeholder={MODEL_PLACEHOLDER[form.provider]}
-                  onChange={(event) => setForm({ ...form, model: event.target.value })}
-                />
+              {/*
+                모델은 프로바이더에게 물어본다. 목록을 못 받으면(미지원·키 없음·오류)
+                실패로 막지 않고 자유 입력으로 폴백한다 — 모델 이름을 아는 사람이 이미
+                손에 들고 있는 경우가 대부분이다.
+              */}
+              <Field
+                label="모델"
+                required
+                hint={
+                  modelsQuery.isFetching ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Spinner className="size-3" />
+                      모델 목록을 불러오는 중…
+                    </span>
+                  ) : useModelDropdown ? (
+                    <>
+                      {providerLabel(form.provider)} 이(가) 제공하는 {models.length}개 ·
+                      목록에 없으면 <strong>직접 입력</strong>을 고르십시오.
+                    </>
+                  ) : modelsQuery.isError ? (
+                    <span className="text-amber-700">
+                      모델 목록을 불러오지 못해 직접 입력으로 전환했습니다 —{' '}
+                      {/*
+                        경로 자체가 없을 때(백엔드 미구현)와 프로바이더가 거절했을 때는
+                        사용자가 할 일이 다르다. 앞의 경우 FastAPI 의 경로 파싱 오류 문구를
+                        그대로 보여주면 아무 도움이 되지 않는다.
+                      */}
+                      {isEndpointMissing(modelsQuery.error)
+                        ? '백엔드에 모델 목록 API 가 아직 없습니다. 모델명을 직접 입력하십시오.'
+                        : modelsQuery.error instanceof ApiError
+                          ? modelsQuery.error.detail
+                          : '프로바이더가 목록을 제공하지 않습니다.'}
+                    </span>
+                  ) : (
+                    'API 키(또는 base URL)를 입력하면 모델 목록을 불러옵니다. 직접 입력해도 됩니다.'
+                  )
+                }
+              >
+                <div className="flex gap-2">
+                  {useModelDropdown ? (
+                    <Select
+                      value={models.includes(form.model) ? form.model : ''}
+                      onChange={(event) => {
+                        if (event.target.value === MANUAL_MODEL) {
+                          setManualModel(true);
+                          return;
+                        }
+                        setForm({ ...form, model: event.target.value });
+                      }}
+                    >
+                      <option value="">선택하십시오</option>
+                      {models.map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                      {/* 저장된 값이 목록에 없을 수 있다 (모델이 내려갔거나 별칭). */}
+                      {form.model && !models.includes(form.model) && (
+                        <option value={form.model}>{form.model} (현재 값)</option>
+                      )}
+                      <option value={MANUAL_MODEL}>직접 입력…</option>
+                    </Select>
+                  ) : (
+                    <Input
+                      value={form.model}
+                      placeholder={MODEL_PLACEHOLDER[form.provider]}
+                      onChange={(event) => setForm({ ...form, model: event.target.value })}
+                    />
+                  )}
+                  <Button
+                    className="shrink-0"
+                    disabled={modelsQuery.isFetching}
+                    title="프로바이더에서 모델 목록을 다시 불러옵니다."
+                    onClick={() => {
+                      setManualModel(false);
+                      refreshModels(form);
+                      void modelsQuery.refetch();
+                    }}
+                  >
+                    {modelsQuery.isFetching ? '조회 중…' : '목록 조회'}
+                  </Button>
+                </div>
               </Field>
 
-              <Field
-                label="base URL"
-                required={requiresBaseUrl}
-                hint="OpenAI 호환 엔드포인트를 쓸 때만 필요합니다."
-              >
-                <Input
-                  value={form.base_url}
-                  placeholder="http://llm-gateway.internal:8080/v1"
-                  onChange={(event) => setForm({ ...form, base_url: event.target.value })}
-                />
-              </Field>
+              {/* base URL 은 OpenAI 호환 엔드포인트에만 있는 개념이라 아예 감춘다. */}
+              {requiresBaseUrl && (
+                <Field
+                  label="base URL"
+                  required
+                  hint="OpenAI 호환 엔드포인트의 주소입니다. 백엔드가 컨테이너 안이면 localhost 가 아니라 서비스명을 씁니다."
+                >
+                  <Input
+                    value={form.base_url}
+                    placeholder="http://llm-mock:8000/v1"
+                    onChange={(event) => setForm({ ...form, base_url: event.target.value })}
+                    onBlur={() => refreshModels(form)}
+                  />
+                </Field>
+              )}
 
               <Field
                 label="API 키"
                 required={!isEditing}
                 hint={
                   isEditing ? (
-                    <>
-                      비워 두면 기존 키를 유지합니다. 저장된 키:{' '}
-                      <code className="rounded bg-slate-100 px-1">
+                    <span className="flex min-w-0 flex-wrap items-center gap-1">
+                      비워 두면 기존 키를 유지합니다. 저장된 키:
+                      <OneLineCode
+                        className="inline-block max-w-40"
+                        title="저장된 키는 어떤 응답에도 평문으로 오지 않습니다."
+                      >
                         {editing?.api_key_masked ?? '(없음)'}
-                      </code>
-                    </>
+                      </OneLineCode>
+                    </span>
                   ) : (
                     '저장 시 암호화되며 이후에는 마스킹된 값만 표시됩니다.'
                   )
                 }
               >
+                {/*
+                  키는 길다. 한 줄에 고정하고 넘치는 부분은 말줄임으로 둔다 — 줄바꿈되면
+                  폼이 밀려 스크롤이 생긴다 (Phase 4 피드백 5번).
+                */}
                 <Input
                   type="password"
                   autoComplete="off"
+                  spellCheck={false}
+                  className="truncate"
                   value={form.api_key}
                   placeholder={isEditing ? '변경할 때만 입력' : 'sk-…'}
                   onChange={(event) => setForm({ ...form, api_key: event.target.value })}
+                  onBlur={() => {
+                    if (form.api_key.trim()) refreshModels(form);
+                  }}
                 />
               </Field>
 
@@ -315,7 +468,7 @@ export function LlmConnectionsPage() {
                       <Td>
                         <p className="font-medium text-slate-900">{connection.name}</p>
                         {connection.base_url && (
-                          <p className="mt-0.5 font-mono text-xs break-all text-slate-500">
+                          <p className="mt-0.5 max-w-56 truncate font-mono text-xs text-slate-500" title={connection.base_url}>
                             {connection.base_url}
                           </p>
                         )}
@@ -328,14 +481,15 @@ export function LlmConnectionsPage() {
                         <p className="mt-0.5 font-mono text-xs text-slate-500">
                           {connection.model}
                         </p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          API 키{' '}
-                          <code
-                            className="rounded bg-slate-100 px-1.5 py-0.5"
+                        {/* 마스킹 값도 한 줄 고정 — 길이에 따라 표가 흔들리지 않게. */}
+                        <p className="mt-1 flex items-center gap-1 text-xs text-slate-500">
+                          API 키
+                          <OneLineCode
+                            className="inline-block max-w-32"
                             title="저장된 키는 평문으로 오지 않습니다."
                           >
                             {connection.api_key_masked ?? '(없음)'}
-                          </code>
+                          </OneLineCode>
                         </p>
                       </Td>
                       <Td>

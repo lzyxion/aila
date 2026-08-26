@@ -178,6 +178,17 @@ export function warningCodeLabel(code: string): string {
       return '부분 구간만 조회됨';
     case 'entry_out_of_order':
       return '시각 역전 항목';
+    // 한도 조정은 422 로 튕기지 않고 clamp + 경고로 남는다 (docs/DECISIONS.md).
+    case 'range_clamped':
+      return '기간 자동 조정';
+    case 'limit_clamped':
+      return '라인 수 자동 조정';
+    case 'empty_result':
+      return '결과 없음';
+    case 'count_query_failed':
+      return 'metric 쿼리 실패';
+    case 'by_service_from_lines':
+      return '서비스별 집계 폴백';
     default:
       return code;
   }

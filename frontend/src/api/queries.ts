@@ -1,5 +1,6 @@
 /** TanStack Query 훅. 캐시 키는 여기 한 곳에서만 만든다. */
 
+import { useEffect, useRef } from 'react';
 import {
   useMutation,
   useQuery,
@@ -15,6 +16,7 @@ import {
   lokiConnections,
   policies,
   queryRuns,
+  settings,
   usage,
 } from './endpoints';
 import type {
@@ -23,22 +25,27 @@ import type {
   DashboardOverviewParams,
   LLMConnectionCreate,
   LLMConnectionUpdate,
+  LLMModelListRequest,
   LokiConnectionCreate,
   LokiConnectionUpdate,
+  ModelPricingEntry,
+  ModelPricingTable,
   PolicyCreate,
   PolicyPreviewRequest,
   PolicyUpdate,
   QueryRunCreateRequest,
   UsageParams,
 } from './types';
-import { isActiveJobStatus } from './types';
+import { asModelPricingTable, isActiveJobStatus, SETTING_MODEL_PRICING } from './types';
 
 export const queryKeys = {
   lokiConnections: ['loki-connections'] as const,
   lokiLabels: (id: number) => ['loki-connections', id, 'labels'] as const,
   llmConnections: ['llm-connections'] as const,
+  llmModels: (params: LLMModelListRequest) => ['llm-connections', 'models', params] as const,
   policies: ['policies'] as const,
   policy: (id: number) => ['policies', id] as const,
+  policyQueryRuns: (id: number) => ['policies', id, 'query-runs'] as const,
   queryRun: (id: number) => ['query-runs', id] as const,
   errorGroups: (runId: number) => ['query-runs', runId, 'error-groups'] as const,
   errorGroup: (id: number) => ['error-groups', id] as const,
@@ -46,6 +53,8 @@ export const queryKeys = {
   analysisJob: (id: number) => ['analysis-jobs', id] as const,
   dashboard: (params: DashboardOverviewParams) => ['dashboard', 'overview', params] as const,
   usage: (params: UsageParams) => ['usage', params] as const,
+  settings: ['settings'] as const,
+  setting: (key: string) => ['settings', key] as const,
 };
 
 // --------------------------------------------------------------- connections
@@ -117,6 +126,22 @@ export function useTestLlmConnection() {
   return useMutation({ mutationFn: llmConnections.test });
 }
 
+/**
+ * 프로바이더 모델 목록. **실패해도 화면은 자유 입력으로 폴백**하므로 재시도하지 않고,
+ * 목록이 없다는 사실을 빠르게 화면에 알린다.
+ *
+ * `enabled` 를 호출부가 통제한다 — 키를 한 글자 칠 때마다 프로바이더를 두드리면 안 된다.
+ */
+export function useLlmModels(params: LLMModelListRequest, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.llmModels(params),
+    queryFn: () => llmConnections.models(params),
+    enabled,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+}
+
 // ------------------------------------------------------------------ policies
 
 export function usePolicies() {
@@ -158,14 +183,38 @@ export function useRunPolicy() {
   return useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: QueryRunCreateRequest }) =>
       policies.run(id, payload),
-    onSuccess: () => {
+    onSuccess: (_run, variables) => {
       client.invalidateQueries({ queryKey: ['dashboard'] });
       client.invalidateQueries({ queryKey: ['query-runs'] });
+      // 방금 만든 실행이 그 정책의 이력 목록에 곧바로 보여야 한다.
+      client.invalidateQueries({ queryKey: queryKeys.policyQueryRuns(variables.id) });
     },
   });
 }
 
+/**
+ * 정책의 실행 이력. 백엔드에 아직 경로가 없을 수 있으므로(404/405/501) 재시도하지 않고
+ * 화면이 안내 문구로 폴백한다.
+ */
+export function usePolicyQueryRuns(policyId: number | null, limit = 20) {
+  return useQuery({
+    queryKey: [...queryKeys.policyQueryRuns(policyId ?? 0), limit] as const,
+    queryFn: () => policies.queryRuns(policyId as number, { limit }),
+    enabled: policyId !== null,
+    retry: false,
+  });
+}
+
 // --------------------------------------------------------------- error groups
+
+/** 조회 회차 단건. 정책 실행 이력에서 들어온 회차 화면이 쓴다. */
+export function useQueryRun(runId: number | null) {
+  return useQuery({
+    queryKey: queryKeys.queryRun(runId ?? 0),
+    queryFn: () => queryRuns.get(runId as number),
+    enabled: runId !== null,
+  });
+}
 
 export function useErrorGroups(runId: number | null) {
   return useQuery({
@@ -212,6 +261,38 @@ export function useAnalysisJob(
   });
 }
 
+/**
+ * 폴링 + **완료 시 파생 화면 무효화**.
+ *
+ * `useAnalysisJob` 는 작업 단건만 갱신한다. 그런데 같은 화면의 "분석 이력"은 작업이
+ * 아니라 **그룹 상세**(`error_groups/{id}.analyses`)에서 오고, 그 캐시는 작업이 끝나도
+ * 아무도 건드리지 않았다 — 결과는 표시되는데 이력의 배지만 `분석 중` 스피너로 영원히
+ * 남는 버그였다 (Phase 4 피드백 4번). 폴링이 끝나는 그 지점에서 한 번만 무효화한다.
+ *
+ * 같은 작업 id·같은 종료 상태로는 다시 무효화하지 않는다 (무효화 → 재조회 → 무효화 루프 차단).
+ */
+export function useAnalysisJobWithRefresh(jobId: number | null, groupId: number | null) {
+  const client = useQueryClient();
+  const query = useAnalysisJob(jobId);
+  const status = query.data?.status;
+  const settledRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (jobId === null || !status || isActiveJobStatus(status)) return;
+    const settledKey = `${jobId}:${status}`;
+    if (settledRef.current === settledKey) return;
+    settledRef.current = settledKey;
+    if (groupId !== null) {
+      client.invalidateQueries({ queryKey: queryKeys.errorGroup(groupId) });
+    }
+    client.invalidateQueries({ queryKey: queryKeys.analysisJobs });
+    // 토큰·추정 비용은 작업이 끝나야 기록된다.
+    client.invalidateQueries({ queryKey: ['usage'] });
+  }, [client, groupId, jobId, status]);
+
+  return query;
+}
+
 export function useAnalysisJobs() {
   return useQuery({
     queryKey: queryKeys.analysisJobs,
@@ -235,4 +316,39 @@ export function useDashboardOverview(params: DashboardOverviewParams) {
 
 export function useUsage(params: UsageParams) {
   return useQuery({ queryKey: queryKeys.usage(params), queryFn: () => usage.get(params) });
+}
+
+// ------------------------------------------------------------------- settings
+
+/** 모델 단가표. 프로바이더 API 는 단가를 주지 않으므로 이 표는 사람이 채운다. */
+export function useModelPricing() {
+  return useQuery({
+    queryKey: queryKeys.setting(SETTING_MODEL_PRICING),
+    queryFn: () => settings.get(SETTING_MODEL_PRICING),
+    retry: false,
+  });
+}
+
+/**
+ * 모델 하나의 단가를 등록·수정한다.
+ *
+ * `PUT` 은 키를 통째로 교체하므로 **기존 표에 병합**해서 보낸다 — 한 모델을 등록하다가
+ * 다른 모델 단가를 지우면, 지워진 쪽의 추정 비용이 조용히 `-` 로 돌아간다.
+ */
+export function useUpsertModelPricing() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ model, entry }: { model: string; entry: ModelPricingEntry }) => {
+      const current = await settings.get(SETTING_MODEL_PRICING).catch(() => null);
+      const table: ModelPricingTable = {
+        ...asModelPricingTable(current?.value ?? current?.effective_value),
+        [model]: entry,
+      };
+      return settings.put(SETTING_MODEL_PRICING, table);
+    },
+    onSuccess: (data) => {
+      client.setQueryData(queryKeys.setting(SETTING_MODEL_PRICING), data);
+      client.invalidateQueries({ queryKey: queryKeys.settings });
+    },
+  });
 }

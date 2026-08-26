@@ -118,8 +118,10 @@ aila/
     ├── alembic/
     │   ├── env.py
     │   ├── versions/0001_initial_schema.py   # [freeze] models.py 와 1:1
-    │   └── versions/0002_active_job_guard_and_settings_seed.py
-    │                             #   진행 중 분석 작업 부분 유니크 인덱스 + 설정 기본값 시드
+    │   ├── versions/0002_active_job_guard_and_settings_seed.py
+    │   │                         #   진행 중 분석 작업 부분 유니크 인덱스 + 설정 기본값 시드
+    │   └── versions/0003_timezone_setting.py
+    │                             #   app_settings 예약 키 timezone 시드 (스키마 변경 없음)
     ├── app/
     │   ├── main.py               # [freeze] 라우터 include 지점
     │   ├── config.py             # [freeze] AILA_* 환경변수
@@ -142,7 +144,7 @@ aila/
     │   ├── analysis/router.py        # /api/analysis-jobs (+ report)
     │   ├── dashboard/router.py       # /api/dashboard/overview
     │   ├── usage/router.py           # /api/usage
-    │   ├── app_settings/router.py    # /api/settings (예약 3 종 화이트리스트)
+    │   ├── app_settings/router.py    # /api/settings (예약 4 종 화이트리스트)
     │   │                             #   + /api/maintenance/purge-samples (policies/router.py)
     │   ├── loki/                 # (빈 구현) Loki 어댑터
     │   ├── grouping/             # (빈 구현) 파싱·정규화·fingerprint
@@ -227,10 +229,13 @@ python -m venv .venv
 
 ### 한도의 기준 두 가지 (자주 어긋나는 지점)
 
-- **일일 분석 한도는 UTC 자정 기준이다.** 전역(`app_settings.daily_analysis_limit`)과
-  정책별(`analysis_policies.daily_analysis_limit`) 모두 `analysis_jobs.requested_at` 이
-  "오늘 00:00 UTC 이후"인 건수를 센다. 서버가 KST 로 돌아도 한도는 UTC 자정에 리셋되므로,
-  한국 시간 오전 9 시에 카운터가 0 으로 돌아간다. 로컬 자정을 기대하고 있으면 어긋난다.
+- **일일 분석 한도는 `app_settings.timezone` 의 로컬 자정 기준이다** (기본
+  `Asia/Seoul`). 전역(`app_settings.daily_analysis_limit`)과 정책별
+  (`analysis_policies.daily_analysis_limit`) 모두 `analysis_jobs.requested_at` 이
+  "그 타임존의 오늘 00:00 이후"인 건수를 센다. 기준은 **서버 로케일이나 컨테이너 TZ 가
+  아니라 이 설정값** 이다 — 서버가 UTC 로 돌아도 기본값이면 KST 자정에 리셋된다.
+  `PUT /api/settings/timezone` 으로 바꾼다 (IANA 이름만 받는다; 오타는 422).
+  429 응답 `detail` 에 기준 타임존과 "자정에 리셋" 문구가 실린다.
 - **정책의 `default_range_minutes` 는 기본값이자 실행 상한이다.** 이름은 "기본"이지만
   `POST /policies/{id}/query-runs` 가 기간을 명시해도 이 값(과 서버 상한
   `AILA_MAX_QUERY_RANGE_MINUTES` 중 작은 쪽)으로 **clamp** 한다. 422 로 튕기지 않고

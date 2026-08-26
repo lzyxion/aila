@@ -20,6 +20,8 @@ from app.crypto import DecryptionError, EncryptionKeyMissingError, decrypt, encr
 from app.db import get_db
 from app.enums import LLMProviderName
 from app.llm_providers import build_llm_provider, build_llm_provider_from_values
+from app.llm_providers import list_models as provider_list_models
+from app.masking.service import mask
 from app.models import LLMConnection
 from app.providers.llm import LLMError, LLMProvider
 from app.schemas.api import (
@@ -28,6 +30,8 @@ from app.schemas.api import (
     LLMConnectionRead,
     LLMConnectionTestRequest,
     LLMConnectionUpdate,
+    LLMModelListRequest,
+    LLMModelListResponse,
 )
 
 TRACK = "LLM 분석"
@@ -36,6 +40,9 @@ router = APIRouter(prefix="/llm-connections", tags=["llm-connections"])
 
 #: 복호화가 안 될 때 쓰는 마스킹 표시값 (평문 길이도 노출하지 않는다).
 MASK_PLACEHOLDER = "****"
+
+#: 오류 문구에서 지워 줄 최소 키 길이. 너무 짧은 값을 지우면 오류 문구가 망가진다.
+MIN_REDACTABLE_KEY_CHARS = 8
 
 
 # ------------------------------------------------------------------ 내부 헬퍼
@@ -121,6 +128,19 @@ def _provider_for(connection: LLMConnection) -> LLMProvider:
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _safe_detail(message: str, api_key: str | None) -> str:
+    """SDK 오류 문구를 응답에 실을 수 있는 형태로 만든다.
+
+    두 가지를 지운다.
+    1. 방금 넘어온 **평문 api_key** — SDK 가 요청 문맥을 오류에 담는 구현이 있다.
+    2. `https://user:pw@host` 처럼 base_url 에 박힌 자격증명 (마스킹 규칙이 처리).
+    """
+    text = str(message)
+    if api_key and len(api_key) >= MIN_REDACTABLE_KEY_CHARS:
+        text = text.replace(api_key, MASK_PLACEHOLDER)
+    return mask(text)
 
 
 def _stored_api_key(connection: LLMConnection) -> str | None:
@@ -234,6 +254,63 @@ def test_llm_connection(
         latency_ms=result.latency_ms,
         details=result.details,
     )
+
+
+@router.post("/models", response_model=LLMModelListResponse)
+def list_provider_models(
+    payload: LLMModelListRequest, db: Session = Depends(get_db)
+) -> LLMModelListResponse:
+    """프로바이더가 제공하는 모델 id 목록. **무과금** 조회다 (토큰을 쓰지 않는다).
+
+    >>> 조회지만 GET 이 아니라 POST 다 <<<
+    `api_key` 를 쿼리스트링으로 받으면 평문 키가 서버 액세스 로그·프록시 로그·브라우저
+    히스토리에 남는다. 비밀은 바디로만 받는다.
+
+    `/test` 와 같은 입력 규칙을 쓴다 — `connection_id` 를 주면 저장된 값으로 조회하고,
+    함께 넘어온 provider/base_url/api_key 가 있으면 그쪽이 이긴다. 저장 전에 키를
+    입력해 보는 흐름(임시 값)도 그대로 지원한다.
+
+    >>> 이 라우트는 `/{connection_id}` **보다 먼저** 등록되어야 한다 <<<
+    아래로 내려가면 `"models"` 가 경로 파라미터로 먹혀 422 가 난다.
+
+    실패는 프로바이더 사유가 있으면 502, 입력이 틀렸으면 400 이다. 프론트는 어느
+    쪽이든 자유 입력으로 폴백하므로 detail 에 **원인**을 남기는 것이 중요하다.
+    응답에도 detail 에도 API 키 평문은 싣지 않는다.
+    """
+    if payload.connection_id is not None:
+        connection = _get_or_404(db, payload.connection_id)
+        provider_name = payload.provider or connection.provider
+        resolved_base_url = payload.base_url or connection.base_url
+        resolved_api_key = payload.api_key or _stored_api_key(connection)
+    else:
+        if not payload.provider:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="provider 또는 connection_id 중 하나는 있어야 합니다.",
+            )
+        provider_name = payload.provider
+        resolved_base_url = payload.base_url
+        resolved_api_key = payload.api_key
+
+    try:
+        models = provider_list_models(
+            provider=provider_name,
+            api_key=resolved_api_key or None,
+            base_url=resolved_base_url or None,
+        )
+    except ValueError as exc:
+        # 지원하지 않는 provider / openai_compatible 인데 base_url 없음.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_safe_detail(str(exc), resolved_api_key),
+        ) from exc
+    except LLMError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_safe_detail(str(exc), resolved_api_key),
+        ) from exc
+
+    return LLMModelListResponse(provider=LLMProviderName(provider_name), models=models)
 
 
 @router.get("/{connection_id}", response_model=LLMConnectionRead)

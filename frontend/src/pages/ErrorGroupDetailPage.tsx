@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router';
 
 import { analysisJobs as analysisJobsApi } from '../api/endpoints';
 import {
-  useAnalysisJob,
+  useAnalysisJobWithRefresh,
   useErrorGroup,
   useLlmConnections,
   useStartAnalysis,
@@ -23,6 +23,7 @@ import {
   Notice,
   PageHeader,
   Select,
+  Spinner,
   Stat,
   TableWrap,
   Td,
@@ -59,7 +60,14 @@ export function ErrorGroupDetailPage() {
     }
   }, [activeJobId, group?.latest_analysis_job_id]);
 
-  const jobQuery = useAnalysisJob(activeJobId);
+  /**
+   * 폴링이 끝나면 그룹 상세도 다시 읽는다.
+   *
+   * "분석 이력"은 작업 단건이 아니라 **그룹 상세의 `analyses`** 에서 온다. 작업이 끝나도
+   * 그 캐시를 아무도 무효화하지 않으면 결과는 표시되는데 이력의 배지만 `분석 중` 스피너로
+   * 남는다 — Phase 4 피드백 4번의 무한 로딩이 이것이었다.
+   */
+  const jobQuery = useAnalysisJobWithRefresh(activeJobId, groupId);
 
   const connections = (connectionsQuery.data ?? []).filter((connection) => connection.active);
   const defaultConnection = connections.find((connection) => connection.is_default) ?? null;
@@ -241,14 +249,29 @@ export function ErrorGroupDetailPage() {
             </div>
           </Card>
 
-          <PastAnalysesCard group={group} onSelect={setActiveJobId} activeJobId={activeJobId} />
+          <PastAnalysesCard
+            group={group}
+            onSelect={setActiveJobId}
+            activeJobId={activeJobId}
+            liveJob={jobQuery.data}
+            refreshing={groupQuery.isFetching}
+          />
         </div>
       </div>
 
       <div className="mt-6">
         {jobQuery.isError && <ErrorBlock error={jobQuery.error} />}
         {jobQuery.data && <AnalysisResultCard job={jobQuery.data} group={group} />}
-        {!jobQuery.data && !jobQuery.isPending && (
+        {/*
+          비활성 쿼리(선택된 작업 없음)도 status 는 'pending' 이라 isPending 으로 갈라내면
+          "결과 없음" 안내가 영영 나오지 않는다. 실제로 요청 중인지는 isLoading 으로 본다.
+        */}
+        {!jobQuery.data && activeJobId !== null && jobQuery.isLoading && (
+          <Card title="LLM 분석 결과">
+            <LoadingBlock label="분석 작업을 불러오는 중…" />
+          </Card>
+        )}
+        {!jobQuery.data && !jobQuery.isError && (activeJobId === null || !jobQuery.isLoading) && (
           <Card title="LLM 분석 결과">
             <EmptyBlock>
               아직 이 오류 그룹에 대한 분석 결과가 없습니다. 오른쪽에서{' '}
@@ -368,44 +391,62 @@ function PastAnalysesCard({
   group,
   onSelect,
   activeJobId,
+  liveJob,
+  refreshing,
 }: {
   group: ErrorGroupDetail;
   onSelect: (id: number) => void;
   activeJobId: number | null;
+  /** 폴링 중인 작업. 이력 항목과 같은 작업이면 **폴링 값이 이긴다**. */
+  liveJob: AnalysisJobRead | undefined;
+  refreshing: boolean;
 }) {
   return (
     <Card
-      title="같은 오류의 분석 이력"
+      title={
+        <span className="flex items-center gap-2">
+          같은 오류의 분석 이력
+          {/* 갱신 중이라는 사실은 배지가 아니라 여기서만 알린다 — 이력 항목의 스피너는
+              "그 작업이 아직 진행 중"이라는 뜻이어야 한다. */}
+          {refreshing && <Spinner className="size-3.5" />}
+        </span>
+      }
       description="조회 회차를 넘어 fingerprint 로 조인된 이력입니다."
     >
       {group.analyses.length === 0 ? (
         <EmptyBlock>이 fingerprint 로 실행된 분석이 아직 없습니다.</EmptyBlock>
       ) : (
         <ul className="divide-y divide-slate-100">
-          {group.analyses.map((analysis) => (
-            <li key={analysis.id} className="py-2.5 first:pt-0 last:pb-0">
-              <button
-                type="button"
-                onClick={() => onSelect(analysis.id)}
-                className={
-                  'w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-slate-50 ' +
-                  (activeJobId === analysis.id ? 'bg-sky-50 ring-1 ring-sky-200 ring-inset' : '')
-                }
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <AnalysisStatusBadge status={analysis.status} />
-                  <SeverityBadge severity={analysis.severity} />
-                </div>
-                <p className="mt-1 text-xs text-slate-600">
-                  {analysis.provider} · <span className="font-mono">{analysis.model}</span> ·{' '}
-                  {formatDateTime(analysis.requested_at)}
-                </p>
-                {analysis.summary && (
-                  <p className="mt-1 text-xs text-slate-500">{analysis.summary}</p>
-                )}
-              </button>
-            </li>
-          ))}
+          {group.analyses.map((analysis) => {
+            // 그룹 상세는 작업보다 늦게 갱신될 수 있다. 같은 작업이면 폴링으로 받은
+            // 최신 상태를 쓴다 — 완료된 작업이 이력에서 "분석 중"으로 남지 않게.
+            const live = liveJob && liveJob.id === analysis.id ? liveJob : null;
+            const status = live?.status ?? analysis.status;
+            const severity = live?.result?.severity ?? analysis.severity;
+            const summary = live?.result?.summary ?? analysis.summary;
+            return (
+              <li key={analysis.id} className="py-2.5 first:pt-0 last:pb-0">
+                <button
+                  type="button"
+                  onClick={() => onSelect(analysis.id)}
+                  className={
+                    'w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-slate-50 ' +
+                    (activeJobId === analysis.id ? 'bg-sky-50 ring-1 ring-sky-200 ring-inset' : '')
+                  }
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <AnalysisStatusBadge status={status} />
+                    <SeverityBadge severity={severity} />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-600">
+                    {analysis.provider} · <span className="font-mono">{analysis.model}</span> ·{' '}
+                    {formatDateTime(analysis.requested_at)}
+                  </p>
+                  {summary && <p className="mt-1 text-xs text-slate-500">{summary}</p>}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </Card>

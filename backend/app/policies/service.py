@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select
@@ -33,6 +34,7 @@ from app.enums import QueryRunStatus
 from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
     SETTING_SAMPLE_RETENTION_DAYS,
+    SETTING_TIMEZONE,
     AnalysisPolicy,
     AppSetting,
     ErrorGroup,
@@ -48,6 +50,7 @@ from app.schemas.api import (
     PolicyRead,
     PolicyUpdate,
     QueryRunCreateRequest,
+    QueryRunListResponse,
     QueryRunRead,
     SamplePurgeResponse,
 )
@@ -127,6 +130,34 @@ def global_daily_analysis_limit(db: Session) -> int:
     if isinstance(value, int) and value >= 0:
         return value
     return get_settings().default_daily_analysis_limit
+
+
+def analysis_timezone_name(db: Session) -> str:
+    """일일 한도의 "하루" 를 세는 기준 타임존 이름. 행이 없거나 깨졌으면 설정 기본값.
+
+    쓰기 경로(`app_settings.service`)가 zoneinfo 로 검증하지만, 여기서도 **로드까지**
+    확인하고 실패하면 기본값으로 내려간다. 한도 판정은 비용 차단 장치라, 설정이
+    깨졌다고 해서 예외로 막히거나 반대로 무제한이 되면 안 된다.
+    """
+    row = db.get(AppSetting, SETTING_TIMEZONE)
+    value = row.value if row is not None else None
+    if isinstance(value, str) and value.strip():
+        try:
+            ZoneInfo(value.strip())
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+        else:
+            return value.strip()
+    return get_settings().default_timezone
+
+
+def analysis_timezone(db: Session) -> ZoneInfo:
+    """`analysis_timezone_name` 을 `ZoneInfo` 로. 기본값마저 없으면 UTC 로 떨어진다."""
+    name = analysis_timezone_name(db)
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):  # pragma: no cover - tzdata 부재 방어
+        return ZoneInfo("UTC")
 
 
 def sample_retention_days(db: Session) -> int:
@@ -475,6 +506,53 @@ def get_query_run(db: Session, run_id: int) -> QueryRunRead:
     return _query_run_read(db, run)
 
 
+def list_query_runs(
+    db: Session, policy_id: int, *, limit: int = 20, offset: int = 0
+) -> QueryRunListResponse:
+    """정책별 실행 이력 (최신순 페이지네이션).
+
+    정렬은 `started_at DESC, id DESC` 다. 같은 초에 두 건이 들어가는 일이 있어서
+    `started_at` 만으로는 순서가 흔들리고, 그러면 페이지 경계에서 같은 행이 두 번
+    보이거나 한 건이 사라진다.
+
+    `group_count` 는 페이지에 실린 행에 대해서만 **한 번의 group-by 쿼리**로 센다
+    (`_query_run_read` 를 그대로 부르면 행마다 count 쿼리가 나간다).
+
+    정책이 없으면 404 — 빈 목록으로 답하면 오타 난 policy_id 가 "이력 없음"으로 보인다.
+    """
+    _require_policy(db, policy_id)
+
+    total = db.scalar(
+        select(func.count(QueryRun.id)).where(QueryRun.policy_id == policy_id)
+    ) or 0
+
+    runs = list(
+        db.scalars(
+            select(QueryRun)
+            .where(QueryRun.policy_id == policy_id)
+            .order_by(QueryRun.started_at.desc(), QueryRun.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+
+    counts: dict[int, int] = {}
+    if runs:
+        rows = db.execute(
+            select(ErrorGroup.query_run_id, func.count(ErrorGroup.id))
+            .where(ErrorGroup.query_run_id.in_([run.id for run in runs]))
+            .group_by(ErrorGroup.query_run_id)
+        ).all()
+        counts = {run_id: count for run_id, count in rows}
+
+    return QueryRunListResponse(
+        total=total,
+        limit=limit,
+        offset=offset,
+        items=[_query_run_read(db, run, group_count=counts.get(run.id, 0)) for run in runs],
+    )
+
+
 def _persist_groups(db: Session, run_id: int, groups: Sequence[object], max_samples: int) -> int:
     """그룹화 결과를 `error_groups` + `error_samples` 로 저장한다.
 
@@ -717,6 +795,8 @@ __all__ = [
     "WARN_LIMIT_CLAMPED",
     "WARN_RANGE_CLAMPED",
     "WARN_TRUNCATED",
+    "analysis_timezone",
+    "analysis_timezone_name",
     "apply_exclusions",
     "as_utc",
     "create_policy",
@@ -726,6 +806,7 @@ __all__ = [
     "get_query_run",
     "global_daily_analysis_limit",
     "list_policies",
+    "list_query_runs",
     "preview_policy",
     "purge_expired_samples",
     "purge_expired_samples_if_due",

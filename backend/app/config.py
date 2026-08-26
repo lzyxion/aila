@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     prompt_version: str = "v1"
     # 전역 일일 분석 한도의 기본값 (app_settings 에 행이 없을 때).
     default_daily_analysis_limit: int = 50
+    # 일일 한도의 "하루" 를 세는 기준 타임존 (app_settings 의 `timezone` 행이 없을 때).
+    # UTC 자정 기준이면 한국에서는 오전 9 시에 카운터가 리셋돼 "하루" 감각과 어긋난다.
+    default_timezone: str = "Asia/Seoul"
     # requested_at 기준 이 시간을 넘긴 running 작업은 failed 로 간주한다.
     # (BackgroundTasks 는 프로세스 재시작 시 진행 중 작업을 잃는다)
     analysis_job_stale_seconds: int = 900

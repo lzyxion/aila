@@ -192,6 +192,34 @@ export interface LLMConnectionTestRequest {
   api_key?: string | null;
 }
 
+/**
+ * `POST /api/llm-connections/models` — 모델 목록 조회 입력.
+ *
+ * **조회지만 GET 이 아니다.** `api_key` 를 쿼리스트링으로 보내면 평문 키가 서버
+ * 액세스 로그·프록시 로그·브라우저 히스토리에 남는다. 비밀은 바디로만 보낸다.
+ *
+ * 입력 규칙은 `LLMConnectionTestRequest` 와 같다 — `connection_id` 를 주면 저장된
+ * 값을 쓰고, 함께 보낸 provider/base_url/api_key 가 있으면 그쪽이 이긴다.
+ */
+export interface LLMModelListRequest {
+  connection_id?: number | null;
+  provider?: LLMProviderName | null;
+  base_url?: string | null;
+  api_key?: string | null;
+}
+
+/**
+ * `POST /api/llm-connections/models` — 프로바이더가 제공하는 모델 목록.
+ *
+ * 실패(502/400)하면 화면은 오류로 막지 않고 **자유 입력으로 폴백**한다. 모델 이름을
+ * 목록에서 고르는 것은 편의일 뿐이고, 프로바이더가 목록 API 를 주지 않거나 키가 아직
+ * 없을 수도 있기 때문이다.
+ */
+export interface LLMModelListResponse {
+  provider: string;
+  models: string[];
+}
+
 // ================================================================== policies
 
 export interface PolicyBase {
@@ -273,6 +301,18 @@ export interface QueryRunRead {
   warnings: FetchWarning[];
   error_message?: string | null;
   group_count: number;
+}
+
+/**
+ * `GET /api/policies/{id}/query-runs` — 정책의 실행 이력 (최신순 페이지네이션).
+ *
+ * 목록 항목은 단건 조회(`GET /api/query-runs/{id}`)와 같은 `QueryRunRead` 다.
+ */
+export interface QueryRunListResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  items: QueryRunRead[];
 }
 
 // ============================================================== error groups
@@ -474,4 +514,49 @@ export interface UsageParams {
   range_end?: string;
   model?: string;
   provider?: string;
+}
+
+// ================================================================== settings
+
+/** app.app_settings.service.DESCRIPTIONS — 화이트리스트 밖 키는 404 다. */
+export const SETTING_DAILY_ANALYSIS_LIMIT = 'daily_analysis_limit';
+export const SETTING_MODEL_PRICING = 'model_pricing';
+export const SETTING_SAMPLE_RETENTION_DAYS = 'sample_retention_days';
+/** 일일 분석 한도의 리셋 기준 시간대. 프론트는 아직 읽기만 한다. */
+export const SETTING_TIMEZONE = 'timezone';
+
+export type SettingValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+/** app.schemas.api.AppSettingRead — `value` 가 null 이면 `effective_value`(서버 기본값)를 쓴다. */
+export interface AppSettingRead {
+  key: string;
+  value?: SettingValue;
+  description?: string | null;
+  updated_at?: string | null;
+  effective_value?: SettingValue;
+}
+
+export interface AppSettingListResponse {
+  items: AppSettingRead[];
+}
+
+/**
+ * `model_pricing` 한 줄. 단가는 **1K 토큰당** 값이다 (`app/analysis/pricing.py`).
+ *
+ * 프로바이더 API 는 단가를 제공하지 않는다 — 이 표는 사람이 직접 채우는 것이 정답이고,
+ * 표에 없는 모델의 추정 비용은 0 이 아니라 null 로 남는다.
+ */
+export interface ModelPricingEntry {
+  input_per_1k?: number | null;
+  output_per_1k?: number | null;
+  currency?: string | null;
+}
+
+/** `{model: {input_per_1k, output_per_1k, currency}}` */
+export type ModelPricingTable = Record<string, ModelPricingEntry>;
+
+/** 단가표 값이 어떤 형태로 오든 dict 로만 받아들인다 (형식이 깨진 값은 빈 표로 본다). */
+export function asModelPricingTable(value: SettingValue | undefined): ModelPricingTable {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as ModelPricingTable;
 }

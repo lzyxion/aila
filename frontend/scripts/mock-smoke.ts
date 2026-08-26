@@ -8,17 +8,22 @@
  * 멱등 재사용, fingerprint 기준 분석 상태, 보고서 렌더링.
  */
 
+import { ApiError } from '../src/api/client';
 import { mockRequest } from '../src/api/mock/handler';
 import type {
   AnalysisJobCreateResponse,
   AnalysisJobRead,
+  AppSettingRead,
   DashboardOverviewResponse,
   ErrorGroupDetail,
   ErrorGroupListResponse,
+  LLMModelListResponse,
   PolicyPreviewResponse,
   PolicyRead,
+  QueryRunListResponse,
   UsageResponse,
 } from '../src/api/types';
+import { asModelPricingTable } from '../src/api/types';
 
 let failures = 0;
 function check(label: string, condition: boolean, detail = ''): void {
@@ -30,6 +35,16 @@ function check(label: string, condition: boolean, detail = ''): void {
   }
 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 실패 경로도 계약이다 — 화면의 폴백은 이 상태 코드를 보고 갈린다. */
+async function expectStatus(call: () => Promise<unknown>, status: number): Promise<boolean> {
+  try {
+    await call();
+    return false;
+  } catch (error) {
+    return error instanceof ApiError && error.status === status;
+  }
+}
 
 async function main(): Promise<void> {
   console.log('dashboard');
@@ -87,6 +102,89 @@ async function main(): Promise<void> {
     '| json 파싱 실패 경고를 올린다',
     preview.warnings.some((w) => w.code === 'parse_error'),
   );
+
+  // 계약 2 — 정책 실행 이력. 봉투 모양과 최신순 정렬이 라이브와 같아야 한다.
+  const runs = await mockRequest<QueryRunListResponse>('GET', '/api/policies/1/query-runs', {
+    query: { limit: 20, offset: 0 },
+  });
+  check('실행 이력 봉투 {total, limit, offset, items}', typeof runs.total === 'number' && Array.isArray(runs.items));
+  check('실행 이력이 최신순', runs.items.every((run, i) => i === 0 || Date.parse(runs.items[i - 1].started_at) >= Date.parse(run.started_at)));
+  check('이력에 정책 id 가 일치', runs.items.every((run) => run.policy_id === 1));
+  check(
+    '이력에 상태·건수·그룹 수·경고가 있다',
+    runs.items.every(
+      (run) =>
+        typeof run.status === 'string' &&
+        typeof run.fetched_count === 'number' &&
+        typeof run.dropped_count === 'number' &&
+        typeof run.group_count === 'number' &&
+        Array.isArray(run.warnings),
+    ),
+  );
+  check(
+    '없는 정책의 이력은 404',
+    await expectStatus(() => mockRequest('GET', '/api/policies/999999/query-runs', {}), 404),
+  );
+
+  console.log('llm 모델 목록 (계약 1)');
+  // 조회지만 POST 다 — api_key 를 쿼리스트링에 실으면 평문 키가 액세스 로그에 남는다.
+  const anthropicModels = await mockRequest<LLMModelListResponse>(
+    'POST',
+    '/api/llm-connections/models',
+    { body: { provider: 'anthropic', connection_id: 1 } },
+  );
+  check('저장된 연결로 모델 목록 조회', anthropicModels.models.length > 0);
+  check('응답 모양 {provider, models}', anthropicModels.provider === 'anthropic');
+  const compatModels = await mockRequest<LLMModelListResponse>(
+    'POST',
+    '/api/llm-connections/models',
+    { body: { provider: 'openai_compatible', base_url: 'http://llm-mock:8000/v1' } },
+  );
+  check('openai_compatible 은 base URL 로 조회', compatModels.models.length > 0);
+  check(
+    '키도 base URL 도 없으면 400 (화면은 자유 입력으로 폴백)',
+    await expectStatus(
+      () => mockRequest('POST', '/api/llm-connections/models', { body: { provider: 'openai' } }),
+      400,
+    ),
+  );
+  check(
+    '모델 목록에 GET 은 없다 (쿼리스트링 키 유출 차단)',
+    await expectStatus(
+      () =>
+        mockRequest('GET', '/api/llm-connections/models', { query: { provider: 'openai' } }),
+      404,
+    ),
+  );
+
+  console.log('settings · 모델 단가표');
+  const pricing = await mockRequest<AppSettingRead>('GET', '/api/settings/model_pricing', {});
+  check('단가표에 claude 가 있다', 'claude-sonnet-4-6' in asModelPricingTable(pricing.value));
+  check('단가표에 gpt-5.2 는 없다 (추정 비용 null 경로)', !('gpt-5.2' in asModelPricingTable(pricing.value)));
+  const merged = {
+    ...asModelPricingTable(pricing.value),
+    'gpt-5.2': { input_per_1k: 0.00125, output_per_1k: 0.01, currency: 'USD' },
+  };
+  const saved = await mockRequest<AppSettingRead>('PUT', '/api/settings/model_pricing', {
+    body: { value: merged },
+  });
+  const savedTable = asModelPricingTable(saved.value);
+  check('단가 등록 후 두 모델이 모두 남는다 (병합)', 'gpt-5.2' in savedTable && 'claude-sonnet-4-6' in savedTable);
+  check(
+    '형식이 깨진 단가표는 422 로 막는다',
+    await expectStatus(
+      () => mockRequest('PUT', '/api/settings/model_pricing', { body: { value: { 'x': { input_per_1k: -1 } } } }),
+      422,
+    ),
+  );
+  check(
+    '화이트리스트 밖 키는 404',
+    await expectStatus(() => mockRequest('GET', '/api/settings/nope', {}), 404),
+  );
+  // 원래대로 돌려놓는다 — 아래 usage 단언이 "단가 없음" 상태를 본다.
+  await mockRequest<AppSettingRead>('PUT', '/api/settings/model_pricing', {
+    body: { value: asModelPricingTable(pricing.value) },
+  });
 
   console.log('error groups');
   const groups = await mockRequest<ErrorGroupListResponse>(
@@ -156,6 +254,15 @@ async function main(): Promise<void> {
   check('모델별 집계 존재', usage.items.length >= 2);
   check('실패 건수 집계', usage.items.some((i) => i.failure_count > 0));
   check('총 추정 비용 > 0', Number(usage.total_estimated_cost) > 0);
+  // 단가표에 없는 모델의 비용은 0 이 아니라 null 이다 (화면은 `-` + "단가 등록" 버튼).
+  check(
+    '단가 미등록 모델의 추정 비용은 null',
+    usage.items.some((item) => item.model === 'gpt-5.2' && item.estimated_cost === null),
+  );
+  check(
+    '단가 등록 모델의 추정 비용은 값이 있다',
+    usage.items.some((item) => item.model === 'claude-sonnet-4-6' && item.estimated_cost !== null),
+  );
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);

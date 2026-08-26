@@ -10,6 +10,8 @@ import type {
   AnalysisJobListResponse,
   AnalysisJobRead,
   AnalysisJobStatus,
+  AppSettingListResponse,
+  AppSettingRead,
   ConnectionTestResponse,
   DashboardOverviewParams,
   DashboardOverviewResponse,
@@ -20,6 +22,8 @@ import type {
   LLMConnectionRead,
   LLMConnectionTestRequest,
   LLMConnectionUpdate,
+  LLMModelListRequest,
+  LLMModelListResponse,
   LokiConnectionCreate,
   LokiConnectionRead,
   LokiConnectionTestRequest,
@@ -30,7 +34,9 @@ import type {
   PolicyRead,
   PolicyUpdate,
   QueryRunCreateRequest,
+  QueryRunListResponse,
   QueryRunRead,
+  SettingValue,
   UsageParams,
   UsageResponse,
 } from './types';
@@ -66,6 +72,22 @@ export const llmConnections = {
   /** 연결 테스트도 실제 과금 호출이다 — 백엔드가 최소 토큰으로 보낸다. */
   test: (payload: LLMConnectionTestRequest) =>
     api.post<ConnectionTestResponse>(`${P}/llm-connections/test`, payload),
+  /**
+   * 프로바이더가 제공하는 모델 목록. 저장된 연결(`connection_id`)이나 아직 저장하지 않은
+   * 입력값(`api_key`/`base_url`) 중 하나로 조회한다.
+   *
+   * **조회지만 POST 다** — `api_key` 를 쿼리스트링에 실으면 평문 키가 서버 액세스
+   * 로그·프록시 로그·브라우저 히스토리에 남는다. 비밀은 바디로만 보낸다.
+   *
+   * 실패는 화면을 막지 않는다 — 호출부가 **자유 입력으로 폴백**한다.
+   */
+  models: (payload: LLMModelListRequest) =>
+    api.post<LLMModelListResponse>(`${P}/llm-connections/models`, {
+      provider: payload.provider ?? undefined,
+      connection_id: payload.connection_id ?? undefined,
+      api_key: payload.api_key ?? undefined,
+      base_url: payload.base_url ?? undefined,
+    }),
 };
 
 // ---------------------------------------------------------------- policies
@@ -83,6 +105,11 @@ export const policies = {
     api.post<PolicyPreviewResponse>(`${P}/policies/preview`, payload),
   run: (id: number, payload: QueryRunCreateRequest) =>
     api.post<QueryRunRead>(`${P}/policies/${id}/query-runs`, payload),
+  /** 정책의 실행 이력 (최신순). 봉투 `{total, limit, offset, items}` 로 온다. */
+  queryRuns: (id: number, params?: { limit?: number; offset?: number }) =>
+    api.get<QueryRunListResponse>(`${P}/policies/${id}/query-runs`, {
+      query: { limit: params?.limit, offset: params?.offset },
+    }),
 };
 
 export const queryRuns = {
@@ -134,4 +161,19 @@ export const dashboard = {
 
 export const usage = {
   get: (params: UsageParams) => api.get<UsageResponse>(`${P}/usage`, { query: { ...params } }),
+};
+
+// ----------------------------------------------------------------- settings
+
+/**
+ * 예약 설정 3 종(`daily_analysis_limit`·`model_pricing`·`sample_retention_days`).
+ *
+ * `PUT` 은 키 하나를 **통째로 교체**한다 — 단가표에 모델을 추가할 때는 호출부가 기존
+ * 표를 읽어 병합한 값을 보내야 한다 (그렇지 않으면 다른 모델 단가가 사라진다).
+ */
+export const settings = {
+  list: () => api.get<AppSettingListResponse>(`${P}/settings`),
+  get: (key: string) => api.get<AppSettingRead>(`${P}/settings/${key}`),
+  put: (key: string, value: SettingValue) =>
+    api.put<AppSettingRead>(`${P}/settings/${key}`, { value }),
 };

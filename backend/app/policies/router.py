@@ -12,7 +12,7 @@ Phase 1 담당 트랙: **정책 API**
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -24,6 +24,7 @@ from app.schemas.api import (
     PolicyRead,
     PolicyUpdate,
     QueryRunCreateRequest,
+    QueryRunListResponse,
     QueryRunRead,
     SamplePurgeResponse,
 )
@@ -86,6 +87,22 @@ def create_query_run(
     조회가 실패해도 201 로 `status="failed"` 인 조회 이력을 돌려준다.
     """
     return service.create_query_run(db, policy_id, payload)
+
+
+@router.get("/{policy_id}/query-runs", response_model=QueryRunListResponse)
+def list_query_runs(
+    policy_id: int,
+    limit: int = Query(default=20, gt=0, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> QueryRunListResponse:
+    """정책의 실행 이력을 **최신순**으로 준다 (`group_count` 포함).
+
+    실행 직후에만 보이던 조회 결과로 다시 들어갈 수 있어야 한다는 1 차 피드백의
+    백엔드 몫이다. 실패한 실행(`status="failed"`)도 그대로 실린다 — 이력에서
+    빼면 "왜 결과가 없는지" 를 화면에서 알 방법이 사라진다.
+    """
+    return service.list_query_runs(db, policy_id, limit=limit, offset=offset)
 
 
 @query_runs_router.get("/{run_id}", response_model=QueryRunRead)

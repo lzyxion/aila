@@ -147,6 +147,39 @@ class LLMConnectionTestRequest(BaseModel):
     api_key: str | None = None
 
 
+class LLMModelListRequest(BaseModel):
+    """`POST /llm-connections/models` — 모델 목록 조회 입력.
+
+    **바디로 받는 이유**: `api_key` 를 쿼리스트링에 실으면 평문 키가 액세스 로그·프록시
+    로그·브라우저 히스토리에 남는다. 조회(무과금)라도 비밀을 실어 보내는 요청은 POST 다.
+
+    입력 규칙은 `LLMConnectionTestRequest` 와 같다 — `connection_id` 를 주면 저장된 값을
+    쓰고, 함께 넘어온 provider/base_url/api_key 가 있으면 그쪽이 이긴다.
+
+    `provider` 가 열거형이 아니라 `str` 인 것은 의도다. 모르는 이름을 pydantic 이 422 로
+    튕기면 프론트의 `isEndpointMissing` 폴백이 "경로 없음"으로 오해한다 — 라우터에서
+    **사유가 담긴 400** 으로 바꿔 준다.
+    """
+
+    connection_id: int | None = None
+    provider: str | None = Field(default=None, max_length=64)
+    base_url: str | None = Field(default=None, max_length=512)
+    #: 평문 입력 전용. 저장하지 않고, 응답에도 오류 detail 에도 싣지 않는다.
+    api_key: str | None = None
+
+
+class LLMModelListResponse(BaseModel):
+    """`POST /llm-connections/models` — 프로바이더가 제공하는 모델 id 목록.
+
+    모델 목록 조회는 토큰을 쓰지 않는 **무과금** 호출이다.
+    순서는 프로바이더가 준 그대로다 (정렬은 표시 계층의 몫).
+    응답에 API 키는 어떤 형태로도 싣지 않는다 — 마스킹된 값조차 넣지 않는다.
+    """
+
+    provider: LLMProviderName
+    models: list[str] = Field(default_factory=list)
+
+
 # =================================================================== policies
 
 
@@ -244,6 +277,18 @@ class QueryRunRead(BaseModel):
     warnings: list[FetchWarning] = Field(default_factory=list)
     error_message: str | None = None
     group_count: int = 0
+
+
+class QueryRunListResponse(BaseModel):
+    """`GET /policies/{id}/query-runs` — 정책별 실행 이력 페이지 (최신순).
+
+    `total` 은 페이지가 아니라 **정책 전체**의 건수다 (페이지네이션 UI 가 필요로 한다).
+    """
+
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    items: list[QueryRunRead] = Field(default_factory=list)
 
 
 # =============================================================== error groups
@@ -503,6 +548,8 @@ __all__ = [
     "LLMConnectionRead",
     "LLMConnectionTestRequest",
     "LLMConnectionUpdate",
+    "LLMModelListRequest",
+    "LLMModelListResponse",
     "LabelValuesResponse",
     "LokiConnectionCreate",
     "LokiConnectionRead",
@@ -514,6 +561,7 @@ __all__ = [
     "PolicyRead",
     "PolicyUpdate",
     "QueryRunCreateRequest",
+    "QueryRunListResponse",
     "QueryRunRead",
     "SamplePurgeResponse",
     "ServiceErrorCount",

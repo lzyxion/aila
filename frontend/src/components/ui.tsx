@@ -69,11 +69,19 @@ export function PageHeader({
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
 const buttonStyles: Record<ButtonVariant, string> = {
-  primary: 'bg-sky-700 text-white hover:bg-sky-800 disabled:bg-slate-300',
+  primary:
+    'bg-sky-700 text-white shadow-sm shadow-sky-700/25 hover:bg-sky-800 disabled:bg-slate-300 disabled:shadow-none',
   secondary:
     'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50 disabled:text-slate-400',
   ghost: 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:text-slate-300',
   danger: 'border border-rose-200 bg-white text-rose-700 hover:bg-rose-50 disabled:text-slate-400',
+};
+
+const buttonSizes = {
+  sm: 'px-2.5 py-1.5 text-xs',
+  md: 'px-3.5 py-2 text-sm',
+  /** 화면에서 "여기를 누르는 화면"임을 알려야 하는 주 동작에만 쓴다 (대시보드 정책 실행). */
+  lg: 'px-5 py-2.5 text-sm font-semibold',
 };
 
 export function Button({
@@ -84,14 +92,14 @@ export function Button({
   ...rest
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: ButtonVariant;
-  size?: 'sm' | 'md';
+  size?: keyof typeof buttonSizes;
 }) {
   return (
     <button
       type="button"
       className={cx(
         'inline-flex items-center justify-center gap-1.5 rounded-lg font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed',
-        size === 'sm' ? 'px-2.5 py-1.5 text-xs' : 'px-3.5 py-2 text-sm',
+        buttonSizes[size],
         buttonStyles[variant],
         className,
       )}
@@ -99,6 +107,40 @@ export function Button({
     >
       {children}
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------- 아이콘
+
+/** 실행(▶). 대시보드의 주 동작 버튼이 글자만으로 묻히지 않게 붙인다. */
+export function PlayIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className={cx('size-4 shrink-0', className)}
+      fill="currentColor"
+    >
+      <path d="M5.2 3.3a.8.8 0 0 1 1.2-.7l6 4.7a.8.8 0 0 1 0 1.4l-6 4.7a.8.8 0 0 1-1.2-.7V3.3Z" />
+    </svg>
+  );
+}
+
+/** 정보 물음표. 툴팁(=title)을 붙일 자리를 시각적으로 표시한다. */
+export function InfoIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className={cx('size-3.5 shrink-0', className)}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M8 7.2v4" strokeLinecap="round" />
+      <circle cx="8" cy="4.9" r=".85" fill="currentColor" stroke="none" />
+    </svg>
   );
 }
 
@@ -351,13 +393,16 @@ export function Td({
   children,
   className,
   align = 'left',
+  colSpan,
 }: {
-  children: ReactNode;
+  children?: ReactNode;
   className?: string;
   align?: 'left' | 'right' | 'center';
+  colSpan?: number;
 }) {
   return (
     <td
+      colSpan={colSpan}
       className={cx(
         'border-b border-slate-100 px-3 py-2.5 align-top text-slate-700',
         align === 'right' && 'text-right tabular-nums',
@@ -396,6 +441,36 @@ export function Stat({
       </p>
       {sub && <p className="mt-0.5 text-xs text-slate-500">{sub}</p>}
     </div>
+  );
+}
+
+/**
+ * 한 줄에 고정되는 코드 표시. 넘치면 줄바꿈이 아니라 **말줄임**이다.
+ *
+ * 마스킹된 API 키처럼 "길이가 얼마든 한 줄이어야 하는" 값에 쓴다 — `break-all` 로 두면
+ * 키 하나가 카드 높이를 밀어내고 폼이 스크롤된다 (Phase 4 피드백 5번).
+ */
+export function OneLineCode({
+  children,
+  title,
+  className,
+}: {
+  children: ReactNode;
+  title?: string;
+  className?: string;
+}) {
+  return (
+    <code
+      title={title}
+      className={cx(
+        // max-w-* 는 호출부가 정한다 — 여기에 max-w-full 을 두면 생성 순서에 따라
+        // 호출부의 좁은 상한을 덮어써서 긴 값이 표를 밀어낸다.
+        'block min-w-0 truncate rounded bg-slate-100 px-1.5 py-0.5 align-middle font-mono text-xs text-slate-700',
+        className,
+      )}
+    >
+      {children}
+    </code>
   );
 }
 

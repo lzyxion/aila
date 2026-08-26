@@ -85,4 +85,43 @@ def build_llm_provider_from_values(
     )
 
 
-__all__ = ["SUPPORTED_PROVIDERS", "build_llm_provider", "build_llm_provider_from_values"]
+def list_models(
+    *,
+    provider: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout_seconds: float | None = None,
+) -> list[str]:
+    """프로바이더의 모델 목록. 지원 판정과 base_url 규칙을 `build_*` 와 공유한다.
+
+    모델을 **고르기 전에** 부르는 조회라 어댑터 인스턴스(=model 필수)를 만들지 않고
+    각 어댑터의 `list_models` classmethod 로 직접 간다. 토큰을 쓰지 않는 무과금
+    호출이며, 실패는 어댑터가 `LLMError` 로 감싼다.
+    """
+    provider_name = str(provider or "")
+    if timeout_seconds is None:
+        timeout_seconds = get_settings().llm_timeout_seconds
+
+    if provider_name in (LLMProviderName.OPENAI.value, LLMProviderName.OPENAI_COMPATIBLE.value):
+        if provider_name == LLMProviderName.OPENAI_COMPATIBLE.value and not base_url:
+            raise ValueError("provider='openai_compatible' 은 base_url 이 필수입니다.")
+        return OpenAIProvider.list_models(
+            api_key=api_key, base_url=base_url or None, timeout_seconds=timeout_seconds
+        )
+    if provider_name == LLMProviderName.ANTHROPIC.value:
+        return AnthropicProvider.list_models(
+            api_key=api_key, base_url=base_url or None, timeout_seconds=timeout_seconds
+        )
+
+    raise ValueError(
+        f"지원하지 않는 provider 입니다: {provider_name!r} "
+        f"(지원: {', '.join(SUPPORTED_PROVIDERS)})."
+    )
+
+
+__all__ = [
+    "SUPPORTED_PROVIDERS",
+    "build_llm_provider",
+    "build_llm_provider_from_values",
+    "list_models",
+]

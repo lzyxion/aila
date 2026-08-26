@@ -70,19 +70,48 @@ class OpenAIProvider(LLMProvider):
         return self._client
 
     def _build_client(self) -> Any:
-        kwargs: dict[str, Any] = {"timeout": self.timeout_seconds}
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        elif self.base_url:
-            # 인증이 없는 호환 엔드포인트도 SDK 는 키를 요구한다.
-            kwargs["api_key"] = "not-required"
-        if self.base_url:
-            kwargs["base_url"] = self.base_url
+        return _build_client(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+        )
 
+    # ------------------------------------------------------------------ 모델 목록
+
+    @classmethod
+    def list_models(
+        cls,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> list[str]:
+        """`GET /v1/models` 로 모델 id 목록을 가져온다 (토큰을 쓰지 않는 무과금 호출).
+
+        **classmethod 인 이유**: 모델 목록은 model 을 고르기 *전에* 필요하므로
+        `model` 이 필수인 생성자를 태울 수 없다. `LLMProvider` ABC 의 연산은
+        `test_connection` / `analyze` 둘뿐이라는 어댑터 계약도 그대로 둔다 —
+        모델 목록은 인스턴스 연산이 아니라 엔드포인트 조회다.
+
+        순서는 프로바이더가 준 그대로 둔다 (정렬은 표시 계층의 몫).
+        """
+        client = _build_client(
+            api_key=api_key,
+            base_url=base_url,
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else get_settings().llm_timeout_seconds
+            ),
+        )
         try:
-            return OpenAI(**kwargs)
-        except OpenAIError as exc:  # 키 누락 등
-            raise LLMError(f"OpenAI 클라이언트를 만들 수 없습니다: {exc}") from exc
+            page = client.models.list()
+        except OpenAIError as exc:
+            raise LLMError(
+                f"OpenAI 모델 목록 조회에 실패했습니다: {_error_message(exc)}",
+                status_code=_status_code(exc),
+            ) from exc
+        return _model_ids(page)
 
     # ---------------------------------------------------------------------- 연산
 
@@ -151,6 +180,44 @@ class OpenAIProvider(LLMProvider):
 
 
 # ------------------------------------------------------------------- 내부 헬퍼
+
+
+def _build_client(
+    *, api_key: str | None, base_url: str | None, timeout_seconds: float
+) -> Any:
+    """SDK 클라이언트 생성. 인스턴스 경로와 모델 목록 경로가 같은 규칙을 쓴다."""
+    kwargs: dict[str, Any] = {"timeout": timeout_seconds}
+    if api_key:
+        kwargs["api_key"] = api_key
+    elif base_url:
+        # 인증이 없는 호환 엔드포인트도 SDK 는 키를 요구한다.
+        kwargs["api_key"] = "not-required"
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    try:
+        return OpenAI(**kwargs)
+    except OpenAIError as exc:  # 키 누락 등
+        raise LLMError(f"OpenAI 클라이언트를 만들 수 없습니다: {exc}") from exc
+
+
+def _model_ids(page: Any) -> list[str]:
+    """`models.list()` 응답에서 id 문자열만 뽑는다 (순서 유지, 중복 제거)."""
+    items = getattr(page, "data", None)
+    if items is None:
+        try:
+            items = list(page)
+        except TypeError as exc:  # pragma: no cover - SDK 형태가 바뀐 경우 방어
+            raise LLMError("모델 목록 응답 형식을 해석할 수 없습니다.") from exc
+
+    seen: set[str] = set()
+    ids: list[str] = []
+    for item in items or []:
+        model_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+        if isinstance(model_id, str) and model_id and model_id not in seen:
+            seen.add(model_id)
+            ids.append(model_id)
+    return ids
 
 
 def _extract_json(response: Any) -> dict[str, Any]:

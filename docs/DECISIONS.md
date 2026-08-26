@@ -37,10 +37,20 @@
 
 **교훈**: 세 high 의 공통점은 개별 트랙 테스트로는 안 잡힌다는 것 — 결합(마스킹×그룹화), 조용한 폴백(실패가 아닌 성공), 경합(단일 요청 밖). 병렬 구현 뒤에는 결합·부재·경합을 노리는 별도 리뷰 단계가 필수다.
 
+## Phase 4 — 1차 사용 피드백 (백엔드 몫)
+
+- **모델 목록 조회는 어댑터 인스턴스가 아니라 classmethod** (`OpenAIProvider.list_models` / `AnthropicProvider.list_models`). 모델을 *고르기 전에* 필요한 조회라 `model` 이 필수인 생성자를 태울 수 없다. `LLMProvider` ABC 의 연산은 `test_connection`·`analyze` 둘뿐이라는 어댑터 계약은 그대로 뒀다 — 목록 조회는 인스턴스 연산이 아니라 엔드포인트 조회다. 프로바이더 분기는 `factory.list_models` 한 곳(=`build_llm_provider_from_values` 와 같은 지원 판정·`openai_compatible` base_url 필수 규칙)에 모았다.
+- **`POST /api/llm-connections/models` — 조회지만 GET 이 아니다.** 처음에는 `api_key` 를 쿼리스트링으로 받는 GET 이었는데, 그러면 평문 키가 서버 액세스 로그·프록시 로그·브라우저 히스토리에 남는다. **비밀을 실어 보내는 요청은 조회여도 바디로 받는다** (`LLMModelListRequest`). GET 라우트는 남기지 않았다 — 하위 호환을 위해 유출 경로를 살려 두면 그 경로로만 계속 호출된다.
+- **`/models` 는 `/{connection_id}` 보다 위에 등록한다.** 아래로 내려가면 `"models"` 가 경로 파라미터로 먹혀 422 가 난다. 실패는 프로바이더 사유면 502, 입력 오류면 400 이고 `detail` 은 마스킹을 거친다(평문 키·base_url 내장 자격증명 유출 차단). 프론트는 실패 시 자유 입력으로 폴백하므로 `detail` 에 **원인**을 남기는 것이 계약의 핵심이다.
+- **`provider` 는 바디에서도 열거형이 아니라 `str` 로 받는다.** 모르는 이름을 pydantic 이 422 로 튕기면 프론트의 `isEndpointMissing` 이 "경로 없음"으로 오해해 원인 없이 폴백이 켜진다. 라우터에서 **사유가 담긴 400** 으로 바꾼다. (바디로 옮기면서 `connection_id=` 빈 값을 정수로 파싱해 주던 헬퍼는 사라졌다 — JSON 은 `null`·생략으로 "지정 안 함"을 표현한다.)
+- **실행 이력 목록의 정렬은 `started_at DESC, id DESC`.** `started_at` 만으로는 같은 초에 들어간 두 건의 순서가 흔들려 페이지 경계에서 행이 중복되거나 사라진다. `group_count` 는 페이지 행에 대해 **한 번의 group-by** 로 센다(행마다 count 쿼리 금지).
+- **일일 한도의 "하루" 는 UTC 자정 → `app_settings.timezone` 의 로컬 자정.** UTC 기준이면 한국에서는 업무 시작 시각인 오전 9 시에 카운터가 리셋돼 "어제 저녁에 쓴 분량이 아침까지 남는다". 로컬 자정을 먼저 구하고 UTC 로 변환하는 **순서**가 핵심이다(반대로 하면 9 시간 어긋난다). 타임존은 쓰기 시점에 `zoneinfo` 로 실제 로드해 검증한다 — 오타를 받아 두면 비용 차단 장치가 판정 시점에 조용히 멈춘다. 읽기 경로도 로드 실패 시 기본값으로 내려간다(예외로 분석이 막히지도, 무제한이 되지도 않게).
+- **revision 0003 은 데이터 전용**(스키마 변경 없음): `timezone` 행 시드 + `daily_analysis_limit` 설명 문구 갱신. 저장된 description 이 in-code 문구보다 우선하므로, 0002 를 이미 돌린 DB 는 이 revision 없이는 "UTC 자정 기준" 을 계속 보여 준다.
+
 ## 운영 노트
 
-- **모델 단가표는 비어 있다.** `PUT /api/settings/model_pricing` 으로 채우기 전에는 추정 비용이 `-` 로 표시된다 (0 이 아님 — 의도).
-- **일일 분석 한도는 UTC 자정 기준** 리셋 (KST 오전 9시). 전역 기본 50, `PUT /api/settings/daily_analysis_limit`.
+- **모델 단가표는 `PUT /api/settings/model_pricing` 로 관리한다** (사용량 화면의 인라인 등록 폼도 같은 API). 미등록 모델의 추정 비용은 `-` 로 표시된다 (0 이 아님 — 의도). 프로바이더 API 는 단가를 제공하지 않으므로 자동 수집은 불가능하다.
+- **일일 분석 한도는 `app_settings.timezone` 의 로컬 자정 기준** 리셋 (기본 `Asia/Seoul`). 전역 기본 50, `PUT /api/settings/daily_analysis_limit` · `PUT /api/settings/timezone`.
 - **전송 페이로드 감사는 llm-mock 연결에서만 가능** — 실 프로바이더에는 `/debug/last-request` 가 없다. 마스킹 회귀 검증은 llm-mock 으로.
 - **compose 의 Fernet 키는 데모용 평문이다.** 교체하면 기존 저장 secret 복호화 불가 → 연결 재등록.
 - frontend 컨테이너는 소스를 COPY 하므로 수정 후 `--build frontend` 필요.
