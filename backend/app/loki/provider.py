@@ -58,6 +58,29 @@ QUERY_RANGE_PATH = "/loki/api/v1/query_range"
 #: metric 쿼리는 함수/집계 식별자로 시작한다 (`sum by (x) (...)`, `rate(...)`).
 _METRIC_QUERY_RE = re.compile(r"^[A-Za-z_]\w*\s*(\(|by\b|without\b)")
 
+#: LogQL 라벨 이름으로 쓸 수 있는 형태. 아니면 `by (...)` 절을 붙이지 않는다.
+_LABEL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _mask(text: str) -> str:
+    """오류 메시지·details 로 나가는 문자열에서 자격증명을 지운다.
+
+    `base_url` 에는 `http://user:pass@loki` 처럼 자격증명이 박혀 있을 수 있고, 그 값이
+    예외 메시지·`test_connection().details`·`query_runs.error_message` 를 타고 화면과
+    DB 로 샌다. 마스킹은 화면 표시 전과 LLM 전송 직전 두 곳에 걸리지만 **오류 경로는
+    그 두 곳 어디도 지나지 않는다** — 그래서 여기서 한 번 더 건다.
+
+    지연 import 는 다른 트랙 모듈이 없는 상태에서도 이 모듈이 import 되게 하기 위한
+    것이다(계약 테스트 `test_all_app_modules_import`).
+    """
+    if not text:
+        return text
+    try:
+        from app.masking.service import mask as _mask_text
+    except ImportError:  # pragma: no cover - 마스킹 트랙 미구현 시 방어
+        return text
+    return _mask_text(text)
+
 
 def _to_nanoseconds(moment: datetime) -> str:
     """Loki `start`/`end` 파라미터용 나노초 epoch 문자열."""
@@ -82,12 +105,23 @@ def is_metric_query(query: str) -> bool:
     return bool(_METRIC_QUERY_RE.match(stripped))
 
 
-def wrap_count_over_time(query: str, step: int) -> str:
-    """로그 쿼리를 건수 metric 쿼리로 감싼다. 이미 metric 쿼리면 그대로 둔다."""
+def wrap_count_over_time(query: str, step: int, service_label: str = "service") -> str:
+    """로그 쿼리를 건수 metric 쿼리로 감싼다. 이미 metric 쿼리면 그대로 둔다.
+
+    `sum by (<service 라벨>)` 로 감싸는 것이 핵심이다. 라벨 없는 `sum(...)` 은 시리즈
+    라벨을 **전부 떨어뜨려** 대시보드의 서비스별 건수가 영원히 비고, 조용히 DB(잘린
+    라인) 집계로 폴백한다 — 정확히 metric 쿼리를 쓰기로 한 이유를 무효로 만든다.
+
+    라벨 이름은 연결 설정의 `label_mapping`(`resolve_label_mapping`)에서 온다.
+    LogQL 식별자로 쓸 수 없는 이름이면 `by (...)` 절 없이 감싼다.
+    """
     stripped = query.strip()
     if is_metric_query(stripped):
         return stripped
-    return f"sum(count_over_time({stripped} [{int(step)}s]))"
+    body = f"count_over_time({stripped} [{int(step)}s])"
+    if service_label and _LABEL_NAME_RE.match(service_label):
+        return f"sum by ({service_label}) ({body})"
+    return f"sum({body})"
 
 
 def resolve_label_mapping(label_mapping: Mapping[str, str] | None) -> dict[str, str]:
@@ -143,6 +177,15 @@ class LokiProvider(LogSourceProvider):
         self.timeout_seconds = float(timeout_seconds)
         self._standard_labels = resolve_label_mapping(self.label_mapping)
 
+    @property
+    def service_label(self) -> str:
+        """metric 시리즈에서 서비스를 가리키는 **소스 라벨 이름**.
+
+        `sum by (<이 이름>)` 으로 감싸므로, 호출 측(대시보드)은 이 이름으로 시리즈
+        라벨을 읽어야 한다. 표준 필드 이름(`service`)과 다를 수 있다.
+        """
+        return self._standard_labels["service"]
+
     # ------------------------------------------------------------------ HTTP
 
     def _auth_and_headers(self) -> tuple[httpx.Auth | None, dict[str, str]]:
@@ -190,10 +233,14 @@ class LokiProvider(LogSourceProvider):
             return client.get(path, params=params)
         except httpx.TimeoutException as exc:
             raise LogSourceError(
-                f"Loki 응답 시간을 초과했습니다 ({self.timeout_seconds:g}s): {self.base_url}{path}"
+                _mask(
+                    f"Loki 응답 시간을 초과했습니다 ({self.timeout_seconds:g}s): "
+                    f"{self.base_url}{path}"
+                )
             ) from exc
         except httpx.HTTPError as exc:
-            raise LogSourceError(f"Loki 요청에 실패했습니다: {exc}") from exc
+            # httpx 예외 메시지에는 요청 URL 이 그대로 들어간다 (자격증명 포함).
+            raise LogSourceError(_mask(f"Loki 요청에 실패했습니다: {exc}")) from exc
 
     @staticmethod
     def _describe_failure(response: httpx.Response) -> str:
@@ -204,7 +251,8 @@ class LokiProvider(LogSourceProvider):
             prefix = "Loki 인증에 실패했습니다"
         else:
             prefix = "Loki 가 오류를 반환했습니다"
-        return f"{prefix} (HTTP {response.status_code}){f': {body}' if body else ''}"
+        # 응답 본문에는 요청 URL·헤더가 되비쳐 올 수 있다.
+        return _mask(f"{prefix} (HTTP {response.status_code}){f': {body}' if body else ''}")
 
     def _json(self, client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> dict:
         response = self._request(client, path, params)
@@ -230,7 +278,11 @@ class LokiProvider(LogSourceProvider):
         `/ready` 는 프록시 뒤에서 막혀 있을 수 있으므로 실패해도 곧바로 실패로
         보지 않고 `details.ready` 로만 알린다 — 인증까지 확인해 주는 것은 labels 다.
         """
-        details: dict[str, Any] = {"base_url": self.base_url, "auth_type": self.auth_type}
+        # base_url 에 자격증명이 박혀 있을 수 있다 — details 는 화면으로 그대로 나간다.
+        details: dict[str, Any] = {
+            "base_url": _mask(self.base_url),
+            "auth_type": self.auth_type,
+        }
         started = perf_counter()
         try:
             with self._client() as client:
@@ -390,7 +442,9 @@ class LokiProvider(LogSourceProvider):
     def count_over_time(self, query: str, range: TimeRange, step: int) -> CountSeries:  # noqa: A002
         """건수·추이 metric 조회. 로그 쿼리는 `count_over_time` 으로 감싼다."""
         step_seconds = max(1, int(step))
-        metric_query = wrap_count_over_time(query, step_seconds)
+        metric_query = wrap_count_over_time(
+            query, step_seconds, self._standard_labels["service"]
+        )
 
         params = {
             "query": metric_query,
@@ -410,8 +464,10 @@ class LokiProvider(LogSourceProvider):
 
         if result_type == "streams":
             raise LogSourceError(
-                "count_over_time 결과가 로그 스트림입니다. metric 쿼리가 아닙니다: "
-                f"{metric_query}"
+                _mask(
+                    "count_over_time 결과가 로그 스트림입니다. metric 쿼리가 아닙니다: "
+                    f"{metric_query}"
+                )
             )
 
         for entry in series:

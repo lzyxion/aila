@@ -102,6 +102,14 @@ async function main(): Promise<void> {
   check('미분석 그룹의 analysis_status 는 null', detail.analysis_status === null);
   check('대표 로그 존재', detail.samples.length > 0);
   check('추이 존재', detail.trend.length > 0);
+  // 플레이스홀더 표식은 백엔드가 실제로 넣는 `<MASKED:종류>` 여야 한다.
+  // 표식이 다르면 화면·복사·보고서에서 "마스킹된 자리"가 mock 과 실제에서 갈린다.
+  const allMasked = groups.items
+    .map((g) => g.normalized_message)
+    .concat(detail.samples.map((s) => s.masked_log))
+    .join('\n');
+  check('마스킹 표식이 <MASKED:종류> 형식', /<MASKED:[A-Z_]+>/.test(allMasked), allMasked.slice(0, 120));
+  check('구식 [REDACTED:*] 표식이 없다', !allMasked.includes('[REDACTED'));
 
   console.log('analysis job 상태 전이');
   const job = await mockRequest<AnalysisJobCreateResponse>(

@@ -117,7 +117,9 @@ aila/
     ├── .env.example
     ├── alembic/
     │   ├── env.py
-    │   └── versions/0001_initial_schema.py   # [freeze] models.py 와 1:1
+    │   ├── versions/0001_initial_schema.py   # [freeze] models.py 와 1:1
+    │   └── versions/0002_active_job_guard_and_settings_seed.py
+    │                             #   진행 중 분석 작업 부분 유니크 인덱스 + 설정 기본값 시드
     ├── app/
     │   ├── main.py               # [freeze] 라우터 include 지점
     │   ├── config.py             # [freeze] AILA_* 환경변수
@@ -140,6 +142,8 @@ aila/
     │   ├── analysis/router.py        # /api/analysis-jobs (+ report)
     │   ├── dashboard/router.py       # /api/dashboard/overview
     │   ├── usage/router.py           # /api/usage
+    │   ├── app_settings/router.py    # /api/settings (예약 3 종 화이트리스트)
+    │   │                             #   + /api/maintenance/purge-samples (policies/router.py)
     │   ├── loki/                 # (빈 구현) Loki 어댑터
     │   ├── grouping/             # (빈 구현) 파싱·정규화·fingerprint
     │   └── masking/              # (빈 구현) 민감정보 마스킹
@@ -196,6 +200,11 @@ python -m venv .venv
 - `backend/pyproject.toml`
 - `backend/tests/test_contracts.py`
 
+> 설계-구현 정합 리뷰에서 동결 파일 세 곳을 **최소 범위로** 열었다 (전부 추가·완화):
+> `main.py` 에 `/api/settings`·`/api/maintenance` include 두 줄, `models.py` 의
+> `AnalysisJob.__table_args__` 에 진행 중 작업 부분 유니크 인덱스 하나(= revision `0002`),
+> `schemas/api.py` 에 신규 응답 모델과 필드 추가(기존 필드 제거 없음).
+
 새 마이그레이션이 필요하면 `0001` 을 고치지 말고 새 revision 을 추가한 뒤 보고한다.
 라우터 스켈레톤(`*/router.py`)은 각 트랙이 자기 것만 채운다 — 시그니처와 `response_model`
 은 유지하고 본문만 구현한다.
@@ -213,3 +222,17 @@ python -m venv .venv
 - LLM 응답 Pydantic 검증은 **어댑터 밖 공통 경로에서 한 번만** 한다.
 - 분석은 수동 트리거만 존재한다. 자동 실행을 추가하지 않는다.
 - `estimated_cost` 는 추정이다. 화면에서 "추정" 표기를 유지한다.
+  단가표에 모델이 없으면 값은 **`null` 이며 0 이 아니다** — 0 으로 적으면 "쌌다"로 읽힌다.
+  항목 전부가 `null` 이면 합계(`total_estimated_cost`)도 `null` 이고, 화면은 `-` 로 쓴다.
+
+### 한도의 기준 두 가지 (자주 어긋나는 지점)
+
+- **일일 분석 한도는 UTC 자정 기준이다.** 전역(`app_settings.daily_analysis_limit`)과
+  정책별(`analysis_policies.daily_analysis_limit`) 모두 `analysis_jobs.requested_at` 이
+  "오늘 00:00 UTC 이후"인 건수를 센다. 서버가 KST 로 돌아도 한도는 UTC 자정에 리셋되므로,
+  한국 시간 오전 9 시에 카운터가 0 으로 돌아간다. 로컬 자정을 기대하고 있으면 어긋난다.
+- **정책의 `default_range_minutes` 는 기본값이자 실행 상한이다.** 이름은 "기본"이지만
+  `POST /policies/{id}/query-runs` 가 기간을 명시해도 이 값(과 서버 상한
+  `AILA_MAX_QUERY_RANGE_MINUTES` 중 작은 쪽)으로 **clamp** 한다. 422 로 튕기지 않고
+  조용히 줄이지도 않는다 — 조정 사실은 `query_runs.warnings` 에 `range_clamped` 로 남는다.
+  더 넓은 기간을 조회하려면 정책의 값을 올려야 한다.

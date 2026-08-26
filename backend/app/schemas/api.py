@@ -199,7 +199,9 @@ class PolicyPreviewRequest(BaseModel):
     loki_connection_id: int
     logql: str = Field(min_length=1)
     range_minutes: int = Field(default=60, gt=0)
-    limit: int = Field(default=50, gt=0)
+    #: 미리보기는 "쿼리가 무엇을 잡는가"만 확인하면 된다. 상한을 두지 않으면
+    #: 저장도 하지 않은 쿼리로 정책 실행과 같은 양을 읽게 된다.
+    limit: int = Field(default=50, gt=0, le=200)
     exclusions: list[str] = Field(default_factory=list)
 
 
@@ -311,6 +313,8 @@ class ErrorGroupDetail(ErrorGroupSummary):
     samples: list[ErrorSampleRead] = Field(default_factory=list)
     #: 발생 추이 (metric 쿼리 기반)
     trend: list[CountPoint] = Field(default_factory=list)
+    #: `trend` 가 비어 있는 사유. 조회 실패와 "발생이 없었다"를 구분한다.
+    trend_warnings: list[FetchWarning] = Field(default_factory=list)
     #: 같은 fingerprint 의 과거 분석 이력 (조회 회차를 넘어 조인)
     analyses: list[AnalysisJobSummary] = Field(default_factory=list)
 
@@ -424,7 +428,8 @@ class UsageAggregate(BaseModel):
     failure_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
-    estimated_cost: Decimal = Decimal("0")
+    #: 단가표에 모델이 없으면 **None** 이다. 0 은 "쌌다"로 읽히므로 쓰지 않는다.
+    estimated_cost: Decimal | None = None
     avg_latency_ms: float | None = None
 
 
@@ -436,7 +441,45 @@ class UsageResponse(BaseModel):
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     #: 추정 합계. 정산 근거가 아니다.
-    total_estimated_cost: Decimal = Decimal("0")
+    #: 비용을 계산할 수 있는 항목이 하나도 없으면 0 이 아니라 **None** 이다.
+    total_estimated_cost: Decimal | None = None
+
+
+# ================================================================== settings
+
+
+class AppSettingRead(BaseModel):
+    """`app_settings` 한 줄. `value` 가 None 이면 서버 기본값을 쓴다는 뜻이다."""
+
+    key: str
+    value: dict | list | str | int | float | bool | None = None
+    description: str | None = None
+    updated_at: datetime | None = None
+    #: 행이 없을 때 실제로 적용되는 값 (설정 기본값).
+    effective_value: dict | list | str | int | float | bool | None = None
+
+
+class AppSettingListResponse(BaseModel):
+    items: list[AppSettingRead] = Field(default_factory=list)
+
+
+class AppSettingUpdate(BaseModel):
+    """예약 키만 쓸 수 있다. 값 형식은 키마다 서버가 검증한다."""
+
+    value: dict | list | str | int | float | bool | None = None
+
+
+# =============================================================== maintenance
+
+
+class SamplePurgeResponse(BaseModel):
+    """보존 기간이 지난 `error_samples` 삭제 결과."""
+
+    deleted: int = 0
+    retention_days: int = 0
+    cutoff: datetime | None = None
+    #: 하루 1 회 자동 실행 조건에 걸려 실제로는 돌지 않았을 때 False.
+    executed: bool = True
 
 
 __all__ = [
@@ -446,6 +489,9 @@ __all__ = [
     "AnalysisJobListResponse",
     "AnalysisJobRead",
     "AnalysisJobSummary",
+    "AppSettingListResponse",
+    "AppSettingRead",
+    "AppSettingUpdate",
     "ConnectionTestResponse",
     "DashboardOverviewResponse",
     "ErrorGroupDetail",
@@ -469,6 +515,7 @@ __all__ = [
     "PolicyUpdate",
     "QueryRunCreateRequest",
     "QueryRunRead",
+    "SamplePurgeResponse",
     "ServiceErrorCount",
     "UsageAggregate",
     "UsageRecordRead",

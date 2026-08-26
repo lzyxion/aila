@@ -29,7 +29,15 @@ def get_overview(
     query_run_id: int | None = None,
     range_start: datetime | None = None,
     range_end: datetime | None = None,
-    step_seconds: int = Query(default=300, gt=0),
+    step_seconds: int = Query(
+        default=300,
+        ge=service.MIN_STEP_SECONDS,
+        le=service.MAX_STEP_SECONDS,
+        description=(
+            "metric 쿼리 step(초). 포인트 수가 "
+            f"{service.MAX_SERIES_POINTS} 개를 넘으면 서버가 자동으로 올리고 경고를 남긴다."
+        ),
+    ),
     top: int = Query(default=10, gt=0, le=100),
     db: Session = Depends(get_db),
 ) -> DashboardOverviewResponse:

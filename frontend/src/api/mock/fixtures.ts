@@ -197,8 +197,9 @@ interface GroupSeed {
 }
 
 /**
- * 대표 로그는 마스킹 이후 형태로만 존재한다 — `[REDACTED:*]` 는 masking 트랙이
- * 넣는 플레이스홀더를 흉내 낸 것이다.
+ * 대표 로그는 마스킹 이후 형태로만 존재한다. 플레이스홀더는 백엔드가 실제로 넣는
+ * 형식 `<MASKED:종류>` 그대로 쓴다 (`app/masking/rules.py` 의 KINDS) — 표식이 다르면
+ * 화면·복사·보고서에서 "마스킹된 자리"를 알아보는 눈이 mock 과 실제에서 갈린다.
  */
 export const groupSeeds: GroupSeed[] = [
   {
@@ -223,14 +224,14 @@ export const groupSeeds: GroupSeed[] = [
       {
         min: -3,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"payment-api","msg":"payment gateway request timed out after 30000ms (upstream 504)","request_id":"<UUID>","user":"[REDACTED:EMAIL]","authorization":"[REDACTED:BEARER]"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"payment-api","msg":"payment gateway request timed out after 30000ms (upstream 504)","request_id":"<UUID>","user":"<MASKED:EMAIL>","authorization":"<MASKED:BEARER_TOKEN>"}',
         stacktrace:
           'Traceback (most recent call last):\n  File "app/gateway/psp_client.py", line 142, in charge\n    resp = await self._http.post(url, json=payload, timeout=30.0)\n  File "httpx/_client.py", line 1878, in post\n    return await self.request(...)\nhttpx.ReadTimeout: timed out',
       },
       {
         min: -12,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"payment-api","msg":"payment gateway request timed out after 30000ms (upstream 504)","request_id":"<UUID>","card":"[REDACTED:CARD]"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"payment-api","msg":"payment gateway request timed out after 30000ms (upstream 504)","request_id":"<UUID>","card":"<MASKED:CARD>"}',
       },
       {
         min: -27,
@@ -261,14 +262,14 @@ export const groupSeeds: GroupSeed[] = [
       {
         min: -6,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"order-api","msg":"could not connect to database: connection pool exhausted (20/20)","dsn":"[REDACTED:DB_URL]","request_id":"<UUID>"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"order-api","msg":"could not connect to database: connection pool exhausted (20/20)","dsn":"<MASKED:DB_URI>","request_id":"<UUID>"}',
         stacktrace:
           'Traceback (most recent call last):\n  File "app/db/session.py", line 61, in get_session\n    conn = await pool.acquire(timeout=5)\nasyncpg.exceptions.TooManyConnectionsError: connection pool exhausted',
       },
       {
         min: -19,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"order-api","msg":"could not connect to database: connection pool exhausted (20/20)","dsn":"[REDACTED:DB_URL]","request_id":"<UUID>"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"order-api","msg":"could not connect to database: connection pool exhausted (20/20)","dsn":"<MASKED:DB_URI>","request_id":"<UUID>"}',
       },
     ],
     shape: steady,
@@ -294,12 +295,12 @@ export const groupSeeds: GroupSeed[] = [
       {
         min: -4,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"auth-api","msg":"token validation failed: JWT expired at <TIMESTAMP>","status":401,"token":"[REDACTED:JWT]","subject":"[REDACTED:EMAIL]"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"auth-api","msg":"token validation failed: JWT expired at <TIMESTAMP>","status":401,"token":"<MASKED:JWT>","subject":"<MASKED:EMAIL>"}',
       },
       {
         min: -21,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"auth-api","msg":"token validation failed: JWT expired at <TIMESTAMP>","status":401,"token":"[REDACTED:JWT]"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"auth-api","msg":"token validation failed: JWT expired at <TIMESTAMP>","status":401,"token":"<MASKED:JWT>"}',
       },
     ],
     shape: steady,
@@ -353,7 +354,7 @@ export const groupSeeds: GroupSeed[] = [
       {
         min: -5,
         masked_log:
-          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"notification-api","msg":"webhook delivery failed with status 502 after 5 retries","target":"https://hooks.[REDACTED:HOST]/t/[REDACTED:TOKEN]","contact":"[REDACTED:PHONE]"}',
+          '{"ts":"<TIMESTAMP>","level":"ERROR","service":"notification-api","msg":"webhook delivery failed with status 502 after 5 retries","target":"https://hooks.example.com/t/<MASKED:API_KEY>","contact":"<MASKED:PHONE>"}',
       },
     ],
     shape: steady,
@@ -393,7 +394,7 @@ export function buildSamples(seed: GroupSeed): ErrorSampleRead[] {
     masked_log: sample.masked_log,
     labels: seed.labels,
     stacktrace: sample.stacktrace ?? null,
-    masking_rule_version: 'v1',
+    masking_rule_version: 'v2',
   }));
 }
 
@@ -414,7 +415,7 @@ export function buildGroupDetail(seed: GroupSeed, queryRunId: number): ErrorGrou
     latest_severity: null,
     labels: seed.labels,
     top_stack_frame: seed.top_stack_frame,
-    normalization_rule_version: 'v1',
+    normalization_rule_version: 'v2',
     samples: buildSamples(seed),
     trend: makeSeries(60, 300, seed.shape),
     analyses: [],

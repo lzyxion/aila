@@ -131,8 +131,12 @@ class AnthropicProvider(LLMProvider):
                 **request,
                 output_config={"format": {"type": "json_schema", "schema": schema}},
             )
-        except TypeError:
-            # SDK 가 output_config 를 모르는 버전이다 -> 폴백.
+        except TypeError as exc:
+            # SDK 가 output_config 를 모르는 버전일 때만 폴백한다.
+            # 임의의 TypeError 까지 삼키면 (우리 쪽 인자 조립 버그, SDK 내부 오류)
+            # 같은 프롬프트로 두 번 호출해 **이중 과금**이 난다.
+            if "output_config" not in str(exc):
+                raise
             response = None
         except AnthropicError as exc:
             if not _is_unsupported_request(exc):

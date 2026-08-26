@@ -39,9 +39,15 @@ stacktrace + labels/fields)에 적용되는지 확인하는 것이 이 시나리
 ## 기대하는 마스킹 결과
 
 - 위 표의 값 중 **원문 그대로 남는 것이 하나도 없어야 한다.**
-- 마스킹 결과는 플레이스홀더로 대체된다 (예: `authorization=<BEARER_TOKEN>`,
-  `user_email=<EMAIL>`, `card=<CARD>`). 값을 통째로 지우기보다 **종류를 남기는 편**이
-  LLM 원인 파악에 유리하다 — "토큰이 있었다"는 사실 자체가 맥락이다.
+- 마스킹 결과는 `<MASKED:종류>` 플레이스홀더로 대체된다 (예:
+  `authorization=Bearer <MASKED:BEARER_TOKEN>`, `user_email=<MASKED:EMAIL>`,
+  `card=<MASKED:CARD>`). 값을 통째로 지우기보다 **종류를 남기는 편**이 LLM 원인 파악에
+  유리하다 — "토큰이 있었다"는 사실 자체가 맥락이다.
+- 같은 이유로 **값 뒤의 문맥도 남긴다** (마스킹 규칙 v2). 규칙이 값을 줄 끝까지 삼키면
+  `status=502` 와 예외 이름까지 같이 지워져, 원인이 다른 오류가 한 fingerprint 로 병합된다.
+  이 한 줄에서 CARD·PHONE·API_KEY·DB_URI·COOKIE 규칙이 **각각 실제로 도달**하는지를
+  `backend/tests/test_masking.py` 가 이 파일을 직접 읽어 단언한다 — 앞 규칙이 뒤 규칙의
+  대상을 먼저 먹어 버리면 "다 지워진 것처럼" 보이면서 규칙이 조용히 빠진다.
 - 마스킹된 결과만 `error_samples.masked_log` 에 저장된다.
   **원본은 DB 에 저장하지 않는다.** 원본이 필요하면 그룹의 라벨·시각으로 Loki 에서 재조회한다.
 - 마스킹은 **화면 표시 전과 LLM 전송 직전에 모두** 적용된다. 경로가 다르므로

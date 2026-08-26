@@ -39,6 +39,41 @@ MAX_TREND_POINTS = 24
 
 TRUNCATION_MARK = "…(생략)"
 
+#: 프롬프트의 "- 라벨:" 줄에 실을 수 있는 라벨 이름 (화이트리스트).
+#:
+#: `error_groups.labels` 에는 원본 재조회에 필요한 **소스 라벨 전체**가 들어 있고,
+#: `| json` 파서를 통과한 로그라면 `stacktrace`·`http_status`·`detected_level` 같은
+#: 구조화 필드까지 라벨로 올라온다. 그걸 그대로 실으면 대표 로그·정규화 메시지와
+#: 내용이 중복되면서 토큰만 먹고, 라벨 줄 하나가 프롬프트에서 가장 긴 줄이 된다.
+#: 프롬프트에 필요한 것은 "어느 서비스/환경/배포인가" 뿐이므로 그 축만 남긴다.
+PROMPT_LABEL_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "app",
+        "application",
+        "cluster",
+        "component",
+        "container",
+        "deployment_env",
+        "env",
+        "environment",
+        "instance",
+        "job",
+        "level",
+        "namespace",
+        "pod",
+        "region",
+        "release",
+        "service",
+        "service_name",
+        "severity",
+        "team",
+        "version",
+    }
+)
+
+#: 화이트리스트에 있어도 값이 이보다 길면 식별 라벨이 아니라고 본다.
+MAX_LABEL_VALUE_CHARS = 64
+
 SYSTEM_PROMPT = (
     "당신은 애플리케이션 오류 로그를 읽는 한국어 SRE 보조자입니다.\n"
     "주어진 것은 마스킹된 대표 로그 몇 개와 그룹 메타데이터뿐입니다. "
@@ -92,10 +127,22 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + TRUNCATION_MARK
 
 
+def prompt_labels(labels: dict[str, str]) -> dict[str, str]:
+    """프롬프트에 실을 라벨만 남긴다 (화이트리스트 + 값 길이 상한)."""
+    return {
+        key: value
+        for key, value in labels.items()
+        if key.lower() in PROMPT_LABEL_ALLOWLIST
+        and value not in (None, "")
+        and len(str(value)) <= MAX_LABEL_VALUE_CHARS
+    }
+
+
 def _format_labels(labels: dict[str, str]) -> str:
-    if not labels:
+    selected = prompt_labels(labels)
+    if not selected:
         return "없음"
-    return ", ".join(f"{key}={value}" for key, value in sorted(labels.items()) if value != "")
+    return ", ".join(f"{key}={value}" for key, value in sorted(selected.items()))
 
 
 def context_from_group(
@@ -188,13 +235,16 @@ def build_prompt(
 
 
 __all__ = [
+    "MAX_LABEL_VALUE_CHARS",
     "MAX_SAMPLE_CHARS",
     "MAX_STACKTRACE_CHARS",
     "MAX_TREND_POINTS",
+    "PROMPT_LABEL_ALLOWLIST",
     "SYSTEM_PROMPT",
     "PromptContext",
     "PromptSample",
     "build_prompt",
     "context_from_group",
+    "prompt_labels",
     "render_user_message",
 ]

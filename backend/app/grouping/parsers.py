@@ -116,9 +116,16 @@ def extract_error_type(text: str | None) -> str | None:
 
 # --------------------------------------------------------------- 스택트레이스
 
+#: Java / Node / .NET — 가장 안쪽(오류 지점) 프레임이 **먼저** 출력된다.
+_AT_FRAME_RE = re.compile(r"^\s*at\s+\S+")
+#: Python — 바깥(호출자)에서 안쪽(오류 지점) 순으로 출력된다.
+_PY_FRAME_RE = re.compile(r"""^\s*File\s+"[^"]*",\s*line\s+\d+""")
+#: Python 트레이스백 헤더. 이게 있으면 프레임 순서가 바깥 -> 안쪽이다.
+_PY_HEADER_RE = re.compile(r"^\s*Traceback \(most recent call last\)\s*:\s*$")
+
 _STACK_FRAME_PATTERNS = (
-    re.compile(r"^\s*at\s+\S+"),  # Java / Node / .NET
-    re.compile(r"""^\s*File\s+"[^"]*",\s*line\s+\d+"""),  # Python
+    _AT_FRAME_RE,
+    _PY_FRAME_RE,
     re.compile(r"^\s*\.{3}\s*\d+\s+more\s*$"),  # Java "... 12 more"
     re.compile(r"^\s+\S+\.(?:go|rb|php|kt|scala|cs|js|ts):\d+"),  # Go/Ruby/PHP 등
     re.compile(r"^\s*#\d+\s+\S+"),  # PHP `#0 /app/x.php(12): foo()`
@@ -126,7 +133,7 @@ _STACK_FRAME_PATTERNS = (
 )
 
 _STACK_HEADER_PATTERNS = (
-    re.compile(r"^\s*Traceback \(most recent call last\)\s*:\s*$"),
+    _PY_HEADER_RE,
     re.compile(r"^\s*Caused by\s*:"),
     re.compile(r"^\s*The above exception was the direct cause"),
     re.compile(r"^\s*During handling of the above exception"),
@@ -141,18 +148,40 @@ def _is_stack_header(line: str) -> bool:
     return any(pattern.match(line) for pattern in _STACK_HEADER_PATTERNS)
 
 
+def _is_python_traceback(lines: list[str]) -> bool:
+    """Python 형식인가 — `Traceback (...)` 헤더가 있거나, `File "...", line N` 만 있는가."""
+    if any(_PY_HEADER_RE.match(line) for line in lines):
+        return True
+    return any(_PY_FRAME_RE.match(line) for line in lines) and not any(
+        _AT_FRAME_RE.match(line) for line in lines
+    )
+
+
 def top_stack_frame(stacktrace: str | None) -> str | None:
-    """스택트레이스의 **상위 프레임 한 줄만** 돌려준다.
+    """스택트레이스에서 **오류가 난 프레임 한 줄만** 돌려준다.
 
     전체를 fingerprint 에 넣으면 호출 경로가 조금만 달라도 같은 버그가 쪼개지고,
     메시지만 넣으면 다른 원인이 뭉친다 — 설계 문서가 상위 프레임만 쓰라고 못 박은 이유다.
+
+    >>> 언어마다 프레임 순서가 반대다 <<<
+    Java/Node 의 `at ...` 는 **가장 안쪽(오류 지점) 프레임이 먼저** 나오지만, Python
+    트레이스백은 `most recent call last` 라는 이름 그대로 **바깥(호출자) -> 안쪽** 순으로
+    나온다. 그래서 Python 은 **마지막** `File` 줄이 오류 지점이다. 첫 줄을 쓰면 진입점
+    (예: 웹 프레임워크의 핸들러)만 잡혀, 서로 다른 오류가 한 그룹으로 뭉친다.
     """
     if not stacktrace:
         return None
-    for line in stacktrace.splitlines():
+    lines = stacktrace.splitlines()
+
+    if _is_python_traceback(lines):
+        python_frames = [line for line in lines if _PY_FRAME_RE.match(line)]
+        if python_frames:
+            return python_frames[-1].strip()
+
+    for line in lines:
         if _is_frame(line):
             return line.strip()
-    for line in stacktrace.splitlines():
+    for line in lines:
         stripped = line.strip()
         if stripped and not _is_stack_header(line):
             return stripped

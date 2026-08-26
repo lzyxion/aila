@@ -25,19 +25,22 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import BackgroundTasks, HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.analysis import integrations, pricing
 from app.analysis.prompt import build_prompt, context_from_group
 from app.config import get_settings
 from app.enums import ACTIVE_JOB_STATUSES, AnalysisJobStatus, UsageStatus
-from app.error_groups.service import latest_analysis_by_fingerprint
+from app.error_groups.service import active_analysis_by_fingerprint, group_trend
 from app.models import (
+    SETTING_DAILY_ANALYSIS_LIMIT,
     AnalysisJob,
     AnalysisPolicy,
     AnalysisResult,
     AnalysisUsageRecord,
+    AppSetting,
     ErrorGroup,
     ErrorSample,
     LLMConnection,
@@ -95,7 +98,13 @@ def _start_of_day(moment: datetime) -> datetime:
 
 
 def _short(text: object) -> str:
-    return str(text)[:MAX_ERROR_MESSAGE_CHARS]
+    """저장용 오류 텍스트 공통 처리 — 마스킹 후 길이 제한.
+
+    LLM base_url 에 내장된 자격증명(`https://user:pw@host`)이 SDK 오류 메시지에
+    실려 `analysis_jobs.error_message` / `failure_reason` 으로 평문 저장되는 것을
+    막는다 (query_runs.error_message 와 같은 처리).
+    """
+    return integrations.mask(str(text))[:MAX_ERROR_MESSAGE_CHARS]
 
 
 def _not_found(message: str) -> HTTPException:
@@ -302,6 +311,29 @@ def daily_usage(db: Session, policy: AnalysisPolicy | None) -> tuple[int, int]:
     return global_used, policy_used
 
 
+def _lock_for_limit_check(db: Session) -> None:
+    """한도 검사와 작업 삽입 사이에 다른 트랜잭션이 끼어들지 못하게 직렬화한다.
+
+    >>> 어디까지 막아 주는가 (한계를 분명히 해 둔다) <<<
+    - **PostgreSQL**: `app_settings.daily_analysis_limit` 행을 `SELECT ... FOR UPDATE`
+      로 잠근다. 같은 DB 를 보는 프로세스가 몇 개든, count + insert 가 이 잠금 안에서
+      직렬화되므로 한도는 정확히 지켜진다. 단 **행이 있어야** 잠글 것이 있다 —
+      revision 0002 가 기본값을 시드하는 이유가 이것이다. 행이 없으면 잠금 없이 진행한다
+      (그 경우 아래 SQLite 와 같은 수준의 방어만 남는다).
+    - **SQLite**: 쓰기가 단일 writer 로 직렬화되므로 한 프로세스 안에서는 사실상 안전하다.
+      명시적 잠금은 걸지 않는다.
+    - 어느 쪽이든 이 함수는 **한도만** 지킨다. 같은 fingerprint 의 중복 실행은 잠금이
+      아니라 `analysis_jobs` 의 부분 유니크 인덱스(= DB 제약)가 막는다.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    db.execute(
+        select(AppSetting.key)
+        .where(AppSetting.key == SETTING_DAILY_ANALYSIS_LIMIT)
+        .with_for_update()
+    )
+
+
 def _enforce_daily_limits(db: Session, policy: AnalysisPolicy | None) -> None:
     """전역·정책별 일일 한도. 사용량 대시보드는 사후 확인일 뿐이라 여기서 막아야 한다."""
     global_used, policy_used = daily_usage(db, policy)
@@ -325,13 +357,40 @@ def _enforce_daily_limits(db: Session, policy: AnalysisPolicy | None) -> None:
             )
 
 
+def _active_job_for(db: Session, fingerprint: str) -> AnalysisJob | None:
+    """같은 fingerprint 로 **아직 돌고 있는** 작업 (stale 전이를 먼저 적용한다).
+
+    "최신 1 건" 이 아니라 active 전용으로 조회하는 것이 핵심이다. 최신 1 건만 보면
+    실패한 작업이 뒤에 하나 끼어드는 순간 아직 돌고 있는 작업을 놓치고, 그대로
+    두 번째 LLM 호출이 나간다 (= 중복 과금).
+    """
+    active = active_analysis_by_fingerprint(db, [fingerprint])
+    candidate = active.get(fingerprint)
+    if candidate is None:
+        return None
+    sweep_stale_jobs(db, [candidate])
+    if candidate.status not in ACTIVE_STATUS_VALUES:
+        # stale 로 실패 처리했다 — 그 뒤에 남은 active 가 또 있는지 다시 본다.
+        return active_analysis_by_fingerprint(db, [fingerprint]).get(fingerprint)
+    return candidate
+
+
 def create_analysis_job(
     db: Session,
     group_id: int,
     payload: AnalysisJobCreateRequest,
     background_tasks: BackgroundTasks | None = None,
 ) -> AnalysisJobCreateResponse:
-    """분석 작업 생성 → BackgroundTasks 로 실행 예약. 상태는 GET 으로 폴링한다."""
+    """분석 작업 생성 → BackgroundTasks 로 실행 예약. 상태는 GET 으로 폴링한다.
+
+    >>> 동시 요청 <<<
+    두 사람이 같은 버튼을 동시에 누르면 "체크 -> 삽입" 사이가 경합 구간이 된다.
+    응용 레벨 검사만으로는 그 창을 닫을 수 없으므로, 최종 방어선은 DB 제약이다 —
+    `analysis_jobs(fingerprint) WHERE status IN ('pending','running')` 부분 유니크
+    인덱스가 두 번째 삽입을 `IntegrityError` 로 튕기고, 여기서 그걸 받아 기존 작업을
+    `reused=True` 로 돌려준다. 일일 한도는 `_lock_for_limit_check` 가 최선을 다해
+    직렬화한다 (한계는 그 함수 docstring 참고).
+    """
     group = _require_group(db, group_id)
     policy = policy_of_group(db, group)
 
@@ -342,15 +401,12 @@ def create_analysis_job(
         )
 
     # 멱등: fingerprint 기준으로 진행 중인 작업이 있으면 그대로 돌려준다 (중복 과금 차단).
-    latest = latest_analysis_by_fingerprint(db, [group.fingerprint])
-    existing, _ = latest.get(group.fingerprint, (None, None))
+    existing = _active_job_for(db, group.fingerprint)
     if existing is not None:
-        sweep_stale_jobs(db, [existing])
-        if existing.status in ACTIVE_STATUS_VALUES:
-            return AnalysisJobCreateResponse(
-                **_job_read(db, existing).model_dump(), reused=True
-            )
+        return AnalysisJobCreateResponse(**_job_read(db, existing).model_dump(), reused=True)
 
+    # 한도 검사와 삽입을 같은 트랜잭션 안에 묶는다 (그 사이의 조회는 읽기뿐이다).
+    _lock_for_limit_check(db)
     _enforce_daily_limits(db, policy)
     connection = _resolve_connection(db, payload.llm_connection_id)
 
@@ -367,7 +423,19 @@ def create_analysis_job(
         requested_at=_now(),
     )
     db.add(job)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 경합에서 졌다 — 부분 유니크 인덱스가 막아 준 것이다. 이긴 쪽 작업을 돌려준다.
+        db.rollback()
+        winner = _active_job_for(db, group.fingerprint)
+        if winner is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="같은 오류에 대한 분석 작업이 동시에 생성되어 요청을 처리하지 못했습니다.",
+            ) from None
+        return AnalysisJobCreateResponse(**_job_read(db, winner).model_dump(), reused=True)
+
     db.refresh(job)
 
     if background_tasks is not None:
@@ -410,6 +478,33 @@ def _record_usage(
     )
 
 
+def _finish_if_running(
+    db: Session, job_id: int, *, job_status: AnalysisJobStatus, error_message: str | None
+) -> bool:
+    """`status='running'` 일 때만 종료 상태로 갱신한다.
+
+    조건 없이 덮어쓰면, 실행이 stale 임계를 넘겨 sweep 이 `failed` 로 바꿔 둔 작업을
+    뒤늦게 끝난 백그라운드 태스크가 `succeeded` 로 **되살린다.** 프런트는 이미 실패를
+    보여줬는데 새로고침하면 성공으로 바뀌어 있는 상태가 되고, stale 규칙 자체가 의미를
+    잃는다. 갱신하지 못했으면(`False`) 사용량 기록만 남기고 상태는 건드리지 않는다 —
+    토큰은 실제로 나갔으므로 usage 는 지운다고 될 일이 아니다.
+    """
+    result = db.execute(
+        update(AnalysisJob)
+        .where(
+            AnalysisJob.id == job_id,
+            AnalysisJob.status == AnalysisJobStatus.RUNNING.value,
+        )
+        .values(
+            status=job_status.value,
+            completed_at=_now(),
+            error_message=_short(error_message) if error_message else None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return bool(result.rowcount)
+
+
 def _fail(
     db: Session,
     job: AnalysisJob,
@@ -419,10 +514,9 @@ def _fail(
     output_tokens: int,
     latency_ms: int | None,
 ) -> None:
-    job.status = AnalysisJobStatus.FAILED.value
-    job.completed_at = _now()
-    job.error_message = _short(message)
-    db.add(job)
+    _finish_if_running(
+        db, job.id, job_status=AnalysisJobStatus.FAILED, error_message=message
+    )
     _record_usage(
         db,
         job,
@@ -433,6 +527,7 @@ def _fail(
         failure_reason=_short(message),
     )
     db.commit()
+    db.expire(job)
 
 
 def _prompt_samples(db: Session, group: ErrorGroup) -> list[ErrorSample]:
@@ -446,6 +541,19 @@ def _prompt_samples(db: Session, group: ErrorGroup) -> list[ErrorSample]:
     ).all()
     # 화면·프롬프트 모두 시간순이 읽기 쉽다.
     return sorted(rows, key=lambda sample: (sample.occurred_at, sample.id))
+
+
+def _prompt_trend(db: Session, group: ErrorGroup) -> list[tuple[datetime, float]]:
+    """프롬프트 "최근 추이" 항목에 실을 (시각, 건수) 목록.
+
+    그룹 상세 화면이 쓰는 것과 **같은 metric 쿼리**다. 추이 조회가 실패해도 분석은
+    계속한다 — 프롬프트 고정 목록에서 추이는 "있으면" 싣는 선택 항목이다.
+    """
+    try:
+        points, _ = group_trend(db, group)
+    except Exception:  # noqa: BLE001 - 추이 실패로 분석을 죽이지 않는다
+        return []
+    return [(point.timestamp, point.value) for point in points]
 
 
 def _execute(db: Session, job_id: int) -> None:
@@ -474,7 +582,9 @@ def _execute(db: Session, job_id: int) -> None:
             raise AnalysisFailure("LLM 연결을 찾을 수 없습니다 (삭제되었을 수 있습니다).")
 
         prompt = build_prompt(
-            context_from_group(group, _prompt_samples(db, group)),
+            context_from_group(
+                group, _prompt_samples(db, group), trend=_prompt_trend(db, group)
+            ),
             prompt_version=job.prompt_version,
         )
         provider = integrations.build_llm_provider(connection)
@@ -500,15 +610,6 @@ def _execute(db: Session, job_id: int) -> None:
         )
         return
 
-    db.add(
-        AnalysisResult(
-            analysis_job_id=job.id,
-            result_json=parsed.model_dump(mode="json"),
-            # 목록 표시용 비정규화 컬럼 (result_json 의 동명 필드와 같은 값).
-            summary=parsed.summary,
-            severity=parsed.severity.value,
-        )
-    )
     _record_usage(
         db,
         job,
@@ -517,11 +618,21 @@ def _execute(db: Session, job_id: int) -> None:
         latency_ms=latency_ms,
         usage_status=UsageStatus.SUCCEEDED,
     )
-    job.status = AnalysisJobStatus.SUCCEEDED.value
-    job.completed_at = _now()
-    job.error_message = None
-    db.add(job)
+    # stale sweep 이 이미 failed 로 바꿔 둔 작업이면 되살리지 않는다.
+    if _finish_if_running(
+        db, job.id, job_status=AnalysisJobStatus.SUCCEEDED, error_message=None
+    ):
+        db.add(
+            AnalysisResult(
+                analysis_job_id=job.id,
+                result_json=parsed.model_dump(mode="json"),
+                # 목록 표시용 비정규화 컬럼 (result_json 의 동명 필드와 같은 값).
+                summary=parsed.summary,
+                severity=parsed.severity.value,
+            )
+        )
     db.commit()
+    db.expire(job)
 
 
 def run_analysis_job(factory: sessionmaker[Session], job_id: int) -> None:

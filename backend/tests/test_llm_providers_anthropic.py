@@ -203,6 +203,19 @@ def test_falls_back_when_sdk_does_not_know_output_config(install_client) -> None
     assert len(client.messages.calls) == 2
 
 
+def test_unrelated_type_error_is_not_retried(install_client) -> None:
+    """임의의 TypeError 까지 폴백으로 삼키면 같은 프롬프트로 두 번 호출해 **이중 과금**이 난다.
+
+    폴백은 "SDK 가 output_config 를 모른다"일 때만이다.
+    """
+    client = install_client(TypeError("unhashable type: 'dict'"), tool_use_response(RAW_RESULT))
+
+    with pytest.raises(TypeError):
+        _provider().analyze(LLMPrompt(user="로그"))
+
+    assert len(client.messages.calls) == 1
+
+
 def test_fallback_failure_is_wrapped_in_llm_error(install_client) -> None:
     install_client(
         FakeAnthropicError("bad request", status_code=400),

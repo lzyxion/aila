@@ -701,19 +701,18 @@ def step_report_usage_dashboard(
     )
 
     # 기간을 주지 않으면 백엔드는 **마지막 조회의 range_end** 를 끝으로 쓴다. 그 시각은
-    # 항상 부분 버킷 한가운데라 step 정렬에 걸려 추이가 비는 일이 있다 — 같은 응답의
-    # by_service(DB 대체 집계)는 값이 있는데 total_errors 만 0 이 되는 상태다.
-    # 실패로 다루지는 않되(화면은 기간 프리셋을 쓴다) 조용히 넘기지도 않는다.
+    # 항상 부분 버킷 한가운데라, 예전에는 Loki 의 step 정렬에 걸려 마지막 버킷이 통째로
+    # 빠지고 추이가 영구히 비었다 (by_service 는 값이 있는데 total_errors 만 0 인 상태).
+    # 지금은 서버가 range_end 를 step 경계로 **올림**하므로 그 공백이 없어야 한다.
     scoped = api.get("/api/dashboard/overview", params={"policy_id": policy["id"]})
     if scoped["total_errors"] <= 0:
         info(
-            "! 기간 미지정(policy_id 만) 호출은 total_errors=0 이다 — "
+            "! 기간 미지정(policy_id 만) 호출이 total_errors=0 이다 — "
             f"by_service={[(s['service'], s['count']) for s in scoped['by_service'][:2]]}, "
-            f"warnings={[w.get('code') for w in scoped['warnings']]}. "
-            "Loki step 정렬 + range_end=조회 시각 조합의 알려진 공백."
+            f"warnings={[w.get('code') for w in scoped['warnings']]}."
         )
     else:
-        info(f"기간 미지정 호출 total_errors={scoped['total_errors']:g}")
+        info(f"기간 미지정 호출 total_errors={scoped['total_errors']:g} (step 경계 올림 적용)")
     analyzed = [
         group for group in overview["top_groups"] if group.get("analysis_status") is not None
     ]

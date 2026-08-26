@@ -21,6 +21,14 @@ from app.schemas.logrecord import LogRecord
 FIXTURE_DIR = Path(__file__).resolve().parent
 SECRET_LOG_FILE = FIXTURE_DIR / "secret_logs.jsonl"
 
+#: 저장소 루트 (`backend/tests/fixtures` -> `backend/tests` -> `backend` -> 루트).
+REPO_ROOT = FIXTURE_DIR.parents[2]
+SCENARIO_DIR = REPO_ROOT / "infra" / "scenarios"
+
+#: 마스킹 검증 시나리오. 설계 문서가 "비밀값 포함" 시나리오만은 자동 테스트로 만들라고
+#: 못 박은 대상이고, 데모에서 실제로 Loki 에 들어가는 줄과 같은 파일이다.
+SECRET_LEAK_SCENARIO = "06-secret-leak"
+
 #: 모든 fixture 가 기준으로 삼는 시각.
 BASE_TIME = datetime(2026, 8, 26, 1, 0, 0, tzinfo=UTC)
 
@@ -82,6 +90,9 @@ PLAIN_LINE = (
     "(request_id=8f2a1c3e-6d55-4f10-9a2b-0c1d2e3f4a5b)"
 )
 
+# Python 트레이스백은 `most recent call last` — **마지막** File 줄이 오류 지점이고,
+# 앞쪽 줄들이 호출 경로다. Java/Node 의 `at ...` 와 순서가 반대라, 아래 세 fixture 는
+# "오류 지점이 같은가"를 마지막 프레임 기준으로 구분한다.
 PYTHON_TRACEBACK = (
     "Traceback (most recent call last):\n"
     '  File "/app/payment/service.py", line 42, in charge\n'
@@ -91,21 +102,25 @@ PYTHON_TRACEBACK = (
     "TimeoutError: payment gateway timed out after 3000ms"
 )
 
-#: 같은 상위 프레임, 다른 하위 호출 경로 — 한 그룹이어야 한다.
+#: 같은 오류 지점(마지막 프레임), 다른 호출 경로 — 한 그룹이어야 한다.
 PYTHON_TRACEBACK_OTHER_CALLER = (
     "Traceback (most recent call last):\n"
-    '  File "/app/payment/service.py", line 42, in charge\n'
-    "    response = client.post(url, timeout=3)\n"
     '  File "/app/batch/retry.py", line 7, in run\n'
+    "    response = client.post(url, timeout=3)\n"
+    '  File "/app/vendor/httpclient.py", line 118, in post\n'
     "    raise TimeoutError(message)\n"
     "TimeoutError: payment gateway timed out after 3000ms"
 )
 
-#: 다른 상위 프레임 — 다른 그룹이어야 한다.
+#: 다른 오류 지점(마지막 프레임) — 다른 그룹이어야 한다.
+#: 호출 경로 첫 줄은 `PYTHON_TRACEBACK` 과 **같다** — 첫 프레임을 쓰면 이 두 오류가
+#: 한 그룹으로 뭉치므로, 이 fixture 가 v2 규칙의 회귀 방지선이다.
 PYTHON_TRACEBACK_OTHER_TOP_FRAME = (
     "Traceback (most recent call last):\n"
-    '  File "/app/refund/service.py", line 91, in refund\n'
+    '  File "/app/payment/service.py", line 42, in charge\n'
     "    response = client.post(url, timeout=3)\n"
+    '  File "/app/vendor/socketpool.py", line 91, in acquire\n'
+    "    raise TimeoutError(message)\n"
     "TimeoutError: payment gateway timed out after 3000ms"
 )
 
@@ -152,6 +167,16 @@ def load_secret_fixtures() -> list[SecretFixture]:
     return fixtures
 
 
+def load_scenario_lines(scenario: str = SECRET_LEAK_SCENARIO) -> list[str]:
+    """`infra/scenarios/<이름>/sample-logs.jsonl` 의 원본 라인들.
+
+    데모 스택이 실제로 Loki 에 넣는 줄과 **같은 파일**을 읽는다. 테스트용으로 따로
+    옮겨 적으면 시나리오를 고쳤을 때 마스킹 검증만 옛 데이터에 남는다.
+    """
+    path = SCENARIO_DIR / scenario / "sample-logs.jsonl"
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def all_extra_patterns() -> tuple[str, ...]:
     """모든 비밀값 fixture 의 사용자 정의 규칙 합집합 (중복 제거, 순서 유지)."""
     seen: dict[str, None] = {}
@@ -170,10 +195,13 @@ __all__ = [
     "PYTHON_TRACEBACK",
     "PYTHON_TRACEBACK_OTHER_CALLER",
     "PYTHON_TRACEBACK_OTHER_TOP_FRAME",
+    "SCENARIO_DIR",
+    "SECRET_LEAK_SCENARIO",
     "SECRET_LOG_FILE",
     "SecretFixture",
     "all_extra_patterns",
     "at",
+    "load_scenario_lines",
     "load_secret_fixtures",
     "record",
 ]

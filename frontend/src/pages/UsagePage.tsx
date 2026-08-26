@@ -87,7 +87,11 @@ export function UsagePage() {
             <Stat
               label="총 추정 비용"
               value={formatEstimatedCost(usageQuery.data.total_estimated_cost)}
-              sub="추정 — 정산 근거 아님"
+              sub={
+                usageQuery.data.total_estimated_cost === null
+                  ? '단가표에 모델이 없어 계산하지 않음'
+                  : '추정 — 정산 근거 아님'
+              }
               tone="accent"
             />
             <Stat
@@ -151,7 +155,10 @@ export function UsagePage() {
                       <Td align="right">{formatTokens(item.output_tokens)}</Td>
                       <Td align="right">
                         {formatEstimatedCost(item.estimated_cost)}
-                        <span className="ml-1 text-xs text-slate-400">(추정)</span>
+                        {/* 단가표에 없어 계산하지 못한 값은 0 이 아니라 "-" 다. */}
+                        <span className="ml-1 text-xs text-slate-400">
+                          {item.estimated_cost === null ? '(단가 없음)' : '(추정)'}
+                        </span>
                       </Td>
                       <Td align="right">{formatDuration(item.avg_latency_ms)}</Td>
                     </tr>

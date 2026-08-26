@@ -25,13 +25,14 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.enums import QueryRunStatus
 from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
+    SETTING_SAMPLE_RETENTION_DAYS,
     AnalysisPolicy,
     AppSetting,
     ErrorGroup,
@@ -48,6 +49,7 @@ from app.schemas.api import (
     PolicyUpdate,
     QueryRunCreateRequest,
     QueryRunRead,
+    SamplePurgeResponse,
 )
 from app.schemas.logrecord import FetchWarning, LogRecord, TimeRange
 
@@ -64,6 +66,23 @@ WARN_TRUNCATED = "limit_reached"
 #: 422. `status.HTTP_422_UNPROCESSABLE_ENTITY` 는 최신 starlette 에서 deprecated 이고
 #: `HTTP_422_UNPROCESSABLE_CONTENT` 는 구버전에 없어, 숫자를 직접 쓴다.
 HTTP_422 = 422
+
+#: 미리보기 응답에 싣는 라인 수 상한. 미리보기는 "무엇이 잡히는가"만 보면 되고,
+#: 화면으로 나가는 로그 라인은 적을수록 좋다 (전부 마스킹된 값이라 해도).
+MAX_PREVIEW_SAMPLE_LINES = 50
+
+#: `error_samples` 자동 purge 의 마지막 실행 시각을 적어 두는 내부 설정 키.
+#: 예약 3 종과 달리 사람이 고치는 값이 아니므로 설정 API 화이트리스트에는 넣지 않는다.
+SETTING_SAMPLE_PURGE_LAST_RUN = "sample_retention_last_purge_at"
+
+#: 자동 purge 주기.
+PURGE_INTERVAL = timedelta(days=1)
+
+#: `error_groups` 컬럼 폭. 넘치면 PostgreSQL 이 조회 전체를 실패시킨다
+#: (SQLite 는 조용히 통과시켜 환경에 따라 결과가 갈린다).
+MAX_SERVICE_CHARS = 128
+MAX_ENVIRONMENT_CHARS = 64
+MAX_ERROR_TYPE_CHARS = 255
 
 
 # ------------------------------------------------------------------ helpers
@@ -88,6 +107,14 @@ def _unprocessable(message: str) -> HTTPException:
     return HTTPException(status_code=HTTP_422, detail=message)
 
 
+def _clip(value: str | None, limit: int) -> str | None:
+    """컬럼 폭에 맞춰 자른다. `None`/빈 값은 그대로 둔다."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[:limit]
+
+
 # ------------------------------------------------------------- 한도 검증
 
 
@@ -100,6 +127,83 @@ def global_daily_analysis_limit(db: Session) -> int:
     if isinstance(value, int) and value >= 0:
         return value
     return get_settings().default_daily_analysis_limit
+
+
+def sample_retention_days(db: Session) -> int:
+    """`error_samples` 보존 일수. `app_settings` 행이 없으면 설정 기본값."""
+    row = db.get(AppSetting, SETTING_SAMPLE_RETENTION_DAYS)
+    value = row.value if row is not None else None
+    if isinstance(value, bool):  # bool 은 int 의 서브클래스라 먼저 걸러낸다
+        value = None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return get_settings().default_sample_retention_days
+
+
+def _last_purge_at(db: Session) -> datetime | None:
+    row = db.get(AppSetting, SETTING_SAMPLE_PURGE_LAST_RUN)
+    if row is None or not isinstance(row.value, str):
+        return None
+    try:
+        return as_utc(datetime.fromisoformat(row.value))
+    except ValueError:
+        return None
+
+
+def _mark_purged(db: Session, moment: datetime) -> None:
+    row = db.get(AppSetting, SETTING_SAMPLE_PURGE_LAST_RUN)
+    if row is None:
+        row = AppSetting(
+            key=SETTING_SAMPLE_PURGE_LAST_RUN,
+            description="error_samples 자동 purge 의 마지막 실행 시각 (ISO 8601, 내부용).",
+        )
+        db.add(row)
+    row.value = moment.isoformat()
+
+
+def purge_expired_samples(db: Session) -> SamplePurgeResponse:
+    """보존 기간이 지난 `error_samples` 를 삭제한다.
+
+    설계 문서가 보존 기간을 둔 이유는 하나다 — **마스킹 규칙 강화는 이미 저장된
+    샘플에 소급되지 않는다.** 규칙을 고치기 전에 저장된 샘플이 무기한 남으면, 규칙을
+    아무리 고쳐도 옛 유출면은 그대로 DB 에 있다. 그래서 `sample_retention_days` 는
+    읽는 코드가 반드시 있어야 하는 설정이다.
+
+    `ix_error_samples_created_at` 인덱스를 그대로 탄다.
+    """
+    days = sample_retention_days(db)
+    now = _now()
+    if days <= 0:
+        # 0 = 보존하지 않음이 아니라 "자동 삭제 끔"으로 읽는다. 데이터를 지우는
+        # 동작은 설정 오타 하나로 전부 날아가면 안 되므로 명시적으로 막는다.
+        _mark_purged(db, now)
+        db.commit()
+        return SamplePurgeResponse(deleted=0, retention_days=days, cutoff=None)
+
+    cutoff = now - timedelta(days=days)
+    deleted = db.execute(
+        delete(ErrorSample).where(ErrorSample.created_at < cutoff)
+    ).rowcount
+    _mark_purged(db, now)
+    db.commit()
+    return SamplePurgeResponse(
+        deleted=int(deleted or 0), retention_days=days, cutoff=cutoff
+    )
+
+
+def purge_expired_samples_if_due(db: Session) -> SamplePurgeResponse:
+    """하루 1 회만 실제로 도는 자동 purge (정책 실행 진입점에서 부른다).
+
+    MVP 에는 스케줄러가 없다 — 설계상 자동 실행을 늘리지 않기로 했으므로, 이미 서버가
+    도는 경로 중 가장 자연스러운 곳(정책 실행)에 얹는다. 수동 실행은
+    `POST /api/maintenance/purge-samples` 다.
+    """
+    last = _last_purge_at(db)
+    if last is not None and _now() - last < PURGE_INTERVAL:
+        return SamplePurgeResponse(
+            deleted=0, retention_days=sample_retention_days(db), executed=False
+        )
+    return purge_expired_samples(db)
 
 
 def validate_exclusions(patterns: Sequence[str]) -> None:
@@ -388,9 +492,11 @@ def _persist_groups(db: Session, run_id: int, groups: Sequence[object], max_samp
         group = ErrorGroup(
             query_run_id=run_id,
             fingerprint=fingerprint,
-            service=grouped.service,
-            environment=grouped.environment,
-            error_type=grouped.error_type,
+            # 라벨 값·예외 타입은 로그가 주는 값이라 길이를 보장할 수 없다. 컬럼 폭을
+            # 넘기면 PostgreSQL 이 조회 전체를 실패시키므로 저장 시점에 자른다.
+            service=_clip(grouped.service, MAX_SERVICE_CHARS),
+            environment=_clip(grouped.environment, MAX_ENVIRONMENT_CHARS),
+            error_type=_clip(grouped.error_type, MAX_ERROR_TYPE_CHARS),
             normalized_message=grouped.normalized_message,
             count=grouped.count,
             first_seen=grouped.first_seen,
@@ -419,7 +525,15 @@ def create_query_run(db: Session, policy_id: int, payload: QueryRunCreateRequest
 
     실패해도 `query_runs` 행은 남는다 (`status=failed` + `error_message`) — 조회가
     왜 비었는지 나중에 확인할 수 있어야 하기 때문이다.
+
+    진입 시 보존 기간이 지난 `error_samples` 를 **하루 1 회** 정리한다 (MVP 에는
+    스케줄러가 없다). 실패해도 조회를 막지 않는다.
     """
+    try:
+        purge_expired_samples_if_due(db)
+    except Exception:  # noqa: BLE001 - 정리 실패로 정책 실행을 막지 않는다
+        db.rollback()
+
     policy = _require_policy(db, policy_id)
     if not policy.active:
         raise HTTPException(
@@ -470,7 +584,9 @@ def create_query_run(db: Session, policy_id: int, payload: QueryRunCreateRequest
         failed = db.get(QueryRun, run_id)
         failed.status = QueryRunStatus.FAILED.value
         failed.finished_at = _now()
-        failed.error_message = f"{type(exc).__name__}: {exc}"[:2000]
+        # 어댑터 예외 메시지에는 요청 URL 이 그대로 실려 온다 — `base_url` 에 박힌
+        # 자격증명이 이 컬럼을 타고 DB 와 화면으로 새는 경로다. 저장 전에 마스킹한다.
+        failed.error_message = integrations.mask(f"{type(exc).__name__}: {exc}")[:2000]
         failed.warnings = _dump_warnings(warnings)
         db.add(failed)
         db.commit()
@@ -584,12 +700,19 @@ def preview_policy(db: Session, payload: PolicyPreviewRequest) -> PolicyPreviewR
         dropped=result.dropped + excluded,
         truncated=result.truncated,
         warnings=[*warnings, *result.warnings],
-        sample_lines=[integrations.mask(record.message) for record in records],
+        # 집계 수치(fetched/dropped)는 그대로 두고 **화면에 뿌리는 줄만** 자른다.
+        sample_lines=[
+            integrations.mask(record.message)
+            for record in records[:MAX_PREVIEW_SAMPLE_LINES]
+        ],
     )
 
 
 __all__ = [
+    "MAX_PREVIEW_SAMPLE_LINES",
     "MAX_SAMPLES_PER_GROUP_CAP",
+    "PURGE_INTERVAL",
+    "SETTING_SAMPLE_PURGE_LAST_RUN",
     "WARN_EXCLUDED",
     "WARN_LIMIT_CLAMPED",
     "WARN_RANGE_CLAMPED",
@@ -604,8 +727,11 @@ __all__ = [
     "global_daily_analysis_limit",
     "list_policies",
     "preview_policy",
+    "purge_expired_samples",
+    "purge_expired_samples_if_due",
     "resolve_limit",
     "resolve_range",
+    "sample_retention_days",
     "update_policy",
     "validate_exclusions",
     "validate_limits",

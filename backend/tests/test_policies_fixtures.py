@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,6 +74,27 @@ def db(session_factory) -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+@pytest.fixture(autouse=True)
+def no_real_log_source() -> Iterator[Any]:
+    """실제 로그 소스로 나가는 경로를 전부 가짜로 막는다 (autouse).
+
+    그룹 상세의 발생 추이와 분석 프롬프트의 "최근 추이"는 둘 다 `count_over_time` 을
+    부른다. 막지 않으면 fixture 의 `http://loki:3100` 으로 진짜 요청이 나가 테스트가
+    DNS 해석 시간만큼 느려지고, 네트워크 환경에 따라 결과가 달라진다.
+
+    개별 테스트가 자기 provider 를 쓰려면 그 안에서 다시 `patch` 하면 된다 (중첩된
+    patch 가 이긴다).
+
+    이 fixture 를 쓰는 모듈은 이름을 **명시적으로 import** 해야 한다 —
+    autouse 는 모듈 네임스페이스에 들어와 있어야 적용된다.
+    """
+    with patch(
+        "app.policies.integrations.build_provider",
+        side_effect=lambda connection: FakeLogSource(),
+    ) as build:
+        yield build
 
 
 @pytest.fixture()
@@ -172,6 +194,7 @@ def make_error_group(
     service: str | None = "payment-api",
     normalized_message: str = "TimeoutError: payment gateway timed out",
     samples: int = 0,
+    labels: dict[str, str] | None = None,
 ) -> ErrorGroup:
     group = ErrorGroup(
         query_run_id=run.id,
@@ -183,7 +206,11 @@ def make_error_group(
         count=count,
         first_seen=NOW - timedelta(minutes=30),
         last_seen=NOW,
-        labels={"service": service or "", "environment": "staging"},
+        labels=(
+            {"service": service or "", "environment": "staging"}
+            if labels is None
+            else labels
+        ),
         top_stack_frame="payments/gateway.py:88",
         normalization_rule_version="v1",
     )
@@ -370,4 +397,5 @@ __all__ = [
     "make_error_group",
     "make_policy",
     "make_query_run",
+    "no_real_log_source",
 ]

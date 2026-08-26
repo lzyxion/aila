@@ -25,12 +25,14 @@ from app.schemas.api import (
     PolicyUpdate,
     QueryRunCreateRequest,
     QueryRunRead,
+    SamplePurgeResponse,
 )
 
 TRACK = "정책 API"
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 query_runs_router = APIRouter(prefix="/query-runs", tags=["query-runs"])
+maintenance_router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 
 @router.get("", response_model=list[PolicyRead])
@@ -89,3 +91,17 @@ def create_query_run(
 @query_runs_router.get("/{run_id}", response_model=QueryRunRead)
 def get_query_run(run_id: int, db: Session = Depends(get_db)) -> QueryRunRead:
     return service.get_query_run(db, run_id)
+
+
+@maintenance_router.post("/purge-samples", response_model=SamplePurgeResponse)
+def purge_samples(db: Session = Depends(get_db)) -> SamplePurgeResponse:
+    """보존 기간(`app_settings.sample_retention_days`)이 지난 대표 로그를 삭제한다.
+
+    자동 실행은 정책 실행 진입점에서 하루 1 회 돈다. 이 엔드포인트는 보존 기간을 방금
+    줄였을 때처럼 **지금 당장** 정리해야 하는 경우를 위한 수동 트리거이며, 주기와
+    무관하게 즉시 실행한다.
+
+    마스킹 규칙을 강화해도 이미 저장된 샘플에는 소급되지 않는다 — 그래서 삭제가
+    유일한 회수 수단이다.
+    """
+    return service.purge_expired_samples(db)

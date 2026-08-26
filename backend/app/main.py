@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.analysis import router as analysis_router
+from app.app_settings import router as app_settings_router
 from app.config import Settings, get_settings
 from app.connections import router as connections_router
 from app.dashboard import router as dashboard_router
@@ -50,10 +51,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(llm_connections_router.router, prefix=prefix)
     app.include_router(policies_router.router, prefix=prefix)
     app.include_router(policies_router.query_runs_router, prefix=prefix)
+    app.include_router(policies_router.maintenance_router, prefix=prefix)
     app.include_router(error_groups_router.router, prefix=prefix)
     app.include_router(analysis_router.router, prefix=prefix)
     app.include_router(dashboard_router.router, prefix=prefix)
     app.include_router(usage_router.router, prefix=prefix)
+    app.include_router(app_settings_router.router, prefix=prefix)
 
     @app.get("/health", tags=["meta"])
     def health() -> dict[str, str]:

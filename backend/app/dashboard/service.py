@@ -15,6 +15,7 @@ metric 쿼리가 실패해도 화면 전체를 죽이지 않는다 — 상위 �
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
@@ -40,9 +41,19 @@ WARN_COUNT_UNSUPPORTED = "count_unsupported"
 WARN_COUNT_FAILED = "count_query_failed"
 #: 요청 기간이 서버 상한으로 조정되었다.
 WARN_RANGE_CLAMPED = "range_clamped"
+#: metric 시리즈가 서비스 라벨을 주지 못해 저장된 그룹(=잘린 라인) 집계로 대체했다.
+WARN_BY_SERVICE_FROM_LINES = "by_service_from_lines"
+#: 포인트 수가 너무 많아 step 을 자동으로 올렸다.
+WARN_STEP_RAISED = "step_raised"
 
 #: 기간 파라미터도 조회 이력도 없을 때의 기본 조회 구간(분).
 DEFAULT_RANGE_MINUTES = 60
+
+#: step 하한·상한 (라우터의 Query 제약과 같은 값).
+MIN_STEP_SECONDS = 15
+MAX_STEP_SECONDS = 3600
+#: 한 응답에 실을 수 있는 시리즈 포인트 수의 상한.
+MAX_SERIES_POINTS = 1000
 
 
 def _latest_run(db: Session, policy_id: int | None) -> QueryRun | None:
@@ -80,6 +91,45 @@ def _resolve_scope(
     run = _latest_run(db, None)
     policy = db.get(AnalysisPolicy, run.policy_id) if run is not None else None
     return policy, run
+
+
+def _ceil_to_step(moment: datetime, step_seconds: int) -> datetime:
+    """`moment` 를 step 경계로 **올림**한다.
+
+    Loki 는 `query_range` 의 버킷을 step 배수에 정렬한다. 그래서 `range_end` 가 step
+    경계에 걸치지 않으면 **마지막 버킷이 통째로 빠진다** — 기간을 지정하지 않고 최근
+    조회 이력(`query_runs.range_end`)을 그대로 쓰는 대시보드에서는 그 누락이 영구적이라,
+    "방금 터진 오류"가 추이에 영영 나타나지 않는다.
+    """
+    step = max(1, int(step_seconds))
+    return datetime.fromtimestamp(math.ceil(moment.timestamp() / step) * step, tz=UTC)
+
+
+def _resolve_step(
+    *, range_start: datetime, range_end: datetime, step_seconds: int
+) -> tuple[int, list[FetchWarning]]:
+    """step 을 하한·상한 안으로 넣고, 포인트 수가 너무 많으면 자동으로 올린다."""
+    warnings: list[FetchWarning] = []
+    step = min(MAX_STEP_SECONDS, max(MIN_STEP_SECONDS, int(step_seconds)))
+
+    span_seconds = max(1, int((range_end - range_start).total_seconds()))
+    if span_seconds / step > MAX_SERIES_POINTS:
+        raised = min(
+            MAX_STEP_SECONDS, max(step, math.ceil(span_seconds / MAX_SERIES_POINTS))
+        )
+        if raised > step:
+            warnings.append(
+                FetchWarning(
+                    code=WARN_STEP_RAISED,
+                    message=(
+                        f"요청 step {step} 초로는 포인트가 {MAX_SERIES_POINTS} 개를 넘어 "
+                        f"{raised} 초로 올렸습니다."
+                    ),
+                    count=raised,
+                )
+            )
+            step = raised
+    return step, warnings
 
 
 def _resolve_range(
@@ -134,9 +184,14 @@ def _count_series(
     range_start: datetime,
     range_end: datetime,
     step_seconds: int,
-) -> tuple[list[CountPoint], float, int, list[FetchWarning]]:
-    """`count_over_time` metric 쿼리. 실패는 경고로 강등하고 화면을 살린다."""
+) -> tuple[list[CountPoint], float, int, str, list[FetchWarning]]:
+    """`count_over_time` metric 쿼리. 실패는 경고로 강등하고 화면을 살린다.
+
+    네 번째 반환값은 시리즈에서 **서비스를 가리키는 라벨 이름**이다 — 어댑터가
+    `sum by (<라벨>)` 로 감싸므로, 소스 라벨 이름이 `service` 가 아닐 수 있다.
+    """
     warnings: list[FetchWarning] = []
+    service_label = "service"
     if policy is None:
         warnings.append(
             FetchWarning(
@@ -144,7 +199,7 @@ def _count_series(
                 message="정책 또는 조회 이력이 없어 오류 추이를 계산할 수 없습니다.",
             )
         )
-        return [], 0.0, step_seconds, warnings
+        return [], 0.0, step_seconds, service_label, warnings
 
     connection = db.get(LokiConnection, policy.loki_connection_id)
     if connection is None or not connection.active:
@@ -154,10 +209,11 @@ def _count_series(
                 message=f"정책 '{policy.name}' 의 로그 소스 연결을 쓸 수 없습니다.",
             )
         )
-        return [], 0.0, step_seconds, warnings
+        return [], 0.0, step_seconds, service_label, warnings
 
     try:
         provider = integrations.build_provider(connection)
+        service_label = str(getattr(provider, "service_label", None) or "service")
         if not getattr(provider, "supports_count", True):
             warnings.append(
                 FetchWarning(
@@ -165,7 +221,7 @@ def _count_series(
                     message="이 로그 소스 어댑터는 건수·추이 metric 쿼리를 지원하지 않습니다.",
                 )
             )
-            return [], 0.0, step_seconds, warnings
+            return [], 0.0, step_seconds, service_label, warnings
         series = provider.count_over_time(
             policy.logql, TimeRange(start=range_start, end=range_end), step_seconds
         )
@@ -173,16 +229,29 @@ def _count_series(
         warnings.append(
             FetchWarning(code=WARN_COUNT_FAILED, message=f"{type(exc).__name__}: {exc}")
         )
-        return [], 0.0, step_seconds, warnings
+        return [], 0.0, step_seconds, service_label, warnings
 
     warnings.extend(series.warnings)
-    return list(series.points), series.total, series.step_seconds or step_seconds, warnings
+    return (
+        list(series.points),
+        series.total,
+        series.step_seconds or step_seconds,
+        service_label,
+        warnings,
+    )
 
 
-def _by_service_from_points(points: list[CountPoint]) -> list[ServiceErrorCount]:
+def _by_service_from_points(
+    points: list[CountPoint], service_label: str = "service"
+) -> list[ServiceErrorCount]:
+    """시리즈 라벨로 서비스별 건수를 집계한다.
+
+    라벨 이름은 소스마다 다르므로(`app`, `service_name` …) 연결 매핑이 알려준 이름을
+    먼저 보고, 없으면 표준 이름 `service` 로 되짚는다.
+    """
     totals: dict[str | None, float] = {}
     for point in points:
-        service = point.labels.get("service")
+        service = point.labels.get(service_label) or point.labels.get("service")
         totals[service] = totals.get(service, 0.0) + point.value
     return [
         ServiceErrorCount(service=service, count=count)
@@ -216,14 +285,33 @@ def get_overview(
         policy=policy, run=run, range_start=range_start, range_end=range_end
     )
 
-    points, total, resolved_step, count_warnings = _count_series(
-        db, policy=policy, range_start=start, range_end=end, step_seconds=step_seconds
+    step, step_warnings = _resolve_step(
+        range_start=start, range_end=end, step_seconds=step_seconds
+    )
+    warnings.extend(step_warnings)
+    # step 경계로 올려야 마지막 버킷이 빠지지 않는다 (기간 미지정 시 특히).
+    end = _ceil_to_step(end, step)
+
+    points, total, resolved_step, service_label, count_warnings = _count_series(
+        db, policy=policy, range_start=start, range_end=end, step_seconds=step
     )
     warnings.extend(count_warnings)
 
-    by_service = _by_service_from_points(points)
+    by_service = _by_service_from_points(points, service_label)
     if not any(item.service for item in by_service) and run is not None:
+        # metric 이 라벨을 주지 못했다 -> 저장된 그룹(=상한에 잘린 라인) 집계로 대체한다.
+        # 조용히 넘어가면 화면의 숫자가 metric 기준인지 라인 기준인지 알 수 없다.
         by_service = _by_service_from_db(db, run.id)
+        if by_service:
+            warnings.append(
+                FetchWarning(
+                    code=WARN_BY_SERVICE_FROM_LINES,
+                    message=(
+                        "metric 쿼리가 서비스 라벨을 주지 않아 서비스별 건수를 저장된 "
+                        "그룹(조회 상한에 걸릴 수 있는 라인 기준)으로 대체했습니다."
+                    ),
+                )
+            )
 
     top_groups = []
     if run is not None:
@@ -250,10 +338,15 @@ def get_overview(
 
 
 __all__ = [
+    "MAX_SERIES_POINTS",
+    "MAX_STEP_SECONDS",
+    "MIN_STEP_SECONDS",
+    "WARN_BY_SERVICE_FROM_LINES",
     "WARN_CONNECTION_UNAVAILABLE",
     "WARN_COUNT_FAILED",
     "WARN_COUNT_UNSUPPORTED",
     "WARN_NO_POLICY",
     "WARN_RANGE_CLAMPED",
+    "WARN_STEP_RAISED",
     "get_overview",
 ]

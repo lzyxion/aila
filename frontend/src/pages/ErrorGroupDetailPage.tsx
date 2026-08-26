@@ -117,7 +117,15 @@ export function ErrorGroupDetailPage() {
       <div className="mt-6 grid gap-6 xl:grid-cols-5">
         <div className="space-y-6 xl:col-span-3">
           <Card title="발생 추이" description="metric 쿼리 기준 — 로그 라인 수가 아닙니다.">
-            <ErrorTrendChart points={group.trend} height={220} />
+            {/* 빈 차트만 보여주면 "발생이 없었다"와 "조회하지 못했다"가 구분되지 않는다. */}
+            {group.trend.length === 0 && (group.trend_warnings?.length ?? 0) > 0 ? (
+              <EmptyBlock>
+                추이를 계산하지 못했습니다 —{' '}
+                {group.trend_warnings!.map((warning) => warning.message).join(' ')}
+              </EmptyBlock>
+            ) : (
+              <ErrorTrendChart points={group.trend} height={220} />
+            )}
           </Card>
 
           <Card

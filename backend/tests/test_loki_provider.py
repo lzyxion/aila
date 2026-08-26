@@ -98,10 +98,24 @@ def test_is_metric_query(query: str, expected: bool) -> None:
     assert is_metric_query(query) is expected
 
 
-def test_wrap_count_over_time() -> None:
-    assert wrap_count_over_time('{app="x"}', 300) == 'sum(count_over_time({app="x"} [300s]))'
+def test_wrap_count_over_time_keeps_the_service_label() -> None:
+    """`sum(...)` 은 라벨을 전부 떨어뜨린다 — 서비스별 건수가 영원히 비게 된다."""
+    assert wrap_count_over_time('{app="x"}', 300) == (
+        'sum by (service) (count_over_time({app="x"} [300s]))'
+    )
+    # 라벨 이름은 연결 매핑에서 온다.
+    assert wrap_count_over_time('{app="x"}', 300, "app") == (
+        'sum by (app) (count_over_time({app="x"} [300s]))'
+    )
     already = 'sum by (service) (count_over_time({app="x"}[5m]))'
     assert wrap_count_over_time(already, 300) == already
+
+
+def test_wrap_count_over_time_skips_an_unusable_label_name() -> None:
+    """LogQL 식별자로 쓸 수 없는 이름이면 `by (...)` 없이 감싼다 (쿼리를 깨지 않는다)."""
+    assert wrap_count_over_time('{app="x"}', 60, "not a label") == (
+        'sum(count_over_time({app="x"} [60s]))'
+    )
 
 
 # ----------------------------------------------------------------- fetch_logs
@@ -304,7 +318,7 @@ def test_count_over_time_wraps_log_query_and_parses_matrix() -> None:
     series = make_provider().count_over_time(LOGQL, RANGE, 300)
 
     assert route.calls.last.request.url.params["query"] == (
-        f"sum(count_over_time({LOGQL} [300s]))"
+        f"sum by (service) (count_over_time({LOGQL} [300s]))"
     )
     assert route.calls.last.request.url.params["step"] == "300"
     assert series.step_seconds == 300
@@ -325,6 +339,20 @@ def test_count_over_time_passes_through_user_metric_query() -> None:
     assert route.calls.last.request.url.params["query"] == metric_query
     assert series.points == []
     assert [warning.code for warning in series.warnings] == ["empty_result"]
+
+
+@respx.mock
+def test_count_over_time_groups_by_the_mapped_service_label() -> None:
+    """소스 라벨 이름이 `service` 가 아니어도 그 이름으로 묶어야 한다."""
+    route = respx.get(QUERY_RANGE_URL).mock(
+        return_value=httpx.Response(200, json=matrix_payload([]))
+    )
+    provider = make_provider(label_mapping={"app": "service"})
+
+    provider.count_over_time(LOGQL, RANGE, 300)
+
+    assert provider.service_label == "app"
+    assert route.calls.last.request.url.params["query"].startswith("sum by (app) (")
 
 
 @respx.mock
@@ -442,3 +470,64 @@ def test_unknown_auth_type_is_rejected() -> None:
 def test_empty_base_url_is_rejected() -> None:
     with pytest.raises(ValueError):
         make_provider(base_url="   ")
+
+
+# ------------------------------------------------- base_url 내장 자격증명 유출
+
+CREDENTIAL_URL = "http://loki-user:sup3rs3cr3t@loki.test:3100"
+
+
+@respx.mock
+def test_test_connection_details_do_not_leak_url_credentials() -> None:
+    """`details` 는 화면으로 그대로 나간다 — base_url 에 박힌 비밀번호가 새면 안 된다."""
+    respx.get(f"{CREDENTIAL_URL}/ready").mock(return_value=httpx.Response(200, text="ready"))
+    respx.get(f"{CREDENTIAL_URL}/loki/api/v1/labels").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": ["app"]})
+    )
+
+    result = make_provider(base_url=CREDENTIAL_URL).test_connection()
+
+    assert result.ok is True
+    assert "sup3rs3cr3t" not in str(result.details), result.details
+    assert "<MASKED:URI_CREDENTIALS>" in result.details["base_url"]
+
+
+@respx.mock
+def test_transport_error_message_does_not_leak_url_credentials() -> None:
+    """httpx 예외 메시지에는 요청 URL 이 통째로 들어간다 (자격증명 포함)."""
+    respx.get(f"{CREDENTIAL_URL}/loki/api/v1/query_range").mock(
+        side_effect=httpx.ConnectError(f"failed to connect to {CREDENTIAL_URL}")
+    )
+
+    with pytest.raises(LogSourceError) as excinfo:
+        make_provider(base_url=CREDENTIAL_URL).fetch_logs(LOGQL, RANGE, 10)
+
+    assert "sup3rs3cr3t" not in str(excinfo.value)
+
+
+@respx.mock
+def test_response_body_quote_is_masked() -> None:
+    """Loki 응답 본문에 요청 URL 이 되비쳐 올 수 있다."""
+    respx.get(f"{CREDENTIAL_URL}/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(
+            400, text=f"parse error while proxying {CREDENTIAL_URL}/loki/api/v1/query_range"
+        )
+    )
+
+    with pytest.raises(LogSourceError) as excinfo:
+        make_provider(base_url=CREDENTIAL_URL).fetch_logs(LOGQL, RANGE, 10)
+
+    assert "sup3rs3cr3t" not in str(excinfo.value)
+    assert "parse error" in str(excinfo.value)
+
+
+@respx.mock
+def test_timeout_message_does_not_leak_url_credentials() -> None:
+    respx.get(f"{CREDENTIAL_URL}/loki/api/v1/query_range").mock(
+        side_effect=httpx.ReadTimeout("timed out")
+    )
+
+    with pytest.raises(LogSourceError) as excinfo:
+        make_provider(base_url=CREDENTIAL_URL).fetch_logs(LOGQL, RANGE, 10)
+
+    assert "sup3rs3cr3t" not in str(excinfo.value)

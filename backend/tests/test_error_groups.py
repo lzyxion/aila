@@ -9,12 +9,17 @@ Phase 1 담당 트랙: **정책 API**
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
+from unittest.mock import patch
 
 from app.enums import AnalysisJobStatus, Severity
+from app.error_groups import service
+from app.providers.logsource import LogSourceError
 from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     NOW,
+    FakeLogSource,
     client,
+    count_series,
     db,
     engine,
     make_analysis_job,
@@ -22,6 +27,7 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     make_error_group,
     make_policy,
     make_query_run,
+    no_real_log_source,
     session_factory,
 )
 
@@ -167,3 +173,108 @@ def test_error_group_detail_without_analysis(client, db) -> None:
 
 def test_error_group_detail_unknown_id_is_404(client) -> None:
     assert client.get("/api/error-groups/999").status_code == 404
+
+
+# --------------------------------------------------------------- 발생 추이
+
+
+def _detail(client, provider, group_id: int):
+    with patch("app.policies.integrations.build_provider", return_value=provider):
+        return client.get(f"/api/error-groups/{group_id}").json()
+
+
+def test_detail_trend_comes_from_a_metric_query(client, db) -> None:
+    """추이는 저장된 라인이 아니라 `count_over_time` 으로 채운다 (계약).
+
+    저장된 대표 로그는 그룹당 최대 3 건이고 `count` 는 조회 상한에 잘린 값이라,
+    둘 중 어느 것도 추이가 될 수 없다.
+    """
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    group = make_error_group(db, run, fingerprint="fp-timeout", count=11)
+    provider = FakeLogSource(count_series=count_series(("payment-api", 3.0), ("payment-api", 5.0)))
+
+    body = _detail(client, provider, group.id)
+
+    assert [point["value"] for point in body["trend"]] == [3.0, 5.0]
+    assert body["trend_warnings"] == []
+
+    # 그룹 라벨로 만든 selector 를 그대로 쓴다 (보고서의 재조회 조건과 같은 값).
+    query, time_range, step = provider.count_calls[0]
+    assert query == '{environment="staging", service="payment-api"}'
+    assert step >= 15
+    # 그룹 발생 구간을 여유와 함께 덮는다.
+    assert time_range.start < group.first_seen.replace(tzinfo=UTC)
+    assert time_range.end > group.last_seen.replace(tzinfo=UTC)
+
+
+def test_detail_trend_failure_is_reported_not_swallowed(client, db) -> None:
+    """빈 배열만 주면 '오류가 없었다'와 '조회하지 못했다'가 구분되지 않는다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    group = make_error_group(db, run, fingerprint="fp-timeout")
+
+    body = _detail(client, FakeLogSource(count_error=LogSourceError("Loki 503")), group.id)
+
+    assert body["trend"] == []
+    assert [w["code"] for w in body["trend_warnings"]] == ["trend_query_failed"]
+    assert "Loki 503" in body["trend_warnings"][0]["message"]
+
+
+def test_detail_trend_without_labels_is_reported(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    group = make_error_group(db, run, fingerprint="fp-nolabels", labels={})
+
+    body = _detail(client, FakeLogSource(), group.id)
+
+    assert body["trend"] == []
+    assert [w["code"] for w in body["trend_warnings"]] == ["trend_no_labels"]
+
+
+def test_detail_trend_with_an_inactive_connection_is_reported(client, db) -> None:
+    connection = make_connection(db, active=False)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    group = make_error_group(db, run, fingerprint="fp-timeout")
+
+    body = client.get(f"/api/error-groups/{group.id}").json()
+
+    assert body["trend"] == []
+    assert [w["code"] for w in body["trend_warnings"]] == ["trend_connection_unavailable"]
+
+
+# --------------------------------------------- active(진행 중) 전용 조회
+
+
+def test_active_lookup_finds_a_running_job_behind_a_newer_failure(client, db) -> None:
+    """"최신 1 건" 으로 판정하면 뒤에 실패가 하나 끼는 순간 실행 중인 작업을 놓친다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    group = make_error_group(db, run, fingerprint="fp-timeout")
+
+    running = make_analysis_job(
+        db,
+        group,
+        status=AnalysisJobStatus.RUNNING.value,
+        requested_at=NOW - timedelta(minutes=5),
+        severity=None,
+    )
+    make_analysis_job(
+        db,
+        group,
+        status=AnalysisJobStatus.FAILED.value,
+        requested_at=NOW - timedelta(minutes=1),
+        severity=None,
+    )
+
+    active = service.active_analysis_by_fingerprint(db, ["fp-timeout"])
+    assert active["fp-timeout"].id == running.id
+
+    # 최신 1 건 조회는 (의도대로) 실패한 쪽을 준다 — 두 조회의 역할이 다르다.
+    latest_job, _ = service.latest_analysis_by_fingerprint(db, ["fp-timeout"])["fp-timeout"]
+    assert latest_job.id != running.id

@@ -35,7 +35,12 @@ from app.masking.service import MASKING_RULE_VERSION, mask, mask_mapping
 from app.schemas.logrecord import LogRecord
 
 #: 정규화 규칙 버전. 규칙을 고치면 반드시 올린다 (`error_groups.normalization_rule_version`).
-NORMALIZATION_RULE_VERSION: str = "v1"
+#:
+#: - v1: 최초 규칙 집합.
+#: - v2: Python 트레이스백의 상위 스택 프레임을 **마지막** `File` 줄(오류 지점)에서
+#:   뽑는다. v1 은 첫 줄(가장 바깥 호출자)을 썼는데, Python 은 바깥 -> 안쪽 순으로
+#:   출력하므로 진입점만 잡혀 서로 다른 오류가 한 그룹으로 뭉쳤다.
+NORMALIZATION_RULE_VERSION: str = "v2"
 
 
 class GroupedSample(BaseModel):

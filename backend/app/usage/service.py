@@ -56,7 +56,8 @@ class _Bucket:
         self.failure_count = 0
         self.input_tokens = 0
         self.output_tokens = 0
-        self.estimated_cost = Decimal("0")
+        self.cost_total = Decimal("0")
+        self.cost_count = 0
         self.latency_total = 0
         self.latency_count = 0
 
@@ -68,10 +69,16 @@ class _Bucket:
         self.output_tokens += record.output_tokens or 0
         if record.estimated_cost is not None:
             # 단가표에 없는 모델은 None 이다 — 0 으로 접으면 "쌌다"로 읽힌다.
-            self.estimated_cost += Decimal(str(record.estimated_cost))
+            self.cost_total += Decimal(str(record.estimated_cost))
+            self.cost_count += 1
         if record.latency_ms is not None:
             self.latency_total += record.latency_ms
             self.latency_count += 1
+
+    @property
+    def estimated_cost(self) -> Decimal | None:
+        """비용을 계산할 수 있는 기록이 하나도 없으면 None (0 이 아니다)."""
+        return self.cost_total if self.cost_count else None
 
     @property
     def avg_latency_ms(self) -> float | None:
@@ -120,6 +127,10 @@ def get_usage(
         for key, bucket in sorted(buckets.items())
     ]
 
+    # 계산 가능한 항목이 하나도 없으면 합계도 None 이다 — 0 으로 적으면 "이번 달은
+    # 공짜였다"로 읽히는데, 실제로는 단가표가 비어 있어 계산을 못 한 것뿐이다.
+    costed = [item.estimated_cost for item in items if item.estimated_cost is not None]
+
     return UsageResponse(
         range_start=start,
         range_end=end,
@@ -127,9 +138,7 @@ def get_usage(
         total_jobs=sum(item.job_count for item in items),
         total_input_tokens=sum(item.input_tokens for item in items),
         total_output_tokens=sum(item.output_tokens for item in items),
-        total_estimated_cost=sum(
-            (item.estimated_cost for item in items), start=Decimal("0")
-        ),
+        total_estimated_cost=sum(costed, start=Decimal("0")) if costed else None,
     )
 
 

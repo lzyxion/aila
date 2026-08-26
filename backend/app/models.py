@@ -320,6 +320,17 @@ class AnalysisJob(Base):
         Index("ix_analysis_jobs_group_status", "error_group_id", "status"),
         Index("ix_analysis_jobs_fingerprint", "fingerprint"),
         Index("ix_analysis_jobs_requested_at", "requested_at"),
+        # 같은 fingerprint 로 **진행 중**인 작업은 하나뿐이다 (revision 0002).
+        # 응용 레벨의 "체크 -> 삽입" 사이에는 경합 창이 남으므로, 중복 과금을 실제로
+        # 막는 것은 이 DB 제약이다. 끝난 작업(succeeded/failed)은 몇 개든 남는다.
+        # PostgreSQL·SQLite 모두 부분 유니크 인덱스를 지원한다.
+        Index(
+            "uq_analysis_jobs_active_fingerprint",
+            "fingerprint",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'running')"),
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
     )
 
 

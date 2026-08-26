@@ -24,6 +24,7 @@ from tests.test_analysis_fixtures import (  # noqa: F401 - fixture 재수출
     make_policy,
     make_query_run,
     patched_llm,
+    no_real_log_source,
     session_factory,
     set_pricing,
 )

@@ -16,7 +16,13 @@ import pytest
 
 from app.grouping.fingerprint import compute_fingerprint
 from app.grouping.normalize import normalize
-from app.grouping.parsers import FORMAT_JSON, FORMAT_LOGFMT, FORMAT_PLAIN, parse_line
+from app.grouping.parsers import (
+    FORMAT_JSON,
+    FORMAT_LOGFMT,
+    FORMAT_PLAIN,
+    parse_line,
+    top_stack_frame,
+)
 from app.grouping.service import (
     NORMALIZATION_RULE_VERSION,
     GroupedError,
@@ -44,9 +50,9 @@ SECRET_FIXTURES = load_secret_fixtures()
 # --------------------------------------------------------------- 규칙 버전
 
 
-def test_normalization_rule_version_is_v1() -> None:
-    """`error_groups.normalization_rule_version` 기본값과 맞아야 한다."""
-    assert NORMALIZATION_RULE_VERSION == "v1"
+def test_normalization_rule_version_is_v2() -> None:
+    """규칙을 고치면 반드시 올린다 (`error_groups.normalization_rule_version`)."""
+    assert NORMALIZATION_RULE_VERSION == "v2"
 
 
 # ------------------------------------------------------------------- 파싱
@@ -84,7 +90,36 @@ def test_parses_python_traceback_message_from_the_last_line() -> None:
     parsed = parse_line(PYTHON_TRACEBACK)
     assert parsed.message == "TimeoutError: payment gateway timed out after 3000ms"
     assert parsed.error_type == "TimeoutError"
-    assert parsed.top_stack_frame == 'File "/app/payment/service.py", line 42, in charge'
+    # Python 은 `most recent call last` — 오류 지점은 **마지막** File 줄이다.
+    assert parsed.top_stack_frame == 'File "/app/vendor/httpclient.py", line 118, in post'
+
+
+def test_python_frame_order_is_reversed_relative_to_java() -> None:
+    """언어마다 프레임 순서가 반대다 — 이 분기를 잃으면 오류 지점이 진입점으로 뒤바뀐다."""
+    python_stack = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/web/handler.py", line 10, in handle\n'
+        '  File "/app/db/pool.py", line 77, in acquire\n'
+        "OperationalError: pool exhausted"
+    )
+    assert top_stack_frame(python_stack) == 'File "/app/db/pool.py", line 77, in acquire'
+
+    java_stack = (
+        "java.lang.IllegalStateException: boom\n"
+        "\tat com.example.Inner.fail(Inner.java:9)\n"
+        "\tat com.example.Outer.run(Outer.java:44)"
+    )
+    # Java/Node 는 가장 안쪽 프레임이 먼저 나온다 -> 첫 줄이 오류 지점이다.
+    assert top_stack_frame(java_stack) == "at com.example.Inner.fail(Inner.java:9)"
+
+
+def test_python_traceback_without_header_still_uses_the_last_frame() -> None:
+    stack = (
+        '  File "/app/a.py", line 1, in a\n'
+        '  File "/app/b.py", line 2, in b\n'
+        "ValueError: nope"
+    )
+    assert top_stack_frame(stack) == 'File "/app/b.py", line 2, in b'
 
 
 def test_parses_java_stacktrace() -> None:
@@ -201,10 +236,15 @@ def test_same_top_frame_different_callers_is_one_group() -> None:
     )
     assert len(groups) == 1
     assert groups[0].count == 2
-    assert groups[0].top_stack_frame == 'File "/app/payment/service.py", line <NUM>, in charge'
+    assert groups[0].top_stack_frame == 'File "/app/vendor/httpclient.py", line <NUM>, in post'
 
 
 def test_different_top_frame_is_a_different_group() -> None:
+    """호출 경로 첫 줄이 같아도 오류 지점이 다르면 다른 그룹이다.
+
+    두 fixture 는 첫 프레임(`payment/service.py:42`)이 **같다** — v1 처럼 첫 줄을 쓰면
+    이 둘이 한 그룹으로 뭉친다.
+    """
     groups = group_records(
         [record(PYTHON_TRACEBACK), record(PYTHON_TRACEBACK_OTHER_TOP_FRAME, minutes=1)],
         max_samples_per_group=3,

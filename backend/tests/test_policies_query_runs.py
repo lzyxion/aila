@@ -29,6 +29,7 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     log_record,
     make_connection,
     make_policy,
+    no_real_log_source,
     session_factory,
 )
 
@@ -353,6 +354,93 @@ def test_unknown_policy_returns_404(client) -> None:
 
 
 # ------------------------------------------------------- 실제 그룹화 연동
+
+
+def test_failure_message_does_not_leak_url_credentials(client, db) -> None:
+    """`query_runs.error_message` 는 DB 에 남고 화면으로 나간다 — 자격증명이 새면 안 된다.
+
+    마스킹은 화면 표시 전과 LLM 전송 직전 두 곳에 걸리는데, **오류 경로는 그 두 곳
+    어디도 지나지 않는다.** 저장 전에 한 번 더 건다.
+    """
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    provider = FakeLogSource(
+        fetch_error=LogSourceError(
+            "Loki 요청에 실패했습니다: connect to http://loki-user:sup3rs3cr3t@loki:3100"
+        )
+    )
+
+    response, _, _ = _run(client, policy.id, provider, [])
+
+    body = response.json()
+    assert body["status"] == QueryRunStatus.FAILED.value
+    assert "sup3rs3cr3t" not in body["error_message"]
+    assert "<MASKED:URI_CREDENTIALS>" in body["error_message"]
+    assert "sup3rs3cr3t" not in (db.get(QueryRun, body["id"]).error_message or "")
+
+
+def test_group_columns_are_clipped_to_the_column_width(client, db) -> None:
+    """service/environment/error_type 은 로그가 주는 값이라 길이를 보장할 수 없다.
+
+    컬럼 폭을 넘기면 PostgreSQL 이 조회 전체를 실패시키고, SQLite 는 조용히 통과시켜
+    환경마다 결과가 갈린다. 저장 시점에 자른다.
+    """
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    long_group = grouped_error("fp-long")
+    long_group.service = "s" * 300
+    long_group.environment = "e" * 200
+    long_group.error_type = "E" * 400
+    provider = FakeLogSource(fetch_result=FetchResult(records=[log_record("x")]))
+
+    response, _, _ = _run(client, policy.id, provider, [long_group])
+
+    assert response.status_code == 201, response.text
+    stored = db.query(ErrorGroup).one()
+    assert len(stored.service) == 128
+    assert len(stored.environment) == 64
+    assert len(stored.error_type) == 255
+
+
+# ---------------------------------------------------------------- preview
+
+
+def test_preview_limit_is_capped_by_the_schema(client, db) -> None:
+    connection = make_connection(db)
+    payload = {
+        "loki_connection_id": connection.id,
+        "logql": '{service="payment-api"}',
+        "range_minutes": 60,
+        "limit": 201,
+        "exclusions": [],
+    }
+    assert client.post("/api/policies/preview", json=payload).status_code == 422
+
+
+def test_preview_returns_at_most_fifty_sample_lines(client, db) -> None:
+    """집계 수치는 그대로 두고 화면에 뿌리는 줄만 자른다."""
+    connection = make_connection(db)
+    provider = FakeLogSource(
+        fetch_result=FetchResult(
+            records=[log_record(f"TimeoutError {index}") for index in range(200)],
+            fetched=200,
+        )
+    )
+
+    with patch("app.policies.integrations.build_provider", return_value=provider):
+        body = client.post(
+            "/api/policies/preview",
+            json={
+                "loki_connection_id": connection.id,
+                "logql": '{service="payment-api"}',
+                "range_minutes": 60,
+                "limit": 200,
+                "exclusions": [],
+            },
+        ).json()
+
+    assert body["fetched"] == 200
+    assert len(body["sample_lines"]) == 50
 
 
 def test_real_grouping_stores_only_masked_logs(client, db) -> None:

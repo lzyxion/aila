@@ -18,6 +18,7 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     db,
     engine,
     make_connection,
+    no_real_log_source,
     session_factory,
 )
 

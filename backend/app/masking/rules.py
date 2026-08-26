@@ -1,4 +1,4 @@
-"""마스킹 규칙 정의 (`MASKING_RULE_VERSION = "v1"`).
+"""마스킹 규칙 정의 (`MASKING_RULE_VERSION = "v2"`).
 
 규칙은 **순서가 있는 목록**이다. 앞 규칙이 먼저 치환하므로, 더 넓은 문맥을 먹는 규칙
 (DB 연결 문자열, Authorization 헤더)을 좁은 규칙(이메일, 숫자)보다 앞에 둔다.
@@ -7,6 +7,18 @@
 가 없으므로 뒤따르는 규칙과 정규화(`app.grouping.normalize`)가 다시 건드리지 않는다 —
 `mask()` 가 **멱등**이어야 하는 이유는 설계상 마스킹을 화면 표시 전과 LLM 전송 직전에
 두 번 걸기 때문이다.
+
+>>> v2 — 과잉 마스킹을 줄인다 <<<
+v1 의 Authorization·Cookie 규칙은 값을 **줄 끝까지** 삼켰다. 그 결과
+`authorization: Bearer X status=504 TimeoutError` 와
+`authorization: Bearer Y status=401 AuthError` 가 같은 문자열이 되어, 원인이 다른 두
+오류가 한 fingerprint 로 병합됐다. 마스킹은 그룹화보다 앞 단계라 여기서 문맥을 지우면
+뒤에서 복구할 방법이 없다. v2 는 두 규칙의 값 범위를 **공백 경계까지**로 좁혀
+`<MASKED:...>` 뒤의 `status=`·예외명·뒤따르는 `key=value` 를 보존한다.
+
+약화가 아니라 **과잉만** 줄인 것이다 — 비밀값 본문은 그대로 지워지고, 좁힌 덕분에
+오히려 CARD/PHONE/API_KEY 처럼 뒤쪽에 있던 규칙들이 실제로 도달하게 된다
+(v1 에서는 Authorization 규칙이 그 값들을 통째로 먼저 먹어 버렸다).
 """
 
 from __future__ import annotations
@@ -73,8 +85,11 @@ class MaskRule:
 _SEP = r"""["']?\s*[:=]\s*["']?"""
 #: 따옴표·구분 문자 앞에서 멈추는 비밀값 본문.
 _VALUE = r"""[^\s"',;&}\)\]]+"""
-#: 헤더 한 줄 전체를 값으로 보는 경우 (따옴표 안이면 따옴표에서 멈춘다).
-_LINE_VALUE = r"""[^"'\r\n]*"""
+#: 헤더 값 본문 — v1 의 `[^"'\r\n]*`(줄 끝까지)를 공백 경계까지로 좁힌 것.
+#: `;` 를 경계에 둔 이유는 쿠키가 `sid=x; Path=/` 처럼 이어지기 때문이다.
+_HEADER_VALUE = r"""[^\s"',;]+"""
+#: `Authorization: Bearer <token>` 의 스킴. 스킴 이름은 남겨 문맥을 잃지 않는다.
+_AUTH_SCHEME = r"""(?:Bearer|Basic|Digest|Token|ApiKey|JWT|Negotiate|AWS4-HMAC-SHA256)"""
 
 _I = re.IGNORECASE
 
@@ -99,6 +114,12 @@ def _mask_card_if_luhn(match: re.Match[str]) -> str:
     if 13 <= len(digits) <= 19 and _luhn_ok(digits):
         return placeholder(KIND_CARD)
     return match.group(0)
+
+
+def _mask_auth_header(match: re.Match[str]) -> str:
+    """`authorization: Bearer <token>` — 헤더 이름·구분자·스킴은 남기고 값만 지운다."""
+    name, separator, scheme, _value = match.groups()
+    return f"{name}{separator}{scheme or ''}{placeholder(KIND_BEARER_TOKEN)}"
 
 
 # ------------------------------------------------------------------- 규칙 목록
@@ -135,10 +156,12 @@ BUILTIN_RULES: tuple[MaskRule, ...] = (
         pattern=re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*"),
         replacement=placeholder(KIND_JWT),
     ),
-    # 5. 쿠키 — 값 전체(세미콜론 구분 다중 쿠키 포함)를 지운다.
+    # 5. 쿠키 — 쿠키 하나(`name=value`)를 지운다. v1 은 줄 끝까지 삼켜
+    #    뒤따르는 `status=`·예외명까지 지웠다. 여러 쿠키가 `; ` 로 이어지면
+    #    각 쿠키가 이 규칙에 따로 걸린다(아래 세션 식별자 규칙도 함께 본다).
     MaskRule(
         kind=KIND_COOKIE,
-        pattern=re.compile(rf"\b(set-cookie|cookie)({_SEP})({_LINE_VALUE})", _I),
+        pattern=re.compile(rf"\b(set-cookie|cookie)({_SEP})({_HEADER_VALUE})", _I),
         replacement=r"\1\2" + placeholder(KIND_COOKIE),
     ),
     # 6. 세션 식별자.
@@ -151,15 +174,17 @@ BUILTIN_RULES: tuple[MaskRule, ...] = (
         ),
         replacement=r"\1\2" + placeholder(KIND_COOKIE),
     ),
-    # 7. Authorization 계열 헤더 — 스킴을 모르는 경우까지 값 전체를 지운다.
+    # 7. Authorization 계열 헤더 — 스킴(있으면)은 남기고 **토큰 한 덩어리만** 지운다.
+    #    v1 은 값을 줄 끝까지 삼켜 `status=504 TimeoutError` 같은 문맥을 함께 지웠고,
+    #    그 결과 원인이 다른 오류가 같은 fingerprint 로 병합됐다.
     MaskRule(
         kind=KIND_BEARER_TOKEN,
         pattern=re.compile(
             rf"\b(proxy-authorization|authorization|x-auth-token|x-access-token)"
-            rf"({_SEP})([^\"'\r\n,;]+)",
+            rf"({_SEP})({_AUTH_SCHEME}\s+)?({_HEADER_VALUE})",
             _I,
         ),
-        replacement=r"\1\2" + placeholder(KIND_BEARER_TOKEN),
+        replacement=_mask_auth_header,
     ),
     # 8. `Bearer <token>` / `Basic <base64>` — 스킴 이름은 남겨 문맥을 잃지 않는다.
     MaskRule(

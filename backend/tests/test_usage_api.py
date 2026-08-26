@@ -26,6 +26,7 @@ from tests.test_analysis_fixtures import (  # noqa: F401 - fixture 재수출
     make_usage_record,
     now,
     patched_llm,
+    no_real_log_source,
     session_factory,
     set_pricing,
 )
@@ -138,7 +139,21 @@ def test_usage_is_empty_without_records(client, db) -> None:
     body = client.get("/api/usage").json()
     assert body["items"] == []
     assert body["total_jobs"] == 0
-    assert Decimal(body["total_estimated_cost"]) == Decimal("0")
+    # 기록이 없으면 합계는 0 이 아니라 None 이다 — 0 은 "이번 달은 공짜였다"로 읽힌다.
+    assert body["total_estimated_cost"] is None
+
+
+def test_totals_are_none_when_no_item_has_a_price(client, db) -> None:
+    """단가표에 모델이 하나도 없으면 항목도 합계도 None 이다 (0 으로 표시 금지)."""
+    run = _run(db)
+    make_usage_record(db, _job(db, run, "fp-1"), estimated_cost=None)
+    make_usage_record(db, _job(db, run, "fp-2"), estimated_cost=None)
+
+    body = client.get("/api/usage").json()
+
+    assert body["total_jobs"] == 2
+    assert body["items"][0]["estimated_cost"] is None
+    assert body["total_estimated_cost"] is None
 
 
 def test_usage_reflects_a_real_analysis_run(client, db) -> None:

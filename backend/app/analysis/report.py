@@ -60,8 +60,16 @@ def _escape_label_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _selector(labels: dict[str, str]) -> str:
-    """그룹 라벨로 원본 재조회용 selector 를 만든다."""
+def selector_from_labels(labels: dict[str, str]) -> str:
+    """그룹 라벨로 원본 재조회용 selector 를 만든다.
+
+    보고서의 "원본 로그로 돌아가기" 와 그룹 상세의 발생 추이(metric 쿼리)가 **같은
+    selector** 를 써야 한다 — 화면이 보여주는 추이와 사람이 손으로 재조회한 결과가
+    갈라지면 어느 쪽이 맞는지 알 수 없다.
+
+    라벨이 하나도 없으면 `"{}"` 를 돌려준다. 이는 LogQL 로는 실행할 수 없는 값이므로,
+    쿼리를 만드는 쪽은 이 반환값을 확인하고 건너뛰어야 한다.
+    """
     pairs = [
         f'{key}="{_escape_label_value(str(value))}"'
         for key, value in sorted(labels.items())
@@ -70,6 +78,10 @@ def _selector(labels: dict[str, str]) -> str:
     if not pairs:
         return "{}"
     return "{" + ", ".join(pairs) + "}"
+
+
+#: 모듈 내부에서 쓰던 이름 (호환).
+_selector = selector_from_labels
 
 
 def _cost_line(usage: AnalysisUsageRecord | None) -> str:
@@ -254,4 +266,10 @@ def render_report(db: Session, job_id: int) -> str:
     )
 
 
-__all__ = ["DISCLAIMER", "MAX_REPORT_SAMPLES", "render_markdown", "render_report"]
+__all__ = [
+    "DISCLAIMER",
+    "MAX_REPORT_SAMPLES",
+    "render_markdown",
+    "render_report",
+    "selector_from_labels",
+]

@@ -30,7 +30,12 @@ from app.masking.rules import (
 )
 
 #: 마스킹 규칙 버전. 규칙을 고치면 반드시 올린다 (`error_samples.masking_rule_version`).
-MASKING_RULE_VERSION: str = "v1"
+#:
+#: - v1: 최초 규칙 집합.
+#: - v2: Authorization·Cookie 규칙의 값 범위를 줄 끝에서 **공백 경계**로 좁혀
+#:   `<MASKED:...>` 뒤 문맥(`status=`, 예외명, 뒤따르는 key=value)을 보존한다.
+#:   비밀값 자체는 그대로 지운다 — 약화가 아니라 과잉만 줄인 변경이다.
+MASKING_RULE_VERSION: str = "v2"
 
 
 class MaskingPatternError(ValueError):

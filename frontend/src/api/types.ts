@@ -332,6 +332,8 @@ export interface ErrorGroupDetail extends ErrorGroupSummary {
   samples: ErrorSampleRead[];
   /** 발생 추이 (metric 쿼리 기반) */
   trend: CountPoint[];
+  /** `trend` 가 비어 있는 사유. 조회 실패와 "발생이 없었다"를 구분한다. */
+  trend_warnings?: FetchWarning[];
   /** 같은 fingerprint 의 과거 분석 이력 (조회 회차를 넘어 조인) */
   analyses: AnalysisJobSummary[];
 }
@@ -445,8 +447,11 @@ export interface UsageAggregate {
   failure_count: number;
   input_tokens: number;
   output_tokens: number;
-  /** Decimal — JSON 에서 문자열로 올 수 있다. 추정값이다. */
-  estimated_cost: string | number;
+  /**
+   * Decimal — JSON 에서 문자열로 올 수 있다. 추정값이다.
+   * 단가표에 모델이 없으면 **null** 이다 (0 이 아니다 — 0 은 "쌌다"로 읽힌다).
+   */
+  estimated_cost: string | number | null;
   avg_latency_ms?: number | null;
 }
 
@@ -457,8 +462,11 @@ export interface UsageResponse {
   total_jobs: number;
   total_input_tokens: number;
   total_output_tokens: number;
-  /** 추정 합계. 정산 근거가 아니다. */
-  total_estimated_cost: string | number;
+  /**
+   * 추정 합계. 정산 근거가 아니다.
+   * 비용을 계산할 수 있는 항목이 하나도 없으면 **null** 이며, 화면에는 `-` 로 표시한다.
+   */
+  total_estimated_cost: string | number | null;
 }
 
 export interface UsageParams {

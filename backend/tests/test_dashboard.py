@@ -9,7 +9,7 @@ Phase 1 담당 트랙: **정책 API**
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 from unittest.mock import patch
 
 from app.enums import AnalysisJobStatus, QueryRunStatus, Severity
@@ -26,6 +26,7 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     make_error_group,
     make_policy,
     make_query_run,
+    no_real_log_source,
     session_factory,
 )
 
@@ -147,12 +148,14 @@ def test_metric_query_failure_degrades_to_a_warning(client, db) -> None:
 
     body = _overview(client, provider, query_run_id=run.id).json()
 
-    assert {warning["code"] for warning in body["warnings"]} == {"count_query_failed"}
-    assert "Loki 503" in body["warnings"][0]["message"]
+    codes = {warning["code"] for warning in body["warnings"]}
+    assert codes == {"count_query_failed", "by_service_from_lines"}
+    failure = next(w for w in body["warnings"] if w["code"] == "count_query_failed")
+    assert "Loki 503" in failure["message"]
     assert body["series"] == []
     assert body["total_errors"] == 0.0
     assert [item["fingerprint"] for item in body["top_groups"]] == ["fp-1"]
-    # metric 이 없으면 서비스별 건수는 저장된 그룹으로 대체한다.
+    # metric 이 없으면 서비스별 건수는 저장된 그룹으로 대체한다 — 조용히가 아니라 경고와 함께.
     assert body["by_service"] == [{"service": "payment-api", "count": 4.0}]
 
 
@@ -191,3 +194,101 @@ def test_inactive_connection_is_reported(client, db) -> None:
 
     body = client.get("/api/dashboard/overview", params={"query_run_id": run.id}).json()
     assert "connection_unavailable" in {warning["code"] for warning in body["warnings"]}
+
+
+# ------------------------------------------------- 서비스별 건수는 metric 기준
+
+
+def test_by_service_uses_the_mapped_source_label(client, db) -> None:
+    """어댑터는 `sum by (<소스 라벨>)` 로 감싼다 — 그 이름으로 시리즈를 읽어야 한다.
+
+    v1 은 라벨 없는 `sum(...)` 이라 시리즈 라벨이 늘 비었고, 대시보드는 조용히
+    DB(조회 상한에 잘린 라인) 집계로 폴백했다. 오류가 폭증하는 순간 — 정확히 이
+    화면이 필요한 순간 — 실제보다 적은 숫자를 보여주는 상태였다.
+    """
+    connection = make_connection(db)  # label_mapping = {"app": "service"}
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    make_error_group(db, run, fingerprint="fp-1", count=999)
+
+    series = count_series(("payment-api", 7.0), ("auth-api", 5.0))
+    for point in series.points:
+        point.labels = {"app": point.labels["service"]}  # 소스 라벨 이름으로 온다
+    provider = FakeLogSource(count_series=series)
+    provider.service_label = "app"
+
+    body = _overview(client, provider, query_run_id=run.id).json()
+
+    assert {item["service"]: item["count"] for item in body["by_service"]} == {
+        "payment-api": 7.0,
+        "auth-api": 5.0,
+    }
+    # 폴백하지 않았으므로 경고도 없다.
+    assert "by_service_from_lines" not in {w["code"] for w in body["warnings"]}
+
+
+def test_db_fallback_for_by_service_is_reported(client, db) -> None:
+    """폴백이 일어나면 조용히 넘어가지 않고 응답에 사유를 남긴다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    make_error_group(db, run, fingerprint="fp-1", count=4)
+    # 라벨 없는 시리즈 (= v1 의 `sum(...)` 결과 모양).
+    series = count_series(("payment-api", 3.0))
+    series.points[0].labels = {}
+
+    body = _overview(client, FakeLogSource(count_series=series), query_run_id=run.id).json()
+
+    assert "by_service_from_lines" in {w["code"] for w in body["warnings"]}
+    assert body["by_service"] == [{"service": "payment-api", "count": 4.0}]
+
+
+# ------------------------------------------------------------ step 과 기간
+
+
+def test_range_end_is_ceiled_to_the_step_boundary(client, db) -> None:
+    """step 경계에 걸치지 않는 `range_end` 는 마지막 버킷을 영구히 잃는다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    # range_end 가 300 초 배수가 아니게 어긋난 조회 이력.
+    run = make_query_run(db, policy, started_at=NOW - timedelta(seconds=137))
+    provider = FakeLogSource()
+
+    body = _overview(client, provider, query_run_id=run.id).json()
+
+    _, time_range, step = provider.count_calls[0]
+    assert step == 300
+    # SQLite 는 tz 를 버리고 돌려준다.
+    assert time_range.end > run.range_end.replace(tzinfo=UTC)
+    assert int(time_range.end.timestamp()) % step == 0
+    # 응답에 실린 기간도 실제로 조회한 기간과 같아야 한다.
+    assert body["range_end"].startswith(time_range.end.isoformat()[:19])
+
+
+def test_step_is_raised_when_there_would_be_too_many_points(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    provider = FakeLogSource()
+
+    body = _overview(
+        client,
+        provider,
+        query_run_id=run.id,
+        range_start=(NOW - timedelta(days=1)).isoformat(),
+        range_end=NOW.isoformat(),
+        step_seconds=15,
+    ).json()
+
+    raised = next(w for w in body["warnings"] if w["code"] == "step_raised")
+    _, time_range, step = provider.count_calls[0]
+    assert step > 15
+    assert raised["count"] == step
+    assert (time_range.end - time_range.start).total_seconds() / step <= 1000
+
+
+def test_step_bounds_are_enforced_by_the_router(client, db) -> None:
+    assert client.get("/api/dashboard/overview", params={"step_seconds": 1}).status_code == 422
+    assert (
+        client.get("/api/dashboard/overview", params={"step_seconds": 7200}).status_code == 422
+    )

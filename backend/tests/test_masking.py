@@ -18,9 +18,16 @@ from app.masking.service import (
     mask,
     mask_mapping,
 )
-from tests.fixtures.log_fixtures import all_extra_patterns, load_secret_fixtures
+from tests.fixtures.log_fixtures import (
+    all_extra_patterns,
+    load_scenario_lines,
+    load_secret_fixtures,
+)
 
 SECRET_FIXTURES = load_secret_fixtures()
+
+#: 데모 스택이 Loki 에 넣는 것과 같은 파일 (`infra/scenarios/06-secret-leak`).
+SCENARIO_LINES = load_scenario_lines()
 
 
 def kinds_in(text: str) -> set[str]:
@@ -30,9 +37,9 @@ def kinds_in(text: str) -> set[str]:
 # ------------------------------------------------------------------- 규칙 버전
 
 
-def test_masking_rule_version_is_v1() -> None:
-    """`error_samples.masking_rule_version` 기본값과 맞아야 한다."""
-    assert MASKING_RULE_VERSION == "v1"
+def test_masking_rule_version_is_v2() -> None:
+    """규칙을 고치면 반드시 올린다 (`error_samples.masking_rule_version` 에 값으로 저장된다)."""
+    assert MASKING_RULE_VERSION == "v2"
 
 
 # --------------------------------------------------------------- 최소 규칙 전부
@@ -116,6 +123,93 @@ def test_ordinary_error_message_survives_untouched() -> None:
     message = "TimeoutError: payment gateway timed out after 3000ms (attempt 2 of 3)"
     assert mask(message) == message
     assert not contains_placeholder(message)
+
+
+# --------------------------------------------------- 과잉 마스킹 (v2 회귀 방지)
+
+
+def test_auth_header_keeps_the_context_after_the_token() -> None:
+    """v1 은 Authorization 값을 줄 끝까지 삼켜 원인이 다른 오류를 한 그룹으로 뭉쳤다.
+
+    두 줄은 `status=` 와 예외 이름이 다르므로 마스킹 후에도 **서로 달라야** 한다.
+    같아지는 순간 fingerprint 가 같아지고, 504(게이트웨이 지연)와 401(인증 실패)이
+    한 그룹으로 병합된다.
+    """
+    timeout = "authorization: Bearer abcdef0123456789 status=504 TimeoutError"
+    auth_error = "authorization: Bearer zyxwvu9876543210 status=401 AuthError"
+
+    masked_timeout = mask(timeout)
+    masked_auth = mask(auth_error)
+
+    assert masked_timeout != masked_auth
+    assert masked_timeout == (
+        "authorization: Bearer <MASKED:BEARER_TOKEN> status=504 TimeoutError"
+    )
+    assert masked_auth == "authorization: Bearer <MASKED:BEARER_TOKEN> status=401 AuthError"
+    # 좁혔어도 토큰 본문은 그대로 지워진다.
+    assert "abcdef0123456789" not in masked_timeout
+    assert "zyxwvu9876543210" not in masked_auth
+
+
+def test_cookie_rule_stops_at_the_cookie_boundary() -> None:
+    """쿠키도 줄 끝까지 먹지 않는다 — 뒤따르는 key=value 와 예외명을 남긴다."""
+    masked = mask("cookie=session=SECRETVALUE123; Path=/ status=500 DatabaseError")
+
+    assert "SECRETVALUE123" not in masked
+    assert "<MASKED:COOKIE>" in masked
+    assert "status=500" in masked
+    assert "DatabaseError" in masked
+
+
+def test_auth_header_without_a_scheme_is_still_masked() -> None:
+    masked = mask("x-api-key: rawtokenvalue0123 retry=2")
+    assert "rawtokenvalue0123" not in masked
+    assert "retry=2" in masked
+
+
+@pytest.mark.parametrize(
+    "line",
+    SCENARIO_LINES,
+    ids=[f"line-{index}" for index in range(len(SCENARIO_LINES))],
+)
+def test_secret_leak_scenario_reaches_every_rule(line: str) -> None:
+    """시나리오 06 한 줄에 CARD/PHONE/API_KEY/DB_URI/COOKIE 가 **모두** 도달해야 한다.
+
+    v1 에서는 Authorization 규칙이 값을 줄 끝까지 먹어 그 뒤의 카드·전화번호·API 키·
+    DB 연결 문자열·쿠키를 통째로 삼켰다. 겉보기에는 "다 지워졌다"라서 유출 테스트는
+    통과하지만, 실제로는 뒤쪽 규칙이 **한 번도 실행되지 않은** 상태였다 — 규칙이
+    조용히 빠지는 것이 이 모듈에서 가장 위험한 실패다. 종류가 다양하게 나오는지를
+    직접 단언해 그 상태로 되돌아가지 못하게 한다.
+    """
+    masked = mask(line)
+    found = kinds_in(masked)
+
+    assert {"CARD", "PHONE", "API_KEY", "DB_URI", "COOKIE"} <= found, masked
+    assert found <= set(KINDS), masked
+
+
+def test_secret_leak_scenario_leaves_no_raw_secret() -> None:
+    """좁힌 뒤에도 비밀값 본문은 하나도 남지 않는다 (약화 금지)."""
+    secrets = (
+        "FAKE0SIGNATURE0FOR0AILA0MASKING0DEMO0ONLY",
+        "demo.user@example.com",
+        "ops-oncall@example.org",
+        "010-0000-0000",
+        "4111-1111-1111-1111",
+        "sk-demo-FAKE000000000000000000000000000000",
+        "not-a-real-password",
+        "FAKE-SESSION-COOKIE-VALUE-DEMO-ONLY",
+    )
+    for line in SCENARIO_LINES:
+        masked = mask(line)
+        for secret in secrets:
+            assert secret not in masked, f"{secret!r} 가 남았다 -> {masked}"
+
+
+def test_scenario_lines_stay_parseable_after_masking() -> None:
+    """시나리오 로그는 JSON 이다 — 마스킹이 구조를 깨면 파싱이 통째로 비정형이 된다."""
+    for line in SCENARIO_LINES:
+        assert isinstance(json.loads(mask(line)), dict)
 
 
 def test_empty_input() -> None:

@@ -788,7 +788,10 @@ route('GET', /^\/api\/usage$/, (_p, { query }) => {
     .filter((job) => !query.provider || job.provider === query.provider)
     .filter((job) => !query.model || job.model === query.model);
 
-  const byKey = new Map<string, UsageAggregate & { _latencySum: number; _latencyN: number }>();
+  const byKey = new Map<
+    string,
+    UsageAggregate & { _latencySum: number; _latencyN: number; _costN: number }
+  >();
   for (const job of jobs) {
     const usage = job.usage!;
     const key = `${usage.provider}::${usage.model}`;
@@ -805,14 +808,19 @@ route('GET', /^\/api\/usage$/, (_p, { query }) => {
         avg_latency_ms: null,
         _latencySum: 0,
         _latencyN: 0,
+        _costN: 0,
       };
     entry.job_count += 1;
     if (usage.status === 'failed') entry.failure_count += 1;
     entry.input_tokens += usage.input_tokens;
     entry.output_tokens += usage.output_tokens;
-    entry.estimated_cost = (
-      Number(entry.estimated_cost) + Number(usage.estimated_cost ?? 0)
-    ).toFixed(4);
+    if (usage.estimated_cost != null) {
+      // 단가표에 없는 모델은 null 이다 — 0 으로 접으면 "쌌다"로 읽힌다.
+      entry._costN += 1;
+      entry.estimated_cost = (
+        Number(entry.estimated_cost) + Number(usage.estimated_cost)
+      ).toFixed(4);
+    }
     if (usage.latency_ms != null) {
       entry._latencySum += usage.latency_ms;
       entry._latencyN += 1;
@@ -827,9 +835,11 @@ route('GET', /^\/api\/usage$/, (_p, { query }) => {
     failure_count: entry.failure_count,
     input_tokens: entry.input_tokens,
     output_tokens: entry.output_tokens,
-    estimated_cost: entry.estimated_cost,
+    estimated_cost: entry._costN > 0 ? entry.estimated_cost : null,
     avg_latency_ms: entry._latencyN > 0 ? entry._latencySum / entry._latencyN : null,
   }));
+
+  const costed = items.filter((item) => item.estimated_cost !== null);
 
   const response: UsageResponse = {
     range_start: rangeStart,
@@ -838,9 +848,10 @@ route('GET', /^\/api\/usage$/, (_p, { query }) => {
     total_jobs: items.reduce((acc, item) => acc + item.job_count, 0),
     total_input_tokens: items.reduce((acc, item) => acc + item.input_tokens, 0),
     total_output_tokens: items.reduce((acc, item) => acc + item.output_tokens, 0),
-    total_estimated_cost: items
-      .reduce((acc, item) => acc + Number(item.estimated_cost), 0)
-      .toFixed(4),
+    // 계산 가능한 항목이 하나도 없으면 합계도 null 이다 (0 으로 표시 금지).
+    total_estimated_cost: costed.length
+      ? costed.reduce((acc, item) => acc + Number(item.estimated_cost), 0).toFixed(4)
+      : null,
   };
   return response;
 });
