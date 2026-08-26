@@ -11,7 +11,9 @@ import { lazy, Suspense, type ComponentProps } from 'react';
 import type {
   ErrorTrendChart as ErrorTrendChartImpl,
   ServiceBarChart as ServiceBarChartImpl,
+  Sparkline as SparklineImpl,
   TokenByModelChart as TokenByModelChartImpl,
+  UsageBucketChart as UsageBucketChartImpl,
 } from './charts';
 import { Spinner } from './ui';
 
@@ -23,6 +25,12 @@ const LazyServiceBar = lazy(() =>
 );
 const LazyTokenByModel = lazy(() =>
   import('./charts').then((module) => ({ default: module.TokenByModelChart })),
+);
+const LazyUsageBucket = lazy(() =>
+  import('./charts').then((module) => ({ default: module.UsageBucketChart })),
+);
+const LazySparkline = lazy(() =>
+  import('./charts').then((module) => ({ default: module.Sparkline })),
 );
 
 function ChartFallback({ height = 220 }: { height?: number }) {
@@ -56,6 +64,30 @@ export function TokenByModelChart(props: ComponentProps<typeof TokenByModelChart
   return (
     <Suspense fallback={<ChartFallback height={Math.max(180, props.items.length * 56)} />}>
       <LazyTokenByModel {...props} />
+    </Suspense>
+  );
+}
+
+export function UsageBucketChart(props: ComponentProps<typeof UsageBucketChartImpl>) {
+  const fallbackHeight =
+    props.height ??
+    (props.layout === 'horizontal' ? Math.max(160, props.buckets.length * 46) : 220);
+  return (
+    <Suspense fallback={<ChartFallback height={fallbackHeight} />}>
+      <LazyUsageBucket {...props} />
+    </Suspense>
+  );
+}
+
+/**
+ * 카드 안의 소형 추이. 로딩 자리는 **높이만 차지하는 빈 칸**이다 — 카드마다 스피너가
+ * 하나씩 돌면 첫 화면이 공사장처럼 보인다.
+ */
+export function Sparkline(props: ComponentProps<typeof SparklineImpl>) {
+  if (props.points.length === 0) return null;
+  return (
+    <Suspense fallback={<div style={{ height: props.height ?? 40 }} />}>
+      <LazySparkline {...props} />
     </Suspense>
   );
 }

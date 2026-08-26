@@ -16,6 +16,7 @@ import type {
   AnalysisJobRead,
   AppSettingRead,
   AuthUser,
+  DashboardErrorGroupsResponse,
   DashboardOverviewResponse,
   DashboardSummaryResponse,
   ErrorGroupDetail,
@@ -26,6 +27,8 @@ import type {
   QueryRunListResponse,
   QueryRunRead,
   UsageResponse,
+  UserListResponse,
+  UserRead,
 } from '../src/api/types';
 import { asModelPricingTable } from '../src/api/types';
 
@@ -141,12 +144,138 @@ async function main(): Promise<void> {
     'viewer 의 비활성화(DELETE)는 403',
     await expectStatus(() => mockRequest('DELETE', '/api/policies/2', {}), 403),
   );
+  // 계정 관리는 **GET 도** admin 전용이다 — `/api/auth/` 접두사로 통째로 열어 두면
+  // 계정 목록이 viewer(나아가 미인증)에게 새어 나간다.
+  check(
+    'viewer 의 계정 목록 조회는 403',
+    await expectStatus(() => mockRequest('GET', '/api/auth/users', {}), 403),
+  );
 
   await mockRequest<void>('POST', '/api/auth/logout', {});
   check(
     '로그아웃하면 다시 401',
     await expectStatus(() => mockRequest('GET', '/api/policies', {}), 401),
   );
+  check(
+    '미인증이면 계정 목록도 401',
+    await expectStatus(() => mockRequest('GET', '/api/auth/users', {}), 401),
+  );
+  await loginAsAdmin();
+
+  console.log('계정 관리 (계약 1 — admin 전용)');
+  const userList = await mockRequest<UserListResponse>('GET', '/api/auth/users', {});
+  check('봉투 {total, items}', typeof userList.total === 'number' && Array.isArray(userList.items));
+  check(
+    '항목 모양 {id, username, role, active, created_at}',
+    userList.items.every(
+      (row) =>
+        typeof row.id === 'number' &&
+        typeof row.username === 'string' &&
+        (row.role === 'admin' || row.role === 'viewer') &&
+        typeof row.active === 'boolean' &&
+        typeof row.created_at === 'string',
+    ),
+  );
+  check(
+    '비밀번호는 어떤 형태로도 실리지 않는다',
+    !JSON.stringify(userList).toLowerCase().includes('password'),
+  );
+  check('비활성 계정도 목록에 남는다', userList.items.some((row) => !row.active));
+
+  const createdUser = await mockRequest<UserRead>('POST', '/api/auth/users', {
+    body: { username: 'smoke-viewer', password: 'smoke-pass', role: 'viewer' },
+  });
+  check('계정 생성', typeof createdUser.username === 'string' && createdUser.role === 'viewer');
+  check(
+    '같은 사용자명은 409',
+    await expectStatus(
+      () =>
+        mockRequest('POST', '/api/auth/users', {
+          body: { username: 'smoke-viewer', password: 'x1234', role: 'viewer' },
+        }),
+      409,
+    ),
+  );
+
+  const promoted = await mockRequest<UserRead>('PATCH', `/api/auth/users/${createdUser.id}`, {
+    body: { role: 'admin' },
+  });
+  check('역할 변경이 반영된다', promoted.role === 'admin');
+  const demoted = await mockRequest<UserRead>('PATCH', `/api/auth/users/${createdUser.id}`, {
+    body: { role: 'viewer' },
+  });
+  check('되돌리기도 된다', demoted.role === 'viewer');
+
+  // 마지막 남은 활성 admin 보호 — 이게 없으면 admin 을 전부 강등한 순간 아무도 되돌릴 수
+  // 없는 상태가 되고, 화면에서는 성공으로 보인다.
+  const adminRow = userList.items.find((row) => row.username === 'admin')!;
+  check(
+    '마지막 활성 admin 의 강등은 409',
+    await expectStatus(
+      () => mockRequest('PATCH', `/api/auth/users/${adminRow.id}`, { body: { role: 'viewer' } }),
+      409,
+    ),
+  );
+  check(
+    '마지막 활성 admin 의 비활성은 409',
+    await expectStatus(
+      () => mockRequest('PATCH', `/api/auth/users/${adminRow.id}`, { body: { active: false } }),
+      409,
+    ),
+  );
+  check(
+    '자기 자신 비활성(DELETE)은 409',
+    await expectStatus(() => mockRequest('DELETE', `/api/auth/users/${adminRow.id}`, {}), 409),
+  );
+
+  // DELETE 는 실삭제가 아니라 active=false 다.
+  await mockRequest<void>('DELETE', `/api/auth/users/${createdUser.id}`, {});
+  const afterDelete = await mockRequest<UserListResponse>('GET', '/api/auth/users', {});
+  check(
+    'DELETE 는 삭제가 아니라 비활성화',
+    afterDelete.items.some((row) => row.id === createdUser.id && !row.active),
+  );
+  // 비활성 계정은 로그인할 수 없고, 그 사실을 401 로만 알린다(계정 열거 방지).
+  check(
+    '비활성 계정은 로그인 401',
+    await expectStatus(
+      () =>
+        mockRequest('POST', '/api/auth/login', {
+          body: { username: 'smoke-viewer', password: 'smoke-pass' },
+        }),
+      401,
+    ),
+  );
+  await loginAsAdmin();
+
+  // 비밀번호를 바꾸면 그 계정의 세션이 전부 무효화된다 (계약).
+  const viewerRow = afterDelete.items.find((row) => row.username === 'viewer')!;
+  await mockRequest<AuthUser>('POST', '/api/auth/login', {
+    body: { username: 'viewer', password: 'viewer' },
+  });
+  await loginAsAdmin();
+  await mockRequest<UserRead>('PATCH', `/api/auth/users/${viewerRow.id}`, {
+    body: { password: 'rotated-1' },
+  });
+  check(
+    '비밀번호를 바꾸면 예전 비밀번호로 로그인할 수 없다',
+    await expectStatus(
+      () =>
+        mockRequest('POST', '/api/auth/login', {
+          body: { username: 'viewer', password: 'viewer' },
+        }),
+      401,
+    ),
+  );
+  const rotated = await mockRequest<AuthUser>('POST', '/api/auth/login', {
+    body: { username: 'viewer', password: 'rotated-1' },
+  });
+  check('새 비밀번호로는 로그인된다', rotated.username === 'viewer');
+  await loginAsAdmin();
+  // 뒤 단언들이 기존 비밀번호를 쓰므로 되돌려 놓는다.
+  await mockRequest<UserRead>('PATCH', `/api/auth/users/${viewerRow.id}`, {
+    body: { password: 'viewer' },
+  });
   await loginAsAdmin();
 
   console.log('dashboard summary (계약 3 — 통합 대시보드)');
@@ -207,6 +336,104 @@ async function main(): Promise<void> {
     '기존 overview 는 그대로 남아 있다 (정책 상세 뷰용)',
     (await mockRequest<DashboardOverviewResponse>('GET', '/api/dashboard/overview', {}))
       .series.length > 0,
+  );
+
+  // 계약 5 — 카드 스파크라인. 추가 Loki 호출 없이 **같은 count_over_time 결과**를 재사용하므로
+  // 시리즈 합계와 total_errors_24h 가 어긋나면 두 값이 다른 출처라는 뜻이다.
+  check(
+    'series_24h 가 실린다',
+    summary.policies.every((policy) => Array.isArray(policy.series_24h)),
+  );
+  check(
+    'series_24h 포인트 모양 {timestamp, value}',
+    summary.policies
+      .flatMap((policy) => policy.series_24h ?? [])
+      .every((point) => typeof point.timestamp === 'string' && typeof point.value === 'number'),
+  );
+  check(
+    'series_24h 합계가 total_errors_24h 와 일치 (같은 결과 재사용)',
+    summary.policies
+      .filter((policy) => policy.total_errors_24h !== null)
+      .every(
+        (policy) =>
+          (policy.series_24h ?? []).reduce((acc, point) => acc + point.value, 0) ===
+          policy.total_errors_24h,
+      ),
+  );
+  check(
+    'metric 실패 정책의 series_24h 는 빈 배열 (평평한 0 선을 그리지 않는다)',
+    summary.policies
+      .filter((policy) => policy.total_errors_24h === null)
+      .every((policy) => (policy.series_24h ?? []).length === 0),
+  );
+  // step 3600 = 24 시간이면 25 포인트(양 끝 포함).
+  check(
+    'series_24h 는 시간당 포인트 (step 3600)',
+    summary.policies
+      .filter((policy) => (policy.series_24h ?? []).length > 0)
+      .every((policy) => (policy.series_24h ?? []).length === 25),
+  );
+
+  console.log('전체 오류 그룹 (계약 4)');
+  const allGroups = await mockRequest<DashboardErrorGroupsResponse>(
+    'GET',
+    '/api/dashboard/error-groups',
+    { query: { limit: 20, offset: 0 } },
+  );
+  check(
+    '봉투 {total, limit, offset, items}',
+    typeof allGroups.total === 'number' &&
+      typeof allGroups.limit === 'number' &&
+      typeof allGroups.offset === 'number' &&
+      Array.isArray(allGroups.items),
+  );
+  check(
+    '항목에 policy_id·policy_name 이 붙는다',
+    allGroups.items.length > 0 &&
+      allGroups.items.every(
+        (item) => typeof item.policy_id === 'number' && typeof item.policy_name === 'string',
+      ),
+  );
+  check(
+    '항목이 ErrorGroupSummary 를 그대로 포함한다',
+    allGroups.items.every(
+      (item) =>
+        typeof item.id === 'number' &&
+        typeof item.fingerprint === 'string' &&
+        typeof item.normalized_message === 'string' &&
+        typeof item.count === 'number' &&
+        typeof item.last_seen === 'string',
+    ),
+  );
+  check(
+    '정렬은 count desc, last_seen desc',
+    allGroups.items.every(
+      (item, index) =>
+        index === 0 ||
+        allGroups.items[index - 1].count > item.count ||
+        (allGroups.items[index - 1].count === item.count &&
+          Date.parse(allGroups.items[index - 1].last_seen) >= Date.parse(item.last_seen)),
+    ),
+  );
+  check(
+    '심각도는 fingerprint 조인 그대로 (분석된 그룹은 값이 있다)',
+    allGroups.items.some((item) => item.latest_severity != null) &&
+      allGroups.items.some((item) => item.latest_severity == null),
+  );
+  const pagedGroups = await mockRequest<DashboardErrorGroupsResponse>(
+    'GET',
+    '/api/dashboard/error-groups',
+    { query: { limit: 2, offset: 0 } },
+  );
+  check('limit 이 적용된다', pagedGroups.items.length === 2 && pagedGroups.total === allGroups.total);
+  const secondPage = await mockRequest<DashboardErrorGroupsResponse>(
+    'GET',
+    '/api/dashboard/error-groups',
+    { query: { limit: 2, offset: 2 } },
+  );
+  check(
+    'offset 이 겹치지 않는 페이지를 준다',
+    secondPage.items.every((item) => !pagedGroups.items.some((first) => first.id === item.id)),
   );
 
   console.log('스케줄 필드 (계약 — 0004)');
@@ -502,6 +729,164 @@ async function main(): Promise<void> {
     '단가 등록 모델의 추정 비용은 값이 있다',
     usage.items.some((item) => item.model === 'claude-sonnet-4-6' && item.estimated_cost !== null),
   );
+  // 분해를 요청하지 않으면 **null** 이다 — 빈 배열이면 "분해했더니 비었다"와 구분되지 않고,
+  // 화면이 안내 문구 대신 "기록 없음"을 보여주게 된다. 라이브 백엔드도 null 을 싣는다.
+  check('group_by 없이 부르면 buckets 는 null (빈 배열이 아니다)', usage.buckets === null);
+
+  console.log('사용량 분해 (계약 3 — group_by)');
+  const byDay = await mockRequest<UsageResponse>('GET', '/api/usage', {
+    query: { group_by: 'day' },
+  });
+  check('day 분해에 buckets 가 실린다', Array.isArray(byDay.buckets) && byDay.buckets.length > 0);
+  check(
+    '기존 봉투는 그대로 (items·합계가 남는다)',
+    Array.isArray(byDay.items) && typeof byDay.total_jobs === 'number',
+  );
+  check(
+    'day 버킷 모양 {key, label, input_tokens, output_tokens, estimated_cost, job_count, failure_count}',
+    (byDay.buckets ?? []).every(
+      (bucket) =>
+        typeof bucket.key === 'string' &&
+        typeof bucket.label === 'string' &&
+        typeof bucket.input_tokens === 'number' &&
+        typeof bucket.output_tokens === 'number' &&
+        typeof bucket.job_count === 'number' &&
+        typeof bucket.failure_count === 'number' &&
+        (bucket.estimated_cost === null ||
+          typeof bucket.estimated_cost === 'string' ||
+          typeof bucket.estimated_cost === 'number'),
+    ),
+  );
+  check(
+    'day 의 key 는 YYYY-MM-DD 이고 label 과 같다',
+    (byDay.buckets ?? []).every(
+      (bucket) => /^\d{4}-\d{2}-\d{2}$/.test(bucket.key) && bucket.label === bucket.key,
+    ),
+  );
+  check(
+    'day 버킷의 실행 수 합계가 전체와 같다 (버리는 작업이 없다)',
+    (byDay.buckets ?? []).reduce((acc, bucket) => acc + bucket.job_count, 0) === byDay.total_jobs,
+  );
+
+  const byPolicy = await mockRequest<UsageResponse>('GET', '/api/usage', {
+    query: { group_by: 'policy' },
+  });
+  check(
+    'policy 분해에 buckets 가 실린다',
+    Array.isArray(byPolicy.buckets) && byPolicy.buckets.length > 0,
+  );
+  check(
+    'policy 의 key 는 policy_id 문자열 또는 "unknown"',
+    (byPolicy.buckets ?? []).every(
+      (bucket) => bucket.key === 'unknown' || /^\d+$/.test(bucket.key),
+    ),
+  );
+  // 정책 연결이 끊긴 작업을 버리면 합계가 어긋난다 — unknown 버킷이 그 자리를 받는다.
+  check(
+    '정책 연결이 끊긴 작업은 unknown 버킷에 남는다',
+    (byPolicy.buckets ?? []).some((bucket) => bucket.key === 'unknown'),
+  );
+  check(
+    'policy 버킷의 실행 수 합계가 전체와 같다',
+    (byPolicy.buckets ?? []).reduce((acc, bucket) => acc + bucket.job_count, 0) ===
+      byPolicy.total_jobs,
+  );
+  // 단가 미등록 모델만 있는 칸의 비용은 0 이 아니라 null 이다 (막대를 그리지 않는다).
+  check(
+    '비용을 계산할 수 없는 버킷은 null (0 이 아니다)',
+    (byPolicy.buckets ?? []).some((bucket) => bucket.estimated_cost === null),
+  );
+
+  console.log('분석 이력 검색 (계약 2 — q · 기간 · 페이지네이션)');
+  const jobsAll = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { limit: 100, offset: 0 },
+  });
+  check(
+    '봉투 {total, limit, offset, items} 유지',
+    typeof jobsAll.total === 'number' &&
+      typeof jobsAll.limit === 'number' &&
+      typeof jobsAll.offset === 'number' &&
+      Array.isArray(jobsAll.items),
+  );
+  check(
+    '최신순',
+    jobsAll.items.every(
+      (job, index) =>
+        index === 0 ||
+        Date.parse(jobsAll.items[index - 1].requested_at) >= Date.parse(job.requested_at),
+    ),
+  );
+
+  const byService = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { q: 'payment-api' },
+  });
+  check(
+    'q 는 서비스에 부분 일치한다',
+    byService.items.length > 0 && byService.items.every((job) => job.service === 'payment-api'),
+  );
+  check('q 는 total 도 좁힌다', byService.total < jobsAll.total && byService.total > 0);
+  const byFingerprint = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { q: 'fp_3b77' },
+  });
+  check(
+    'q 는 fingerprint 에도 부분 일치한다',
+    byFingerprint.items.length > 0 &&
+      byFingerprint.items.every((job) => job.fingerprint.includes('fp_3b77')),
+  );
+  const byModel = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { q: 'gpt-5.2' },
+  });
+  check(
+    'q 는 모델에도 부분 일치한다',
+    byModel.items.length > 0 && byModel.items.every((job) => job.model.includes('gpt-5.2')),
+  );
+  const noHit = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { q: 'zzz-no-such-thing' },
+  });
+  check('일치가 없으면 빈 목록 + total 0', noHit.items.length === 0 && noHit.total === 0);
+
+  // 기간 필터. `requested_from` 하한만 걸면 그 시각 이후만 남아야 한다.
+  const since = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+  const recent = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { requested_from: since },
+  });
+  check(
+    'requested_from 하한이 적용된다',
+    recent.items.every((job) => Date.parse(job.requested_at) >= Date.parse(since)),
+  );
+  check('기간 필터가 total 을 좁힌다', recent.total < jobsAll.total);
+  const oldOnly = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { requested_to: since },
+  });
+  check(
+    'requested_to 상한이 적용된다',
+    oldOnly.items.length > 0 &&
+      oldOnly.items.every((job) => Date.parse(job.requested_at) <= Date.parse(since)),
+  );
+  check('from + to 합이 전체와 같다', recent.total + oldOnly.total === jobsAll.total);
+
+  const statusFiltered = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { status: 'failed' },
+  });
+  check(
+    '상태 필터는 그대로 동작한다 (기존 파라미터)',
+    statusFiltered.items.length > 0 &&
+      statusFiltered.items.every((job) => job.status === 'failed'),
+  );
+
+  // 페이지네이션 — total 은 **필터 적용 뒤** 건수여야 페이지 수가 맞는다.
+  const page1 = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { limit: 2, offset: 0 },
+  });
+  const page2 = await mockRequest<AnalysisJobListResponse>('GET', '/api/analysis-jobs', {
+    query: { limit: 2, offset: 2 },
+  });
+  check('limit·offset 이 적용된다', page1.items.length === 2 && page2.items.length > 0);
+  check(
+    '페이지가 겹치지 않는다',
+    page2.items.every((job) => !page1.items.some((first) => first.id === job.id)),
+  );
+  check('페이지를 넘겨도 total 은 같다', page1.total === jobsAll.total && page2.total === jobsAll.total);
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);

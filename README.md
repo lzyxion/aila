@@ -369,3 +369,83 @@ curl.exe -b admin.jar -X POST http://localhost:8000/api/auth/users `
   센다(그룹 id 기준이 아니다 — id 는 회차마다 새로 생긴다). 성공 회차가 없으면 0 이고
   `no_successful_run` 경고가 붙는다.
 - 비활성 정책도 목록에서 빼지 않는다 — 빼면 "지웠나?"와 구분되지 않는다.
+
+---
+
+## Phase 6 — 계정 관리 · 검색 · 사용량 분해 · 전체 오류 그룹
+
+2 차 사용 피드백의 API 확장 5 건. **전부 additive** 다 — 기존 응답에서 사라진 필드도,
+뜻이 바뀐 필드도 없다. 새 파라미터를 주지 않으면 응답은 Phase 5 와 동일하다.
+
+### 계정 관리 (admin 전용)
+
+| 라우트 | 계약 |
+| --- | --- |
+| `GET /api/auth/users` | `{total, items:[{id, username, role, active, created_at}]}` |
+| `PATCH /api/auth/users/{id}` | `{role?, active?, password?}` → 갱신된 계정 한 줄 |
+| `DELETE /api/auth/users/{id}` | **비활성화**(`active=false`) — 실삭제가 아니다 |
+
+- **읽기도 admin 전용이다.** viewer 는 GET 이 열려 있지만 계정 목록만은 예외로 403 이다
+  (사용자 이름 목록은 계정 열거의 절반이다).
+- **마지막 남은 활성 admin 은 강등도 비활성도 안 된다 (409).** 비활성 admin 은 "관리자가
+  또 있다"의 근거가 되지 못한다 — 로그인 자체가 막힌 계정이기 때문이다.
+- **자기 자신은 비활성화할 수 없다 (409).** `DELETE` 와 `PATCH {active:false}` 둘 다.
+- **`active=false` 와 비밀번호 변경은 그 계정의 세션을 전부 무효화한다** (`user_sessions`
+  행 삭제). 자기 비밀번호를 바꾸면 자기 세션도 끊긴다 — 유출을 전제로 하는 조작이라 의도다.
+- 비밀번호는 기존 형식 그대로 저장된다 (`scrypt$n$r$p$salt$hash`).
+- 응답 본문은 `UserRead`(username·role) 의 **상위 집합**이다. 해시는 어떤 경로로도 나가지 않는다.
+
+### 분석 이력 검색 — `GET /api/analysis-jobs`
+
+추가 파라미터 세 개. 기존 `status`·`limit`·`offset` 과 응답 봉투는 그대로다.
+
+| 파라미터 | 뜻 |
+| --- | --- |
+| `q` | 부분 일치 — 서비스·정규화 메시지(`error_groups`) **또는** 모델·fingerprint(`analysis_jobs`) |
+| `requested_from` / `requested_to` | `requested_at` 범위 (ISO datetime, 경계 포함) |
+
+- `q` 는 대소문자를 가리지 않고, `%`·`_` 는 **리터럴**로 취급한다(이스케이프). 검색어
+  하나가 전체 일치가 되는 사고를 막는다.
+- 날짜는 **UTC 로 정규화해** 비교한다. 오프셋이 붙은 값(`...+09:00`)은 그 오프셋대로,
+  오프셋이 없는 값은 UTC 로 읽는다.
+- `total` 도 같은 조건으로 센다 — items 에만 필터를 걸면 있지도 않은 페이지가 생긴다.
+
+### 사용량 분해 — `GET /api/usage?group_by=day|policy`
+
+`group_by` 를 주면 같은 기간·필터를 한 번 더 분해해 `buckets` 를 **추가**한다
+(`[{key, label, input_tokens, output_tokens, estimated_cost, job_count, failure_count}]`).
+기존 모델별 `items` 는 그대로다.
+
+- `day` 의 하루 경계는 **`app_settings.timezone` 의 로컬 자정**이다 — 일일 분석 한도와 같은
+  규칙이라야 "오늘 3 건 썼다"가 두 화면에서 같은 뜻이 된다. `key`=`label`=`YYYY-MM-DD`.
+- `policy` 는 usage → job → group → run → policy 조인이다. `key`=정책 id 문자열,
+  `label`=정책명. 고리가 끊긴 기록(정책이 실제로 삭제된 경우)은 `key="unknown"` 으로
+  모이고 목록 끝에 온다 — 빼 버리면 버킷 합과 `total_jobs` 가 어긋난다.
+- 버킷의 `estimated_cost` 는 계산 가능한 기록이 하나도 없으면 **`null`** 이다 (0 금지).
+- `group_by` 를 주지 않으면 `buckets` 는 `null` 이다 — "분해를 요청하지 않았다"와
+  "분해했더니 비었다"를 구분한다. 모르는 값은 422 다.
+
+### 전체 오류 그룹 — `GET /api/dashboard/error-groups?limit=&offset=`
+
+**전 활성 정책의 최신 성공 조회 회차**의 그룹을 한데 모아 `count desc, last_seen desc`
+로 준다. 항목은 기존 그룹 요약 + `policy_id`·`policy_name` 이고, 봉투는
+`{total, limit, offset, items}` 다.
+
+- *활성*·*최신*·*성공* 세 조건에 각각 이유가 있다. 비활성 정책을 섞으면 이미 끄기로 한
+  오류가 상위를 차지하고, 회차를 안 좁히면 같은 오류가 회차 수만큼 중복되며, 실패 회차를
+  최신으로 잡으면 목록이 조용히 빈다.
+- 분석 상태·severity 는 기존 그룹 목록과 **같은 fingerprint 조인**으로 붙는다.
+- 서로 겹치는 정책(예: 서비스별 정책 + 전체 정책)이 같은 오류를 잡으면 **같은
+  fingerprint 가 정책 수만큼 나온다.** 중복이 아니라 "두 정책이 같은 오류를 보고 있다"는
+  사실이고, `policy_name` 으로 구분된다.
+
+### summary 카드 시계열 — `GET /api/dashboard/summary`
+
+정책 항목마다 `series_24h: [{timestamp, value}]` 가 추가됐다.
+
+- **`total_errors_24h` 를 만든 바로 그 `count_over_time` 응답**의 포인트다 (step 3600).
+  Loki 호출 수는 Phase 5 와 같다 — 시계열 때문에 두 번 부르지 않는다.
+- metric 은 `sum by (service)` 라 한 시각에 점이 여러 개 온다. 카드 차트가 같은 시각을
+  여러 번 그리지 않도록 **시각 기준으로 합쳐서** 싣는다 (그래서 시리즈 합 = `total_errors_24h`).
+- 건수 조회가 실패하면 `total_errors_24h` 는 `null`, `series_24h` 는 **빈 배열**이다
+  (0 짜리 선을 그리면 "오류가 없었다"로 읽힌다).

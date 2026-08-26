@@ -18,6 +18,7 @@ import type {
   LLMConnectionRead,
   LokiConnectionRead,
   PolicyRead,
+  UserRead,
 } from '../types';
 
 /** mock 데이터의 기준 시각. 모듈 로드 시점으로 고정해 화면이 흔들리지 않게 한다. */
@@ -56,6 +57,46 @@ const spike = (t: number) => 4 + 46 * Math.pow(t, 4) + 6 * Math.sin(t * 11);
 const steady = (t: number) => 9 + 4 * Math.sin(t * 7) + 2 * Math.cos(t * 3);
 
 export const seriesShapes = { spike, steady };
+
+// ------------------------------------------------------------------ 계정
+
+/**
+ * 계정 목록 fixture (계약 1).
+ *
+ * 구성이 의도적이다 — **active admin 이 하나뿐**이어야 "마지막 admin 강등·비활성은 409"
+ * 경로를 화면에서 실제로 눌러 볼 수 있고, 비활성 계정이 하나 있어야 재활성 버튼이
+ * 빈 자리로 남지 않는다. 비밀번호는 어떤 응답에도 들어가지 않으므로 여기에도 없다.
+ */
+export const userSeed: UserRead[] = [
+  {
+    id: 1,
+    username: 'admin',
+    role: 'admin',
+    active: true,
+    created_at: iso(-60 * 24 * 30),
+  },
+  {
+    id: 2,
+    username: 'viewer',
+    role: 'viewer',
+    active: true,
+    created_at: iso(-60 * 24 * 21),
+  },
+  {
+    id: 3,
+    username: 'oncall-watcher',
+    role: 'viewer',
+    active: true,
+    created_at: iso(-60 * 24 * 9),
+  },
+  {
+    id: 4,
+    username: 'former-operator',
+    role: 'admin',
+    active: false,
+    created_at: iso(-60 * 24 * 40),
+  },
+];
 
 // ------------------------------------------------------------- connections
 
@@ -646,6 +687,47 @@ export const analysisJobSeed: AnalysisJobRead[] = [
     },
   },
 ];
+
+/*
+  일별 사용량 차트가 막대 하나짜리가 되지 않도록 지난 며칠에 걸친 이력을 더 둔다.
+
+  **fingerprint 는 위에서 이미 분석된 것만 재사용한다** — 미분석 그룹(103·106)에 이력을
+  붙이면 "미분석 신규 그룹" 이 0 이 되어 통합 대시보드의 핵심 숫자를 확인할 수 없게 된다.
+*/
+analysisJobSeed.push(
+  ...[
+    { id: 9011, group: 101, fp: 'fp_9c1a4e77b2d0', days: 2, input: 2980, output: 720 },
+    { id: 9012, group: 102, fp: 'fp_3b77d0f81ace', days: 3, input: 2510, output: 604 },
+    { id: 9013, group: 101, fp: 'fp_9c1a4e77b2d0', days: 4, input: 3320, output: 845 },
+    { id: 9014, group: 104, fp: 'fp_7fa1cc02be34', days: 5, input: 2240, output: 512 },
+  ].map<AnalysisJobRead>((row) => ({
+    id: row.id,
+    error_group_id: row.group,
+    llm_connection_id: 1,
+    fingerprint: row.fp,
+    status: 'succeeded',
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-6',
+    prompt_version: 'v1',
+    requested_at: iso(-60 * 24 * row.days - 90),
+    triggered_by: row.days % 2 === 0 ? 'schedule' : 'manual',
+    started_at: iso(-60 * 24 * row.days - 90),
+    completed_at: iso(-60 * 24 * row.days - 89),
+    error_message: null,
+    result: analysisResultByFingerprint[row.fp] ?? null,
+    usage: {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      input_tokens: row.input,
+      output_tokens: row.output,
+      estimated_cost: ((row.input / 1000) * 0.003 + (row.output / 1000) * 0.015).toFixed(4),
+      pricing_snapshot: { input_per_1k: 0.003, output_per_1k: 0.015, currency: 'USD' },
+      latency_ms: 6800 + row.id % 900,
+      status: 'succeeded',
+      failure_reason: null,
+    },
+  })),
+);
 
 /** 새 분석을 실행했을 때 돌려줄 기본 결과 (fingerprint 별 fixture 가 없을 때). */
 export const fallbackAnalysisResult: AnalysisResultSchema = {

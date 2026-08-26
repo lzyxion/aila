@@ -4,15 +4,20 @@ import type { ReactNode } from 'react';
 import { useAuth } from './auth/AuthContext';
 import { Layout } from './components/Layout';
 import { LoadingBlock } from './components/ui';
+import { AdminLayout } from './pages/AdminPage';
+import { AnalysisJobsPage } from './pages/AnalysisJobsPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ErrorGroupDetailPage } from './pages/ErrorGroupDetailPage';
+import { ErrorGroupsPage } from './pages/ErrorGroupsPage';
 import { HomePage } from './pages/HomePage';
 import { LlmConnectionsPage } from './pages/LlmConnectionsPage';
 import { LoginPage } from './pages/LoginPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { PoliciesPage } from './pages/PoliciesPage';
+import { PolicyEditPage } from './pages/PolicyEditPage';
 import { QueryRunPage } from './pages/QueryRunPage';
 import { UsagePage } from './pages/UsagePage';
+import { UsersPage } from './pages/UsersPage';
 
 export function App() {
   return (
@@ -25,17 +30,45 @@ export function App() {
           </RequireAuth>
         }
       >
-        {/* 홈은 정책 카드 그리드다 — 정책이 많아도 "지금 무엇을 봐야 하는가"를 먼저 답한다. */}
+        {/* ---------------------------------------------------------- 일반 영역 */}
+        {/* 홈은 요약 카드 + 정책 카드 그리드 + 전체 오류 그룹이다. */}
         <Route index element={<HomePage />} />
         {/* 정책별 상세 대시보드. 카드의 "대시보드"에서 들어온다. */}
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="dashboard/:policyId" element={<DashboardPage />} />
+
+        {/*
+          정책은 목록(조회 전용)과 편집 페이지가 분리돼 있다 — 폼이 목록 옆에 있으면
+          "지금 무엇을 고치는 중인가"가 스크롤 밖으로 밀린다.
+          `new` 를 `:policyId/edit` 보다 **위에** 둘 필요는 없다(경로 모양이 다르다).
+        */}
         <Route path="policies" element={<PoliciesPage />} />
-        <Route path="llm-connections" element={<LlmConnectionsPage />} />
+        <Route path="policies/new" element={<PolicyEditPage />} />
+        <Route path="policies/:policyId/edit" element={<PolicyEditPage />} />
+
+        {/* 전 정책의 오류 그룹 한 목록 + 그룹 상세. */}
+        <Route path="error-groups" element={<ErrorGroupsPage />} />
+        <Route path="error-groups/:groupId" element={<ErrorGroupDetailPage />} />
+
         {/* 정책 실행 이력 → 그 회차의 오류 그룹 목록 */}
         <Route path="query-runs/:runId" element={<QueryRunPage />} />
-        <Route path="error-groups/:groupId" element={<ErrorGroupDetailPage />} />
-        <Route path="usage" element={<UsagePage />} />
+
+        {/* ---------------------------------------------------------- 관리 영역 */}
+        <Route path="admin" element={<AdminLayout />}>
+          <Route index element={<Navigate to="/admin/llm-connections" replace />} />
+          <Route path="llm-connections" element={<LlmConnectionsPage />} />
+          <Route path="analysis-jobs" element={<AnalysisJobsPage />} />
+          <Route path="usage" element={<UsagePage />} />
+          <Route path="users" element={<UsersPage />} />
+        </Route>
+
+        {/*
+          예전 경로. 북마크·문서·이전 화면의 링크가 살아 있으므로 404 로 떨어뜨리지 않고
+          관리 영역의 새 자리로 보낸다 (`replace` — 뒤로가기가 리다이렉트 루프가 되지 않게).
+        */}
+        <Route path="usage" element={<Navigate to="/admin/usage" replace />} />
+        <Route path="llm-connections" element={<Navigate to="/admin/llm-connections" replace />} />
+
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>

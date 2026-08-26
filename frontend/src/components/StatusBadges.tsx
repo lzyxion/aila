@@ -61,6 +61,29 @@ const severityTone: Record<Severity, 'danger' | 'warning' | 'info' | 'neutral'> 
   info: 'neutral',
 };
 
+/**
+ * 심각도별 행 배경 — **배지 팔레트의 옅은 톤만** 쓴다 (새 색을 만들지 않는다).
+ *
+ * 두 가지 규칙이 있다.
+ * 1. **색만으로 구분하지 않는다.** 이 배경을 쓰는 행에는 `SeverityBadge` 를 반드시 함께
+ *    둔다 — 색각 이상·흑백 출력·다크 모드 강제 반전에서 색은 사라지지만 글자는 남는다.
+ * 2. 본문 글자는 `text-slate-700` 이상을 유지한다. 50 단계 배경은 그 대비를 깨지 않는
+ *    가장 옅은 톤이고, 왼쪽 테두리(200~400)가 색 차이를 배경보다 크게 벌려 준다.
+ *
+ * 심각도가 없으면(미분석) 배경을 칠하지 않는다 — 회색으로 칠하면 "정보 등급"과 섞인다.
+ */
+const severityRowTone: Record<Severity, string> = {
+  critical: 'bg-rose-50 border-l-4 border-rose-400',
+  high: 'bg-rose-50 border-l-4 border-rose-300',
+  medium: 'bg-amber-50 border-l-4 border-amber-300',
+  low: 'bg-sky-50 border-l-4 border-sky-300',
+  info: 'bg-slate-50 border-l-4 border-slate-300',
+};
+
+export function severityRowClass(severity: Severity | null | undefined): string {
+  return severity ? severityRowTone[severity] : 'border-l-4 border-transparent';
+}
+
 /** 항상 "LLM 추정" 표기를 붙인다. 발생량 기반 심각도가 아니다. */
 export function SeverityBadge({ severity }: { severity: Severity | null | undefined }) {
   if (!severity) return <span className="text-xs text-slate-400">-</span>;

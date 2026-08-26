@@ -56,10 +56,18 @@ import type {
   QueryRunListResponse,
   QueryRunRead,
   ServiceErrorCount,
+  SummarySeriesPoint,
   SummaryWarning,
   SettingValue,
   UsageAggregate,
+  UsageBucket,
   UsageResponse,
+  DashboardErrorGroupItem,
+  DashboardErrorGroupsResponse,
+  UserCreateRequest,
+  UserListResponse,
+  UserRead,
+  UserUpdateRequest,
 } from '../types';
 import {
   asModelPricingTable,
@@ -80,6 +88,7 @@ import {
   makeSeries,
   policySeed,
   seriesShapes,
+  userSeed,
 } from './fixtures';
 import { renderReportMarkdown } from '../../lib/report';
 
@@ -93,6 +102,10 @@ interface MockState {
    * 화면 입장에서는 "로그인 요청 후 이어지는 요청이 통한다"는 모양만 같으면 된다.
    */
   session: AuthUser | null;
+  /** 계정 목록 (계약 1). 비밀번호는 여기 없다 — `passwords` 가 따로 들고 있다. */
+  users: UserRead[];
+  /** username -> 비밀번호. 실제 백엔드는 scrypt 해시만 갖지만 mock 은 로그인만 재현하면 된다. */
+  passwords: Record<string, string>;
   lokiConnections: LokiConnectionRead[];
   llmConnections: LLMConnectionRead[];
   policies: PolicyRead[];
@@ -134,13 +147,16 @@ const SETTING_DESCRIPTIONS: Record<string, string> = {
 };
 
 /**
- * mock 계정. **viewer 가 하나 있어야** 읽기 전용 화면을 실제로 눌러 볼 수 있다 —
- * 쓰기 UI 를 감추는 코드가 맞는지는 admin 화면만 봐서는 검증되지 않는다.
+ * mock 계정의 초기 비밀번호. **viewer 가 하나 있어야** 읽기 전용 화면을 실제로 눌러 볼 수
+ * 있다 — 쓰기 UI 를 감추는 코드가 맞는지는 admin 화면만 봐서는 검증되지 않는다.
+ *
+ * 역할·활성 여부는 `userSeed`(계정 목록)가 단일 출처다. 여기 없는 계정은 로그인할 수
+ * 없고(비밀번호 미설정), 그 상태는 계정 관리 화면에서 "비밀번호 재설정"으로 풀린다.
  */
-const ACCOUNTS: Array<{ username: string; password: string; role: AuthUser['role'] }> = [
-  { username: 'admin', password: 'admin', role: 'admin' },
-  { username: 'viewer', password: 'viewer', role: 'viewer' },
-];
+const INITIAL_PASSWORDS: Record<string, string> = {
+  admin: 'admin',
+  viewer: 'viewer',
+};
 
 /**
  * mock 세션을 `sessionStorage` 에 둔다.
@@ -171,6 +187,8 @@ function persistSession(user: AuthUser | null): void {
 
 const state: MockState = {
   session: loadSession(),
+  users: structuredClone(userSeed),
+  passwords: { ...INITIAL_PASSWORDS },
   lokiConnections: structuredClone(lokiConnectionSeed),
   llmConnections: structuredClone(llmConnectionSeed),
   policies: structuredClone(policySeed),
@@ -453,11 +471,11 @@ function route(method: HttpMethod, pattern: RegExp, handler: Handler): void {
  */
 route('POST', /^\/api\/auth\/login$/, (_p, { body }) => {
   const payload = (body ?? {}) as Partial<LoginRequest>;
-  const found = ACCOUNTS.find(
-    (account) =>
-      account.username === (payload.username ?? '').trim() && account.password === payload.password,
-  );
-  if (!found) {
+  const username = (payload.username ?? '').trim();
+  const found = state.users.find((user) => user.username === username && user.active);
+  // 비활성 계정·비밀번호 불일치·없는 계정을 **구분하지 않는다** — 구분하면 계정 이름
+  // 열거가 된다 (실제 백엔드와 같은 규칙).
+  if (!found || state.passwords[username] !== payload.password) {
     throw new ApiError(401, '사용자명 또는 비밀번호가 올바르지 않습니다.');
   }
   state.session = { username: found.username, role: found.role };
@@ -474,6 +492,104 @@ route('POST', /^\/api\/auth\/logout$/, () => {
 route('GET', /^\/api\/auth\/me$/, () => {
   if (!state.session) throw new ApiError(401, '로그인이 필요합니다.');
   return state.session satisfies AuthUser;
+});
+
+// --- 계정 관리 (계약 1 — admin 전용) ----------------------------------------
+
+/**
+ * "마지막 남은 active admin" 인가.
+ *
+ * **강등·비활성을 막는 유일한 장치**다. 이게 없으면 admin 을 전부 viewer 로 바꾼 순간
+ * 아무도 계정을 되돌릴 수 없는 상태가 되고, 그건 화면에서는 성공으로 보인다.
+ */
+function isLastActiveAdmin(user: UserRead): boolean {
+  if (user.role !== 'admin' || !user.active) return false;
+  return state.users.filter((row) => row.role === 'admin' && row.active).length <= 1;
+}
+
+/**
+ * 세션 무효화. 실제 백엔드는 `user_sessions` 행을 지운다 — mock 에는 세션이 하나뿐이라
+ * "그 계정이 지금 로그인한 계정이면 끊는다"로 같은 결과를 만든다.
+ */
+function invalidateSessionsFor(username: string): void {
+  if (state.session?.username === username) {
+    state.session = null;
+    persistSession(null);
+  }
+}
+
+function requireUser(id: string): UserRead {
+  const found = state.users.find((user) => user.id === Number(id));
+  if (!found) throw new ApiError(404, `계정 ${id} 을(를) 찾을 수 없습니다.`);
+  return found;
+}
+
+route('GET', /^\/api\/auth\/users$/, () => {
+  const items = [...state.users].sort((a, b) => a.id - b.id);
+  return { total: items.length, items } satisfies UserListResponse;
+});
+
+route('POST', /^\/api\/auth\/users$/, (_p, { body }) => {
+  const payload = (body ?? {}) as Partial<UserCreateRequest>;
+  const username = (payload.username ?? '').trim();
+  if (!username) throw new ApiError(422, '사용자명을 입력하십시오.');
+  if (!payload.password) throw new ApiError(422, '비밀번호를 입력하십시오.');
+  if (state.users.some((user) => user.username === username)) {
+    throw new ApiError(409, `'${username}' 계정이 이미 있습니다.`);
+  }
+  const created: UserRead = {
+    id: nextId(),
+    username,
+    role: payload.role === 'admin' ? 'admin' : 'viewer',
+    active: true,
+    created_at: nowIso(),
+  };
+  state.users.push(created);
+  state.passwords[username] = payload.password;
+  return created;
+});
+
+route('PATCH', /^\/api\/auth\/users\/(\d+)$/, ([id], { body }) => {
+  const user = requireUser(id);
+  const payload = (body ?? {}) as UserUpdateRequest;
+
+  // 마지막 admin 보호는 **병합 후 실효값**으로 본다 — 요청 하나만 보면 "역할만 바꾼"
+  // 요청과 "활성만 끈" 요청이 각각은 안전해 보인다.
+  if (payload.role === 'viewer' && isLastActiveAdmin(user)) {
+    throw new ApiError(
+      409,
+      '마지막 남은 활성 admin 계정은 viewer 로 바꿀 수 없습니다. 다른 admin 을 먼저 만드십시오.',
+    );
+  }
+  if (payload.active === false && isLastActiveAdmin(user)) {
+    throw new ApiError(
+      409,
+      '마지막 남은 활성 admin 계정은 비활성화할 수 없습니다. 다른 admin 을 먼저 만드십시오.',
+    );
+  }
+
+  if (payload.role) user.role = payload.role;
+  if (payload.active != null) user.active = payload.active;
+  if (payload.password) state.passwords[user.username] = payload.password;
+
+  // 비활성화·비밀번호 변경은 그 계정의 세션을 전부 무효화한다 (계약).
+  if (payload.active === false || payload.password) invalidateSessionsFor(user.username);
+  return user;
+});
+
+route('DELETE', /^\/api\/auth\/users\/(\d+)$/, ([id]) => {
+  const user = requireUser(id);
+  // 자기 자신을 비활성화하면 지금 이 화면이 곧바로 잠긴다 — 서버가 막는다.
+  if (state.session?.username === user.username) {
+    throw new ApiError(409, '자기 자신을 비활성화할 수 없습니다.');
+  }
+  if (isLastActiveAdmin(user)) {
+    throw new ApiError(409, '마지막 남은 활성 admin 계정은 비활성화할 수 없습니다.');
+  }
+  // 실제 삭제가 아니라 active=false + 세션 무효화다.
+  user.active = false;
+  invalidateSessionsFor(user.username);
+  return undefined;
 });
 
 // --- loki connections -------------------------------------------------------
@@ -979,15 +1095,39 @@ route('POST', /^\/api\/error-groups\/(\d+)\/analysis-jobs$/, ([id], { body }) =>
  * 모양이 다르다(`result`·`usage` 없음, 심각도·요약은 평탄화). 라이브 백엔드와 mock 이
  * 다른 모양을 주면 화면이 mock 에서만 동작하므로 여기서도 같은 봉투로 맞춘다.
  */
-route('GET', /^\/api\/analysis-jobs$/, () => {
-  const items = allJobs()
+route('GET', /^\/api\/analysis-jobs$/, (_p, { query }) => {
+  const limit = Number(query.limit ?? 50);
+  const offset = Number(query.offset ?? 0);
+  const status = query.status ? String(query.status) : null;
+  const needle = query.q ? String(query.q).trim().toLowerCase() : '';
+  const from = query.requested_from ? Date.parse(String(query.requested_from)) : null;
+  const to = query.requested_to ? Date.parse(String(query.requested_to)) : null;
+
+  const all = allJobs()
     .sort((a, b) => Date.parse(b.requested_at) - Date.parse(a.requested_at))
-    .map(toJobListItem);
+    .map(toJobListItem)
+    .filter((job) => (status ? job.status === status : true))
+    .filter((job) => {
+      if (from === null && to === null) return true;
+      const at = Date.parse(job.requested_at);
+      if (from !== null && at < from) return false;
+      if (to !== null && at > to) return false;
+      return true;
+    })
+    .filter((job) => {
+      if (!needle) return true;
+      // 계약: 서비스·모델·normalized_message·fingerprint 부분 일치.
+      return [job.service, job.model, job.normalized_message, job.fingerprint]
+        .filter((value): value is string => typeof value === 'string')
+        .some((value) => value.toLowerCase().includes(needle));
+    });
+
   return {
-    total: items.length,
-    limit: items.length,
-    offset: 0,
-    items,
+    // total 은 **필터를 적용한 뒤의 건수**다 — 전체 건수를 주면 페이지네이션이 어긋난다.
+    total: all.length,
+    limit,
+    offset,
+    items: all.slice(offset, offset + limit),
   } satisfies AnalysisJobListResponse;
 });
 
@@ -1066,6 +1206,23 @@ route('GET', /^\/api\/dashboard\/summary$/, () => {
       });
     }
 
+    /*
+      스파크라인용 24h 포인트 (step 3600).
+
+      계약의 핵심은 "**같은** count_over_time 결과를 재사용한다"는 것이다 — 카드마다 Loki
+      를 한 번 더 두드리면 정책 20 개짜리 첫 화면이 조회 20 번 느려진다. 그래서 mock 도
+      시리즈를 **먼저** 만들고 합계를 그 시리즈에서 뽑는다 (반대로 하면 두 값이 어긋난다).
+      metric 이 실패한 정책은 시리즈가 빈 배열이고 합계는 null 이다 — 0 이 아니다.
+    */
+    const series24h: SummarySeriesPoint[] = metricFailed
+      ? []
+      : makeSeries(24 * 60, 3600, (t) => (policy.id === 1 ? seriesShapes.spike(t) : seriesShapes.steady(t)) * (10 + policy.id)).map(
+          (point) => ({ timestamp: point.timestamp, value: point.value }),
+        );
+    const total24h = metricFailed
+      ? null
+      : series24h.reduce((acc, point) => acc + point.value, 0);
+
     return {
       policy_id: policy.id,
       name: policy.name,
@@ -1083,12 +1240,63 @@ route('GET', /^\/api\/dashboard\/summary$/, () => {
           }
         : null,
       unanalyzed_group_count: unanalyzed,
-      total_errors_24h: metricFailed ? null : 1200 + policy.id * 317,
+      total_errors_24h: total24h,
+      series_24h: series24h,
       warnings,
     };
   });
 
   return { generated_at: nowIso(), policies } satisfies DashboardSummaryResponse;
+});
+
+/**
+ * `GET /api/dashboard/error-groups` — 전 정책의 오류 그룹 한 목록 (계약 4).
+ *
+ * 대상은 **활성 정책의 최신 성공 query-run** 그룹이다. 정렬은 count desc, last_seen desc —
+ * "지금 가장 많이 터지는 오류"가 위로 온다. 항목에 policy_id·policy_name 이 붙는 이유는
+ * 회차 하나짜리 목록과 달리 어느 정책이 잡은 그룹인지가 화면에서 사라지면 안 되기 때문이다.
+ */
+route('GET', /^\/api\/dashboard\/error-groups$/, (_p, { query }) => {
+  const limit = Number(query.limit ?? 20);
+  const offset = Number(query.offset ?? 0);
+
+  /*
+    활성 정책 × 최신 성공 run 만 대상이다. 실제 백엔드에서는 그룹 id 가 회차마다 새로
+    생겨 정책끼리 겹치지 않는다 — mock 은 seed 를 공유하므로 정책별로 **겹치지 않게 나눠**
+    같은 성질을 만든다 (같은 id 가 두 줄로 나오면 화면 키가 충돌한다).
+  */
+  const withRuns = state.policies
+    .filter((policy) => policy.active)
+    .map((policy) => ({
+      policy,
+      run: state.queryRuns
+        .filter((run) => run.policy_id === policy.id && run.status === 'succeeded')
+        .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0],
+    }))
+    .filter((entry) => entry.run !== undefined);
+
+  const items: DashboardErrorGroupItem[] = [];
+  if (withRuns.length > 0) {
+    groupSeeds.forEach((_seed, index) => {
+      const owner = withRuns[index % withRuns.length];
+      items.push({
+        ...groupSummary(index, owner.run.id),
+        policy_id: owner.policy.id,
+        policy_name: owner.policy.name,
+      });
+    });
+  }
+
+  items.sort(
+    (a, b) => b.count - a.count || Date.parse(b.last_seen) - Date.parse(a.last_seen),
+  );
+
+  return {
+    total: items.length,
+    limit,
+    offset,
+    items: items.slice(offset, offset + limit),
+  } satisfies DashboardErrorGroupsResponse;
 });
 
 route('GET', /^\/api\/dashboard\/overview$/, (_p, { query }) => {
@@ -1146,6 +1354,39 @@ route('GET', /^\/api\/dashboard\/overview$/, (_p, { query }) => {
 });
 
 // --- usage ------------------------------------------------------------------
+
+/**
+ * 분석 작업 -> 정책 매핑 (mock 전용).
+ *
+ * 실제 백엔드는 error_group -> query_run -> policy 로 조인한다. mock 에는 그 사슬이 없어
+ * 표로 대신하고, **일부러 한 그룹을 `null` 로 둔다** — 정책 연결이 끊긴 작업이 `unknown`
+ * 버킷으로 들어가는 계약을 화면에서 확인할 수 있어야 한다 (실제로는 정책이 지워진 뒤
+ * 남은 오래된 분석 이력이 여기 해당한다).
+ */
+const GROUP_POLICY: Record<number, number | null> = {
+  101: 1,
+  102: 2,
+  103: 2,
+  104: 1,
+  105: null,
+  106: 1,
+};
+
+/** `app_settings.timezone` 기준 로컬 날짜 `YYYY-MM-DD`. 서버 로케일이 아니라 설정값이다. */
+function localDateKey(iso8601: string): string {
+  const zone = String(state.settings[SETTING_TIMEZONE]?.value ?? SETTING_DEFAULTS[SETTING_TIMEZONE]);
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(iso8601));
+  } catch {
+    // 잘못된 타임존이 저장돼도 사용량 화면이 죽지는 않는다 (한도 판정과 같은 규칙).
+    return iso8601.slice(0, 10);
+  }
+}
 
 route('GET', /^\/api\/usage$/, (_p, { query }) => {
   const rangeStart = query.range_start ? String(query.range_start) : iso(-60 * 24 * 7);
@@ -1220,9 +1461,85 @@ route('GET', /^\/api\/usage$/, (_p, { query }) => {
     total_estimated_cost: costed.length
       ? costed.reduce((acc, item) => acc + Number(item.estimated_cost), 0).toFixed(4)
       : null,
+    // 분해를 요청하지 않으면 **null** 이지 빈 배열이 아니다 — "요청하지 않았다"와
+    // "분해했더니 아무것도 없었다"는 화면에서 다른 문구가 되어야 한다. 라이브 백엔드도
+    // 키를 빼지 않고 null 을 싣는다(봉투를 같게 유지하는 것이 mock 의 존재 이유다).
+    buckets: null,
   };
+
+  const groupBy = query.group_by ? String(query.group_by) : null;
+  if (groupBy === 'day' || groupBy === 'policy') {
+    response.buckets = buildUsageBuckets(jobs, groupBy);
+  }
   return response;
 });
+
+/**
+ * `group_by` 분해.
+ *
+ * 비용은 **계산 가능한 항목이 하나도 없으면 null** 이다 — 0 으로 접으면 "이 날은 쌌다"로
+ * 읽힌다. 화면도 그 칸의 막대를 그리지 않고 `-` 로 쓴다.
+ */
+function buildUsageBuckets(
+  jobs: AnalysisJobRead[],
+  groupBy: 'day' | 'policy',
+): UsageBucket[] {
+  const byKey = new Map<string, UsageBucket & { _costN: number }>();
+
+  for (const job of jobs) {
+    const usage = job.usage!;
+    let key: string;
+    let label: string;
+    if (groupBy === 'day') {
+      key = localDateKey(job.requested_at);
+      label = key;
+    } else {
+      const policyId = GROUP_POLICY[job.error_group_id] ?? null;
+      const policy = policyId === null ? undefined : state.policies.find((p) => p.id === policyId);
+      // 정책 연결이 끊긴 작업은 key="unknown" 이다 — 버리면 합계가 어긋난다.
+      key = policy ? String(policy.id) : 'unknown';
+      label = policy ? policy.name : '정책 연결 없음';
+    }
+
+    const entry =
+      byKey.get(key) ??
+      {
+        key,
+        label,
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost: '0',
+        job_count: 0,
+        failure_count: 0,
+        _costN: 0,
+      };
+    entry.job_count += 1;
+    if (usage.status === 'failed') entry.failure_count += 1;
+    entry.input_tokens += usage.input_tokens;
+    entry.output_tokens += usage.output_tokens;
+    if (usage.estimated_cost != null) {
+      entry._costN += 1;
+      entry.estimated_cost = (
+        Number(entry.estimated_cost) + Number(usage.estimated_cost)
+      ).toFixed(4);
+    }
+    byKey.set(key, entry);
+  }
+
+  const rows = [...byKey.values()].map(({ _costN, ...bucket }) => ({
+    ...bucket,
+    estimated_cost: _costN > 0 ? bucket.estimated_cost : null,
+  }));
+
+  // 날짜는 시간순, 정책은 토큰 많은 순. unknown 은 이름 정렬에 끼지 않게 맨 뒤로 민다.
+  return groupBy === 'day'
+    ? rows.sort((a, b) => a.key.localeCompare(b.key))
+    : rows.sort(
+        (a, b) =>
+          Number(a.key === 'unknown') - Number(b.key === 'unknown') ||
+          b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens),
+      );
+}
 
 // --- settings ---------------------------------------------------------------
 
@@ -1321,15 +1638,24 @@ route('PUT', /^\/api\/settings\/([A-Za-z0-9_]+)$/, ([key], { body }) => {
  * 인증·권한 판정. **라우팅보다 먼저** 한 번에 한다 — 라우트마다 검사하면 새 라우트를
  * 추가할 때 조용히 빠지고, 그러면 mock 에서만 통과하는 경로가 생긴다.
  *
- * - auth 라우트·`/health` 는 통과
+ * - 로그인·로그아웃·`/health` 는 통과 (`PUBLIC_API_PATHS` 와 같은 화이트리스트)
  * - 세션 없음 → 401 (화면은 client 의 인터셉트로 /login 으로 간다)
  * - `viewer` 의 비-GET → 403 (읽기 전용 계정의 진짜 방어선)
+ * - **계정 관리(`/api/auth/users`)는 GET 도 admin 전용** → viewer 는 403
+ *
+ * `/api/auth/users` 를 auth 예외에 넣지 않는 것이 핵심이다 — `/api/auth/` 접두사로
+ * 통째로 열어 두면 계정 목록이 미인증에도 열린다.
  */
 function authorize(method: HttpMethod, pathname: string): void {
-  if (pathname.startsWith('/api/auth/') || pathname === '/health') return;
+  if (pathname === '/api/auth/login' || pathname === '/api/auth/logout') return;
+  if (pathname === '/health') return;
   if (!state.session) {
     throw new ApiError(401, '로그인이 필요합니다.');
   }
+  if (pathname.startsWith('/api/auth/users') && state.session.role !== 'admin') {
+    throw new ApiError(403, '계정 관리는 admin 계정만 할 수 있습니다.');
+  }
+  if (pathname === '/api/auth/me') return;
   if (state.session.role === 'viewer' && method !== 'GET') {
     throw new ApiError(
       403,

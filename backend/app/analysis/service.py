@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 
 from fastapi import BackgroundTasks, HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -216,14 +216,48 @@ def get_analysis_job(db: Session, job_id: int) -> AnalysisJobRead:
     return _job_read(db, job)
 
 
+def _like_pattern(term: str) -> str:
+    """부분 일치 패턴. 사용자가 넣은 `%`·`_`·`\\` 는 리터럴로 취급한다.
+
+    이스케이프하지 않으면 검색어 `%` 하나가 전체 일치가 되고, `_` 는 임의의 한
+    글자가 된다 — 검색창에 흔히 들어가는 문자라 조용히 엉뚱한 결과를 준다.
+    """
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _search_condition(term: str):
+    """`q` 의 OR ILIKE 조건 (서비스·정규화 메시지 · 모델·fingerprint).
+
+    앞의 둘은 `error_groups` 조인 쪽이고 뒤의 둘은 `analysis_jobs` 컬럼이다.
+    그룹이 지워진 작업(=조인 NULL)도 모델·fingerprint 로는 계속 검색된다.
+    """
+    pattern = _like_pattern(term)
+    return or_(
+        ErrorGroup.service.ilike(pattern, escape="\\"),
+        ErrorGroup.normalized_message.ilike(pattern, escape="\\"),
+        AnalysisJob.model.ilike(pattern, escape="\\"),
+        AnalysisJob.fingerprint.ilike(pattern, escape="\\"),
+    )
+
+
 def list_analysis_jobs(
     db: Session,
     *,
     job_status: AnalysisJobStatus | None = None,
+    q: str | None = None,
+    requested_from: datetime | None = None,
+    requested_to: datetime | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> AnalysisJobListResponse:
-    """최신순 목록 (프런트 폴링·이력 화면). stale 전이는 여기서도 적용한다."""
+    """최신순 목록 (프런트 폴링·이력 화면). stale 전이는 여기서도 적용한다.
+
+    검색(Phase 6)은 기존 필터에 **추가**될 뿐이다 — `q` 는 서비스·정규화 메시지·
+    모델·fingerprint 에 대한 OR 부분 일치, `requested_from/to` 는 `requested_at`
+    범위다. 날짜는 UTC 로 정규화해 비교한다 (`requested_at` 이 UTC 로 저장되므로
+    naive 값을 그대로 비교하면 클라이언트 로컬 시각만큼 어긋난다).
+    """
     # 필터 이전에 전이시켜야 "running 필터에 stale 이 계속 남는" 상태가 생기지 않는다.
     active = db.scalars(
         select(AnalysisJob).where(AnalysisJob.status.in_(sorted(ACTIVE_STATUS_VALUES)))
@@ -234,7 +268,27 @@ def list_analysis_jobs(
     if job_status is not None:
         conditions.append(AnalysisJob.status == job_status.value)
 
-    total = db.scalar(select(func.count(AnalysisJob.id)).where(*conditions)) or 0
+    term = (q or "").strip()
+    if term:
+        conditions.append(_search_condition(term))
+
+    start = _as_utc(requested_from)
+    if start is not None:
+        conditions.append(AnalysisJob.requested_at >= start)
+    end = _as_utc(requested_to)
+    if end is not None:
+        conditions.append(AnalysisJob.requested_at <= end)
+
+    # `q` 는 그룹 컬럼을 보므로 **개수 쿼리도 같은 조인**을 타야 한다. 조인 없이 세면
+    # total 과 items 가 어긋나 페이지네이션이 있지도 않은 페이지를 만든다.
+    total = (
+        db.scalar(
+            select(func.count(AnalysisJob.id))
+            .outerjoin(ErrorGroup, ErrorGroup.id == AnalysisJob.error_group_id)
+            .where(*conditions)
+        )
+        or 0
+    )
     rows = db.execute(
         select(AnalysisJob, AnalysisResult, ErrorGroup)
         .outerjoin(AnalysisResult, AnalysisResult.analysis_job_id == AnalysisJob.id)

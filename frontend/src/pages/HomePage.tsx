@@ -23,6 +23,7 @@ import { useDashboardSummary, usePolicies, useRunPolicy } from '../api/queries';
 import type { DashboardSummaryPolicy, PolicyRead } from '../api/types';
 import { policySchedule } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
+import { Sparkline } from '../components/chartsLazy';
 import { QueryRunStatusBadge, ScheduleBadge } from '../components/StatusBadges';
 import {
   Badge,
@@ -38,6 +39,7 @@ import {
   PlayIcon,
   Select,
   Spinner,
+  Stat,
   cx,
 } from '../components/ui';
 import {
@@ -46,6 +48,7 @@ import {
   formatRelative,
   warningCodeLabel,
 } from '../lib/format';
+import { AllErrorGroupsPanel } from './ErrorGroupsPage';
 
 type SortKey = 'unanalyzed' | 'errors' | 'recent' | 'name';
 
@@ -66,9 +69,9 @@ export function HomePage() {
     [search, sort, summaryQuery.data],
   );
 
-  const totalUnanalyzed = (summaryQuery.data?.policies ?? []).reduce(
-    (acc, policy) => acc + policy.unanalyzed_group_count,
-    0,
+  const totals = useMemo(
+    () => summarise(summaryQuery.data?.policies ?? []),
+    [summaryQuery.data],
   );
 
   return (
@@ -104,6 +107,48 @@ export function HomePage() {
 
       {summaryQuery.data && (
         <>
+          {/*
+            요약 카드 줄 — 카드 그리드를 훑기 전에 "전체가 어떤 상태인가"를 네 숫자로 먼저
+            답한다. 정책이 스무 개가 되면 카드만으로는 합계를 사람이 암산해야 한다.
+          */}
+          <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat
+              label="전체 정책"
+              value={formatNumber(totals.policyCount)}
+              sub={`활성 ${formatNumber(totals.activeCount)} · 비활성 ${formatNumber(
+                totals.policyCount - totals.activeCount,
+              )}`}
+            />
+            <Stat
+              label="활성 스케줄"
+              value={formatNumber(totals.scheduledCount)}
+              sub="주기 조회가 켜진 정책"
+            />
+            <Stat
+              label="24h 총 오류 (metric)"
+              value={
+                totals.errors24h === null ? (
+                  <span className="text-slate-400">-</span>
+                ) : (
+                  formatNumber(totals.errors24h)
+                )
+              }
+              sub={
+                totals.errors24h === null
+                  ? '전 정책의 metric 쿼리가 실패했습니다 — 0 건이라는 뜻이 아닙니다.'
+                  : totals.metricFailedCount > 0
+                    ? `${totals.metricFailedCount}개 정책은 metric 실패로 합계에서 제외 (0 아님)`
+                    : 'count_over_time 기준 — 로그 라인 수가 아닙니다.'
+              }
+            />
+            <Stat
+              label="미분석 신규 그룹"
+              value={formatNumber(totals.unanalyzed)}
+              sub="fingerprint 기준 · 아무도 보지 않은 오류"
+              tone="accent"
+            />
+          </div>
+
           <Card className="mb-6">
             <div className="flex flex-wrap items-end gap-4">
               <Field label="정책 검색" className="min-w-56 flex-1">
@@ -123,8 +168,9 @@ export function HomePage() {
                 </Select>
               </Field>
               <p className="mb-2 text-xs text-slate-500">
-                정책 {formatNumber(summaryQuery.data.policies.length)}개 · 미분석 신규 그룹 합계{' '}
-                <strong className="text-slate-800">{formatNumber(totalUnanalyzed)}</strong>
+                {cards.length === totals.policyCount
+                  ? `정책 ${formatNumber(totals.policyCount)}개`
+                  : `정책 ${formatNumber(cards.length)} / ${formatNumber(totals.policyCount)}개`}
               </p>
             </div>
           </Card>
@@ -143,10 +189,46 @@ export function HomePage() {
               ))}
             </div>
           )}
+
+          {/*
+            하단 전체 오류 그룹 — 카드가 답하는 "어느 정책이 시끄러운가" 다음에 오는 질문,
+            "그래서 무슨 오류인가"를 여기서 받는다.
+          */}
+          <div className="mt-6">
+            <AllErrorGroupsPanel pageSize={10} compact />
+          </div>
         </>
       )}
     </div>
   );
+}
+
+/**
+ * 요약 카드 줄의 네 숫자.
+ *
+ * `total_errors_24h` 의 **null 은 0 이 아니다** — 합계에서 빼고, 몇 개가 빠졌는지 따로
+ * 적는다. null 을 0 으로 더하면 "오류가 줄었다"로 읽히고, 전부 null 이면 합계 자체가
+ * `-` 여야 한다(0 건이라고 단언할 근거가 없다).
+ */
+function summarise(policies: DashboardSummaryPolicy[]): {
+  policyCount: number;
+  activeCount: number;
+  scheduledCount: number;
+  errors24h: number | null;
+  metricFailedCount: number;
+  unanalyzed: number;
+} {
+  const counted = policies.filter((policy) => policy.total_errors_24h !== null);
+  return {
+    policyCount: policies.length,
+    activeCount: policies.filter((policy) => policy.active).length,
+    scheduledCount: policies.filter((policy) => policy.schedule_enabled && policy.active).length,
+    errors24h: counted.length
+      ? counted.reduce((acc, policy) => acc + (policy.total_errors_24h ?? 0), 0)
+      : null,
+    metricFailedCount: policies.length - counted.length,
+    unanalyzed: policies.reduce((acc, policy) => acc + policy.unanalyzed_group_count, 0),
+  };
 }
 
 function filterCards(
@@ -197,6 +279,8 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
   const runPolicy = useRunPolicy();
   const lastRun = policy.last_run;
   const unanalyzed = policy.unanalyzed_group_count;
+  // 백엔드가 아직 이 필드를 안 내려주면 `undefined` 다 — 빈 배열과 같게 다룬다(오류 아님).
+  const series = policy.series_24h ?? [];
 
   return (
     <section
@@ -260,6 +344,31 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
             <p className="mt-0.5 text-xs text-amber-700">metric 쿼리 실패</p>
           )}
         </div>
+      </div>
+
+      {/*
+        24h 스파크라인. 합계와 **같은 count_over_time 결과**에서 온 포인트라 카드 하나가
+        Loki 를 한 번 더 두드리지 않는다. 포인트가 없으면 선을 그리지 않는다 — 평평한
+        선을 그리면 "오류가 없었다"로 읽힌다.
+      */}
+      <div className="border-t border-slate-100 px-5 pt-3 pb-2">
+        <div className="flex items-baseline justify-between">
+          <p className="text-xs font-medium text-slate-500">최근 24시간 추이</p>
+          {series.length > 0 && (
+            <p className="text-xs text-slate-400">시간당 · 축 없음</p>
+          )}
+        </div>
+        {series.length > 0 ? (
+          <div className="mt-1">
+            <Sparkline points={series} height={44} />
+          </div>
+        ) : (
+          <p className="mt-1 text-xs text-slate-400">
+            {policy.total_errors_24h === null
+              ? 'metric 쿼리에 실패해 추이를 그리지 못했습니다 — 0 건이라는 뜻이 아닙니다.'
+              : '추이 데이터가 없습니다.'}
+          </p>
+        )}
       </div>
 
       <div className="flex-1 border-t border-slate-100 px-5 py-4">

@@ -5,15 +5,28 @@ import { useAuth } from '../auth/AuthContext';
 import { RoleBadge } from './StatusBadges';
 import { Button, cx } from './ui';
 
+/**
+ * 상단 네비게이션은 **일반 영역**과 **관리 영역** 두 덩어리다.
+ *
+ * 일반 영역은 "지금 무엇이 터지고 있나"를 보는 자리(대시보드·분석 정책·오류 그룹)이고,
+ * 관리 영역(`/admin`)은 설정·계정·비용처럼 **자주 열지 않지만 위험한** 것들이다. 둘을
+ * 한 줄에 섞어 두면 매일 쓰는 화면과 한 달에 한 번 여는 화면이 같은 무게로 보인다.
+ *
+ * 관리 영역은 admin 전용이라 viewer 에게는 메뉴 자체를 감춘다 — 다만 그건 편의이고,
+ * 주소를 직접 쳐서 들어와도 라우트 가드가 안내로 막고 최종 판정은 서버가 한다.
+ */
 const NAV = [
   { to: '/', label: '대시보드', end: true },
   { to: '/policies', label: '분석 정책' },
-  { to: '/llm-connections', label: 'LLM 연결' },
-  { to: '/usage', label: '분석 이력·사용량' },
+  { to: '/error-groups', label: '오류 그룹', end: true },
 ];
+
+const ADMIN_NAV = { to: '/admin', label: '관리' };
 
 export function Layout() {
   const { status, user, logout, logoutPending } = useAuth();
+  // 인증 미배포 백엔드에는 역할 자체가 없다 — 예전처럼 전부 열어 둔다.
+  const showAdmin = status === 'disabled' || user?.role === 'admin';
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -26,24 +39,31 @@ export function Layout() {
             </span>
           </NavLink>
 
-          <nav className="flex flex-1 flex-wrap items-center gap-1">
+          <nav className="flex flex-1 flex-wrap items-center gap-1" aria-label="주 메뉴">
             {NAV.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
                 end={item.end}
-                className={({ isActive }) =>
-                  cx(
-                    'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
-                    isActive
-                      ? 'bg-slate-900 text-white'
-                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
-                  )
-                }
+                className={({ isActive }) => navLinkClass(isActive)}
               >
                 {item.label}
               </NavLink>
             ))}
+
+            {showAdmin && (
+              <>
+                {/* 구분선 — 관리 영역이 일반 메뉴의 연장으로 보이지 않게 한다. */}
+                <span aria-hidden className="mx-2 h-5 w-px bg-slate-200" />
+                <NavLink
+                  to={ADMIN_NAV.to}
+                  className={({ isActive }) => navLinkClass(isActive)}
+                  title="LLM 연결·분석 이력·사용량·사용자 관리 — admin 전용입니다."
+                >
+                  {ADMIN_NAV.label}
+                </NavLink>
+              </>
+            )}
           </nav>
 
           {USE_MOCK && (
@@ -97,5 +117,14 @@ export function Layout() {
         </p>
       </footer>
     </div>
+  );
+}
+
+function navLinkClass(isActive: boolean): string {
+  return cx(
+    'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
+    isActive
+      ? 'bg-slate-900 text-white'
+      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
   );
 }

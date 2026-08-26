@@ -19,9 +19,11 @@ import {
   queryRuns,
   settings,
   usage,
+  users,
 } from './endpoints';
 import type {
   AnalysisJobCreateRequest,
+  AnalysisJobListParams,
   AnalysisJobRead,
   AuthUser,
   DashboardOverviewParams,
@@ -38,11 +40,14 @@ import type {
   PolicyUpdate,
   QueryRunCreateRequest,
   UsageParams,
+  UserCreateRequest,
+  UserUpdateRequest,
 } from './types';
 import { asModelPricingTable, isActiveJobStatus, SETTING_MODEL_PRICING } from './types';
 
 export const queryKeys = {
   authMe: ['auth', 'me'] as const,
+  users: ['auth', 'users'] as const,
   lokiConnections: ['loki-connections'] as const,
   lokiLabels: (id: number) => ['loki-connections', id, 'labels'] as const,
   llmConnections: ['llm-connections'] as const,
@@ -54,9 +59,12 @@ export const queryKeys = {
   errorGroups: (runId: number) => ['query-runs', runId, 'error-groups'] as const,
   errorGroup: (id: number) => ['error-groups', id] as const,
   analysisJobs: ['analysis-jobs'] as const,
+  analysisJobList: (params: AnalysisJobListParams) => ['analysis-jobs', 'list', params] as const,
   analysisJob: (id: number) => ['analysis-jobs', id] as const,
   dashboard: (params: DashboardOverviewParams) => ['dashboard', 'overview', params] as const,
   dashboardSummary: ['dashboard', 'summary'] as const,
+  dashboardErrorGroups: (params: { limit: number; offset: number }) =>
+    ['dashboard', 'error-groups', params] as const,
   usage: (params: UsageParams) => ['usage', params] as const,
   settings: ['settings'] as const,
   setting: (key: string) => ['settings', key] as const,
@@ -98,6 +106,52 @@ export function useLogout() {
       // 다른 계정으로 다시 들어올 수 있다 — 이전 세션이 본 데이터를 남기지 않는다.
       client.clear();
     },
+  });
+}
+
+// -------------------------------------------------------------- 계정 관리
+
+/**
+ * 계정 목록 (admin 전용).
+ *
+ * viewer·미배포 백엔드에서는 403/404 가 난다 — 화면이 라우트 가드와 안내 폴백으로
+ * 처리하므로 **재시도하지 않는다**.
+ */
+export function useUsers() {
+  return useQuery({ queryKey: queryKeys.users, queryFn: () => users.list(), retry: false });
+}
+
+export function useCreateUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: UserCreateRequest) => users.create(payload),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.users }),
+  });
+}
+
+/**
+ * 역할 변경 · 비활성/재활성 · 비밀번호 재설정.
+ *
+ * 마지막 admin 보호(409)는 서버 판정이므로 **성공 경로에서만** 목록을 갱신한다. 실패해도
+ * 목록을 다시 읽으면 "아무 일도 없었는데 화면이 깜빡였다"가 되어 409 문구가 묻힌다.
+ *
+ * 자기 계정의 비밀번호를 바꾸면 **자기 세션도 무효화된다**(서버 계약) — 그 다음 요청의
+ * 401 을 client 인터셉터가 잡아 로그인 화면으로 보낸다. 여기서 따로 처리하지 않는다.
+ */
+export function useUpdateUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: UserUpdateRequest }) =>
+      users.update(id, payload),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.users }),
+  });
+}
+
+export function useDeactivateUser() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => users.deactivate(id),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.users }),
   });
 }
 
@@ -337,13 +391,22 @@ export function useAnalysisJobWithRefresh(jobId: number | null, groupId: number 
   return query;
 }
 
-export function useAnalysisJobs() {
+/**
+ * 분석 이력 목록 (검색·기간·상태 필터 + 페이지네이션).
+ *
+ * 응답은 **봉투째** 온다 — `total` 이 있어야 "몇 건 중 몇 건"과 다음 페이지 버튼을 그릴 수
+ * 있다. 진행 중 작업이 한 건이라도 있으면 폴링하고, 전부 끝나면 멈춘다.
+ *
+ * 필터 값이 캐시 키에 그대로 들어간다 — 이전 페이지로 돌아가면 재조회 없이 즉시 보인다.
+ */
+export function useAnalysisJobs(params: AnalysisJobListParams = {}) {
   return useQuery({
-    queryKey: queryKeys.analysisJobs,
-    queryFn: () => analysisJobs.list(),
+    queryKey: queryKeys.analysisJobList(params),
+    queryFn: () => analysisJobs.list(params),
     retry: false,
+    placeholderData: (previous) => previous,
     refetchInterval: (query) =>
-      (query.state.data ?? []).some((job) => isActiveJobStatus(job.status)) ? 3000 : false,
+      (query.state.data?.items ?? []).some((job) => isActiveJobStatus(job.status)) ? 3000 : false,
   });
 }
 
@@ -367,6 +430,21 @@ export function useDashboardSummary() {
     queryKey: queryKeys.dashboardSummary,
     queryFn: () => dashboard.summary(),
     retry: false,
+  });
+}
+
+/**
+ * 통합 대시보드 하단의 전체 오류 그룹 목록.
+ *
+ * 백엔드에 아직 경로가 없을 수 있으므로(404/405/501) 재시도하지 않는다 — 화면이 안내
+ * 문구로 폴백하고, 정책 카드는 그대로 남는다.
+ */
+export function useDashboardErrorGroups(params: { limit: number; offset: number }) {
+  return useQuery({
+    queryKey: queryKeys.dashboardErrorGroups(params),
+    queryFn: () => dashboard.errorGroups(params),
+    retry: false,
+    placeholderData: (previous) => previous,
   });
 }
 

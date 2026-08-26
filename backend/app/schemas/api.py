@@ -67,6 +67,42 @@ class UserCreateRequest(BaseModel):
     role: UserRole = UserRole.VIEWER
 
 
+class UserDetail(UserRead):
+    """계정 관리 화면용 항목 (Phase 6, admin 전용 경로에서만 나간다).
+
+    `UserRead` 는 로그인·`/auth/me` 응답이라 "누구인가" 만 싣는다. 여기서는 관리
+    화면이 행을 식별하고(`id`) 상태를 보여줘야(`active`) 하므로 그만큼만 더 싣는다 —
+    비밀번호 해시는 어떤 경로로도 나가지 않는다.
+    """
+
+    model_config = ORM
+
+    id: int
+    active: bool = True
+    created_at: datetime
+
+
+class UserListResponse(BaseModel):
+    """`GET /auth/users` (admin 전용). 목록 봉투는 다른 목록 API 와 같은 모양이다."""
+
+    total: int = 0
+    items: list[UserDetail] = Field(default_factory=list)
+
+
+class UserUpdateRequest(BaseModel):
+    """`PATCH /auth/users/{id}` (admin 전용). 준 필드만 바꾼다.
+
+    안전 규칙은 서비스가 강제한다 — 마지막 남은 active admin 의 강등·비활성은 409,
+    자기 자신 비활성도 409. `active=false` 와 `password` 변경은 그 계정의 세션을
+    전부 무효화한다 (비활성 계정의 쿠키가 남은 12 시간 동안 살아 있으면 안 된다).
+    """
+
+    role: UserRole | None = None
+    active: bool | None = None
+    #: 새 비밀번호 (평문 입력 전용). 저장은 기존 scrypt 형식 그대로다.
+    password: str | None = Field(default=None, min_length=1)
+
+
 class ConnectionTestResponse(BaseModel):
     """연결 테스트 결과. 로그 소스·LLM 공통."""
 
@@ -540,6 +576,9 @@ class DashboardPolicySummary(BaseModel):
     #: 최근 **성공** 조회의 그룹 중 fingerprint 분석 이력이 전혀 없는 그룹 수.
     unanalyzed_group_count: int = 0
     total_errors_24h: float | None = None
+    #: `total_errors_24h` 를 만든 **바로 그** `count_over_time` 결과의 포인트 (step 3600).
+    #: 추가 metric 호출을 하지 않으므로, 건수 조회가 실패하면 여기도 빈 배열이다.
+    series_24h: list[CountPoint] = Field(default_factory=list)
     warnings: list[FetchWarning] = Field(default_factory=list)
 
 
@@ -551,6 +590,26 @@ class DashboardSummaryResponse(BaseModel):
 
     generated_at: datetime
     policies: list[DashboardPolicySummary] = Field(default_factory=list)
+
+
+class DashboardErrorGroupItem(ErrorGroupSummary):
+    """`GET /dashboard/error-groups` 항목 — 그룹 요약 + 어느 정책에서 나왔는가.
+
+    그룹 자체는 조회 1 회 범위이므로, 정책을 넘나드는 목록에서는 출처를 값으로
+    함께 실어야 화면에서 "이게 어느 정책의 오류인가"를 되짚을 수 있다.
+    """
+
+    policy_id: int
+    policy_name: str
+
+
+class DashboardErrorGroupListResponse(BaseModel):
+    """전 활성 정책의 **최신 성공 조회** 그룹을 한데 모은 목록 (count 내림차순)."""
+
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    items: list[DashboardErrorGroupItem] = Field(default_factory=list)
 
 
 # ====================================================================== usage
@@ -568,10 +627,32 @@ class UsageAggregate(BaseModel):
     avg_latency_ms: float | None = None
 
 
+class UsageBucket(BaseModel):
+    """`group_by` 분해 한 줄 (일별 또는 정책별).
+
+    `estimated_cost` 규칙은 `UsageAggregate` 와 같다 — 계산 가능한 기록이 하나도
+    없으면 **0 이 아니라 None** 이다 (0 은 "쌌다"로 읽힌다).
+    """
+
+    #: day → "YYYY-MM-DD"(app_settings.timezone 로컬 날짜) / policy → policy_id 문자열
+    #: (정책 연결이 끊긴 작업은 "unknown").
+    key: str
+    #: 화면 표시용 이름. day 는 key 와 같고, policy 는 정책명이다.
+    label: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost: Decimal | None = None
+    job_count: int = 0
+    failure_count: int = 0
+
+
 class UsageResponse(BaseModel):
     range_start: datetime
     range_end: datetime
     items: list[UsageAggregate] = Field(default_factory=list)
+    #: `group_by` 를 준 요청에만 채운다. 생략하면 **None** 이다 (빈 배열이 아니다 —
+    #: "분해를 요청하지 않았다"와 "분해했더니 아무것도 없었다"는 다른 상태다).
+    buckets: list[UsageBucket] | None = None
     total_jobs: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -628,6 +709,8 @@ __all__ = [
     "AppSettingRead",
     "AppSettingUpdate",
     "ConnectionTestResponse",
+    "DashboardErrorGroupItem",
+    "DashboardErrorGroupListResponse",
     "DashboardOverviewResponse",
     "DashboardPolicySummary",
     "DashboardSummaryLastRun",
@@ -660,8 +743,12 @@ __all__ = [
     "SamplePurgeResponse",
     "ServiceErrorCount",
     "UsageAggregate",
+    "UsageBucket",
     "UsageRecordRead",
     "UsageResponse",
     "UserCreateRequest",
+    "UserDetail",
+    "UserListResponse",
     "UserRead",
+    "UserUpdateRequest",
 ]

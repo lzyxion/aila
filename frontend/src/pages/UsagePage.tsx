@@ -1,16 +1,28 @@
+/**
+ * 사용량 (`/admin/usage`).
+ *
+ * 기존 모델별 집계에 **분해 두 종**(일별·정책별)이 붙었다 — 계약 3 의 `group_by` 다.
+ * 분해는 additive 라 `buckets` 가 없는 응답도 정상이고, 그 경우 화면은 실패가 아니라
+ * "아직 분해를 못 준다"로 안내한다.
+ *
+ * 비용 표기 규칙은 여기서도 같다 — 단가표에 없는 모델의 추정 비용은 **0 이 아니라 null**
+ * 이고, 막대를 0 으로 그리지 않고 `-` 로 적는다. 0 으로 그리면 "그날은 쌌다"로 읽힌다.
+ */
+
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 
-import { useAnalysisJobs, useModelPricing, useUpsertModelPricing, useUsage } from '../api/queries';
-import type { ModelPricingEntry, ModelPricingTable, UsageParams } from '../api/types';
+import { isEndpointMissing } from '../api/client';
+import { useModelPricing, useUpsertModelPricing, useUsage } from '../api/queries';
+import type {
+  ModelPricingEntry,
+  ModelPricingTable,
+  UsageBucket,
+  UsageParams,
+} from '../api/types';
 import { asModelPricingTable } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
-import { TokenByModelChart } from '../components/chartsLazy';
-import {
-  AnalysisStatusBadge,
-  SeverityBadge,
-  TriggeredByBadge,
-} from '../components/StatusBadges';
+import { TokenByModelChart, UsageBucketChart } from '../components/chartsLazy';
 import {
   Badge,
   Button,
@@ -22,7 +34,6 @@ import {
   Input,
   LoadingBlock,
   Notice,
-  PageHeader,
   Select,
   Stat,
   TableWrap,
@@ -63,7 +74,11 @@ export function UsagePage() {
   }, [rangeIndex]);
 
   const usageQuery = useUsage(params);
-  const jobsQuery = useAnalysisJobs();
+  // 분해는 같은 기간에 축만 달리한 조회다 — 서버가 집계하므로 화면에서 재계산하지 않는다.
+  const dayQuery = useUsage(useMemo(() => ({ ...params, group_by: 'day' as const }), [params]));
+  const policyQuery = useUsage(
+    useMemo(() => ({ ...params, group_by: 'policy' as const }), [params]),
+  );
   const pricingQuery = useModelPricing();
 
   /** 인라인 단가 입력을 열어 둔 모델. 한 번에 하나만 연다. */
@@ -82,13 +97,17 @@ export function UsagePage() {
 
   return (
     <div>
-      <PageHeader
-        title="분석 이력·사용량"
+      <Card
+        title="사용량"
         description={
           <>
             비용은 계산 시점 단가표 기준 <strong>추정</strong>값입니다 — 캐시 적중·배치 할인에 따라
             실제 청구액과 벌어지므로 정산 근거로 쓰지 마십시오. 비용 차단은 이 화면이 아니라 일일
-            분석 한도가 담당합니다.
+            분석 한도가 담당합니다. 개별 실행은{' '}
+            <Link to="/admin/analysis-jobs" className="font-medium text-sky-800 underline">
+              분석 이력
+            </Link>{' '}
+            탭에서 검색합니다.
           </>
         }
         actions={
@@ -105,7 +124,13 @@ export function UsagePage() {
             </Select>
           </Field>
         }
-      />
+        className="mb-6"
+      >
+        <p className="text-sm text-slate-600">
+          집계 구간 {formatDateTime(usageQuery.data?.range_start)} ~{' '}
+          {formatDateTime(usageQuery.data?.range_end)}
+        </p>
+      </Card>
 
       {usageQuery.isPending && <LoadingBlock />}
       {usageQuery.isError && <ErrorBlock error={usageQuery.error} />}
@@ -139,6 +164,30 @@ export function UsagePage() {
               sub="구조화 응답"
             />
           </div>
+
+          <BucketCard
+            title="일별 사용량"
+            description={
+              <>
+                <code className="rounded bg-slate-200 px-1">app_settings.timezone</code> 기준 로컬
+                날짜로 묶은 값입니다 (기본 <code className="rounded bg-slate-200 px-1">Asia/Seoul</code>)
+                — 일일 분석 한도의 리셋 기준과 같은 날짜라 두 화면의 "오늘"이 어긋나지 않습니다.
+              </>
+            }
+            groupBy="day"
+            buckets={dayQuery.data?.buckets}
+            pending={dayQuery.isPending}
+            error={dayQuery.isError ? dayQuery.error : null}
+          />
+
+          <BucketCard
+            title="정책별 사용량"
+            description="어느 정책이 비용을 쓰는지 봅니다. 정책 연결이 끊긴 오래된 이력은 '정책 연결 없음' 으로 모입니다 — 버리면 합계가 어긋납니다."
+            groupBy="policy"
+            buckets={policyQuery.data?.buckets}
+            pending={policyQuery.isPending}
+            error={policyQuery.isError ? policyQuery.error : null}
+          />
 
           <Card
             title="모델별 토큰"
@@ -266,83 +315,155 @@ export function UsagePage() {
         </div>
       )}
 
-      <div className="mt-6">
-        <Card
-          title="분석 실행 목록"
-          description="같은 오류를 다시 분석하기 전에 fingerprint 기준 이력을 먼저 확인하십시오."
-        >
-          {jobsQuery.isPending && <LoadingBlock />}
-          {jobsQuery.isError && <ErrorBlock error={jobsQuery.error} />}
-          {jobsQuery.data && jobsQuery.data.length === 0 && (
-            <EmptyBlock>실행된 분석이 없습니다.</EmptyBlock>
-          )}
-          {jobsQuery.data && jobsQuery.data.length > 0 && (
-            <TableWrap>
-              <thead>
-                <tr>
-                  <Th>요청 시각</Th>
-                  <Th>실행 주체</Th>
-                  <Th>오류 그룹 · fingerprint</Th>
-                  <Th>서비스 · 오류</Th>
-                  <Th>모델</Th>
-                  <Th>상태</Th>
-                  <Th>요약</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobsQuery.data.map((job) => (
-                  <tr key={job.id} className="hover:bg-slate-50">
-                    <Td>
-                      <p>{formatDateTime(job.requested_at)}</p>
-                      <p className="mt-0.5 text-xs text-slate-400">작업 #{job.id}</p>
-                    </Td>
-                    <Td>
-                      <TriggeredByBadge value={job.triggered_by} />
-                      {!job.triggered_by && <span className="text-xs text-slate-400">-</span>}
-                    </Td>
-                    <Td>
-                      <Link
-                        to={`/error-groups/${job.error_group_id}`}
-                        className="font-medium text-sky-800 hover:underline"
-                      >
-                        그룹 #{job.error_group_id}
-                      </Link>
-                      <p className="mt-0.5 font-mono text-xs text-slate-500">{job.fingerprint}</p>
-                    </Td>
-                    <Td>
-                      <p>{job.service ?? '-'}</p>
-                      <p className="mt-0.5 font-mono text-xs text-slate-500">
-                        {job.error_type ?? '-'}
-                        {job.environment ? ` · ${job.environment}` : ''}
-                      </p>
-                    </Td>
-                    <Td>
-                      <p>{providerLabel(job.provider)}</p>
-                      <p className="mt-0.5 font-mono text-xs text-slate-500">{job.model}</p>
-                    </Td>
-                    <Td>
-                      <div className="flex flex-col items-start gap-1">
-                        <AnalysisStatusBadge status={job.status} />
-                        {job.severity && <SeverityBadge severity={job.severity} />}
-                        {job.status === 'failed' && job.error_message && (
-                          <span className="text-xs text-rose-700">{job.error_message}</span>
-                        )}
-                      </div>
-                    </Td>
-                    <Td>
-                      {/* 목록 응답에는 토큰·비용이 없다 — 위쪽 모델별 집계에서 본다. */}
-                      <p className="max-w-md text-xs text-slate-600">
-                        {job.summary ?? job.normalized_message ?? '-'}
-                      </p>
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </TableWrap>
-          )}
-        </Card>
-      </div>
     </div>
+  );
+}
+
+// ------------------------------------------------------- group_by 분해 카드
+
+/**
+ * 분해 하나(일별 또는 정책별)의 카드.
+ *
+ * 토큰과 비용을 **두 개의 차트**로 나눈다 — 한 축에 겹치면 단위가 다른 두 값(토큰 수 vs
+ * 달러)이 같은 눈금을 공유하게 되고, 그러면 둘 중 하나는 언제나 바닥에 눌린다. 색은
+ * 기존 팔레트의 두 슬롯만 쓴다(새 색 없음).
+ *
+ * 비용이 하나도 계산되지 않은 분해는 비용 차트를 **아예 그리지 않는다** — 빈 축을 그려
+ * 두면 "0 달러였다"로 읽힌다.
+ */
+function BucketCard({
+  title,
+  description,
+  groupBy,
+  buckets,
+  pending,
+  error,
+}: {
+  title: string;
+  description: React.ReactNode;
+  groupBy: 'day' | 'policy';
+  /** `null` = 분해를 못 받음(요청 미지원). `[]` = 분해했더니 비었음. 둘은 다른 문구다. */
+  buckets: UsageBucket[] | null | undefined;
+  pending: boolean;
+  error: unknown;
+}) {
+  const rows = buckets ?? [];
+  const pricedCount = rows.filter((bucket) => bucket.estimated_cost !== null).length;
+  const unpriced = rows.length - pricedCount;
+
+  return (
+    <Card title={title} description={description}>
+      {pending && <LoadingBlock label="분해를 불러오는 중…" />}
+
+      {/* 아직 group_by 를 모르는 백엔드는 실패가 아니다 — 안내로 물러난다. */}
+      {error != null &&
+        (isEndpointMissing(error) ? (
+          <Notice tone="warning" title="사용량 분해를 아직 쓸 수 없습니다">
+            <code className="rounded bg-white/60 px-1">GET /api/usage?group_by={groupBy}</code> 가
+            응답하지 않습니다. 백엔드에 이 파라미터가 올라오면 여기에 분해가 표시됩니다. 그 전에도
+            아래 <strong>모델별 집계</strong>는 그대로 동작합니다.
+          </Notice>
+        ) : (
+          <ErrorBlock error={error} />
+        ))}
+
+      {/* null(요청 미지원)과 빈 배열(기록 없음)을 같은 문구로 접지 않는다. */}
+      {!pending && error == null && buckets == null && (
+        <Notice tone="warning" title="응답에 buckets 가 없습니다">
+          <code className="rounded bg-white/60 px-1">group_by</code> 는 추가 파라미터라 모르는
+          백엔드는 무시하고 기존 응답만 줍니다(오류가 아닙니다).
+        </Notice>
+      )}
+
+      {buckets != null && rows.length === 0 && (
+        <EmptyBlock>이 기간에 분해할 사용량 기록이 없습니다.</EmptyBlock>
+      )}
+
+      {rows.length > 0 && (
+        <div className="space-y-5">
+          <div>
+            <h3 className="mb-2 text-sm font-semibold text-slate-900">토큰</h3>
+            <UsageBucketChart
+              buckets={rows}
+              metric="tokens"
+              layout={groupBy === 'policy' ? 'horizontal' : 'vertical'}
+            />
+          </div>
+
+          <div>
+            <h3 className="mb-2 flex flex-wrap items-baseline gap-2 text-sm font-semibold text-slate-900">
+              추정 비용
+              <span className="text-xs font-normal text-slate-500">
+                추정 — 정산 근거가 아닙니다.
+              </span>
+            </h3>
+            {pricedCount === 0 ? (
+              <EmptyBlock>
+                이 기간의 모델이 전부 단가표에 없어 비용을 계산하지 못했습니다.{' '}
+                <strong>0 원이라는 뜻이 아닙니다</strong> — 아래 표에서 단가를 등록하십시오.
+              </EmptyBlock>
+            ) : (
+              <>
+                <UsageBucketChart
+                  buckets={rows}
+                  metric="cost"
+                  layout={groupBy === 'policy' ? 'horizontal' : 'vertical'}
+                />
+                {unpriced > 0 && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    {unpriced}개 칸은 단가가 등록되지 않아 막대가 없습니다 — 0 이 아니라{' '}
+                    <strong>계산되지 않음</strong>입니다.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+
+          <TableWrap minWidth="40rem">
+            <thead>
+              <tr>
+                <Th>{groupBy === 'day' ? '날짜' : '정책'}</Th>
+                <Th align="right">실행</Th>
+                <Th align="right">실패</Th>
+                <Th align="right">입력 토큰</Th>
+                <Th align="right">출력 토큰</Th>
+                <Th align="right">추정 비용</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((bucket) => (
+                <tr key={bucket.key} className="hover:bg-slate-50">
+                  <Td>
+                    <p className="font-medium text-slate-900">{bucket.label}</p>
+                    {groupBy === 'policy' && (
+                      <p className="mt-0.5 font-mono text-xs text-slate-400">
+                        {bucket.key === 'unknown' ? 'unknown' : `#${bucket.key}`}
+                      </p>
+                    )}
+                  </Td>
+                  <Td align="right">{formatNumber(bucket.job_count)}</Td>
+                  <Td align="right">
+                    {bucket.failure_count > 0 ? (
+                      <Badge tone="danger">{formatNumber(bucket.failure_count)}</Badge>
+                    ) : (
+                      <span className="text-slate-400">0</span>
+                    )}
+                  </Td>
+                  <Td align="right">{formatTokens(bucket.input_tokens)}</Td>
+                  <Td align="right">{formatTokens(bucket.output_tokens)}</Td>
+                  <Td align="right">
+                    {formatEstimatedCost(bucket.estimated_cost)}
+                    <span className="ml-1 text-xs text-slate-400">
+                      {bucket.estimated_cost === null ? '(단가 없음)' : '(추정)'}
+                    </span>
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </TableWrap>
+        </div>
+      )}
+    </Card>
   );
 }
 

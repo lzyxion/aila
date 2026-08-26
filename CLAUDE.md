@@ -32,7 +32,7 @@ python scripts/e2e_demo.py    # 9단계 ALL PASS 가 정상
 
 ## 구조 (backend/app/)
 
-`schemas/`(정규화 레코드·분석 결과·API 모델 — 공유 계약) · `providers/`(LogSourceProvider·LLMProvider ABC) · `loki/`(Loki 어댑터, `build_provider`) · `llm_providers/`(OpenAI·Anthropic 어댑터, `build_llm_provider`) · `grouping/`+`masking/`(마스킹→정규화→fingerprint, 순수 함수) · `policies/`(정책 CRUD·query-run 실행) · `error_groups/` · `analysis/`(작업 생성·BackgroundTasks 실행·보고서) · `dashboard/`(정책 상세 `overview` + 전체 요약 `summary`) · `usage/` · `app_settings/`(전역 설정 키 4종) · `connections/`+`llm_connections/`(연결 CRUD) · `auth/`(계정·세션·전역 보호 의존성) · `scheduler/`(60초 tick — 정책 주기 실행 + 신규 fingerprint 자동 분석)
+`schemas/`(정규화 레코드·분석 결과·API 모델 — 공유 계약) · `providers/`(LogSourceProvider·LLMProvider ABC) · `loki/`(Loki 어댑터, `build_provider`) · `llm_providers/`(OpenAI·Anthropic 어댑터, `build_llm_provider`) · `grouping/`+`masking/`(마스킹→정규화→fingerprint, 순수 함수) · `policies/`(정책 CRUD·query-run 실행) · `error_groups/` · `analysis/`(작업 생성·BackgroundTasks 실행·보고서) · `dashboard/`(정책 상세 `overview` + 전체 요약 `summary` + 전 정책 오류 그룹 `error-groups`) · `usage/` · `app_settings/`(전역 설정 키 4종) · `connections/`+`llm_connections/`(연결 CRUD) · `auth/`(계정 CRUD·세션·전역 보호 의존성 — 마지막 admin 보호·세션 무효화는 `auth/service.py`) · `scheduler/`(60초 tick — 정책 주기 실행 + 신규 fingerprint 자동 분석)
 
 트랙 간 결합은 `*/integrations.py` 의 지연 import 로만 한다 — 테스트 mock 지점도 거기다.
 

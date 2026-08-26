@@ -123,6 +123,56 @@ export interface LoginRequest {
   password: string;
 }
 
+/**
+ * `GET /api/auth/users` 의 항목 (admin 전용) — 백엔드의 `schemas.api.UserDetail`.
+ *
+ * 백엔드 쪽 `UserRead` 는 로그인·`/auth/me` 응답이라 `{username, role}` 뿐이다(프런트에서는
+ * `AuthUser`). 관리 화면은 행을 식별하고(`id`) 상태를 보여줘야(`active`) 하므로 그만큼만 더
+ * 실린다 — 비밀번호 해시는 어떤 경로로도 나오지 않는다.
+ *
+ * `active=false` 는 **삭제가 아니라 비활성**이고, 그 계정의 세션은 서버가 전부 무효화한다.
+ */
+export interface UserRead {
+  id: number;
+  username: string;
+  role: UserRole;
+  active: boolean;
+  created_at: string;
+}
+
+export interface UserListResponse {
+  total: number;
+  items: UserRead[];
+}
+
+/** `POST /api/auth/users` — 생성 (기존 계약). */
+export interface UserCreateRequest {
+  username: string;
+  password: string;
+  role: UserRole;
+}
+
+/**
+ * 생성 응답은 최소 `{username, role}` 이다 (README 의 인증 계약). 백엔드가 계정 관리를
+ * 올리면서 `UserRead` 전체를 주기 시작해도 깨지지 않게 **넓게** 받는다 — 화면은 어차피
+ * 목록을 다시 읽는다.
+ */
+export type UserCreateResponse = AuthUser & Partial<UserRead>;
+
+/**
+ * `PATCH /api/auth/users/{id}` — 역할 변경·비활성/재활성·비밀번호 재설정.
+ *
+ * 세 가지 보호는 **서버가** 판정한다 (화면이 미리 막는 것은 편의다):
+ * - 마지막 남은 active admin 의 강등·비활성 → 409
+ * - 자기 자신 비활성(DELETE) → 409
+ * - `active=false` 또는 `password` 변경 시 그 계정의 세션 전부 무효화
+ */
+export interface UserUpdateRequest {
+  role?: UserRole;
+  active?: boolean;
+  password?: string;
+}
+
 // ============================================================ 공통 API 모델
 
 /** app.schemas.api.ErrorResponse (FastAPI HTTPException 형식) */
@@ -526,6 +576,24 @@ export interface AnalysisJobListResponse {
   items: AnalysisJobListItem[];
 }
 
+/**
+ * `GET /api/analysis-jobs` 쿼리 파라미터 (Phase 6 에서 `q`·기간이 **추가**됐다).
+ *
+ * 추가는 additive 다 — 파라미터를 모르는 백엔드는 그냥 무시하고 전체를 준다. 그래서
+ * 화면은 "검색이 먹지 않는다"를 오류로 다루지 않는다 (봉투가 같으므로 목록은 그대로 나온다).
+ */
+export interface AnalysisJobListParams {
+  status?: AnalysisJobStatus;
+  /** 부분 일치: 서비스·모델·normalized_message·fingerprint */
+  q?: string;
+  /** ISO datetime — `requested_at` 하한 */
+  requested_from?: string;
+  /** ISO datetime — `requested_at` 상한 */
+  requested_to?: string;
+  limit?: number;
+  offset?: number;
+}
+
 // ================================================================= dashboard
 
 export interface ServiceErrorCount {
@@ -597,12 +665,62 @@ export interface DashboardSummaryPolicy {
   unanalyzed_group_count: number;
   /** `count_over_time` 최근 24h. metric 쿼리에 실패하면 **null** 이며 0 이 아니다. */
   total_errors_24h: number | null;
+  /**
+   * 카드 스파크라인용 24h 포인트 (step 3600).
+   *
+   * `total_errors_24h` 를 계산한 **같은 `count_over_time` 결과의 포인트를 재사용**한 값이다 —
+   * 카드 하나마다 Loki 를 한 번 더 두드리지 않는다. metric 쿼리가 실패하면 빈 배열이고,
+   * 그 사유는 `warnings` 에 남는다 (합계 쪽은 같은 이유로 `null` 이 된다).
+   *
+   * 백엔드가 아직 이 필드를 안 내려줄 수 있으므로 소비하는 쪽은 `undefined` 를 빈 배열과
+   * 같게 다룬다 — 스파크라인 자리를 비우면 되고, 오류가 아니다.
+   */
+  series_24h?: SummarySeriesPoint[];
   warnings: SummaryWarning[];
+}
+
+/**
+ * `series_24h` 의 한 점.
+ *
+ * 백엔드는 `CountPoint` 를 그대로 싣는다(`labels` 포함) — 같은 metric 결과를 재사용하기
+ * 때문이다. 스파크라인이 쓰는 것은 `timestamp`·`value` 둘뿐이라 `labels` 는 **선택**으로
+ * 둔다: 정책 전체 합계라 라벨이 비어 있어도 화면이 달라지지 않는다.
+ */
+export interface SummarySeriesPoint {
+  /** ISO 8601 */
+  timestamp: string;
+  value: number;
+  labels?: Record<string, string>;
 }
 
 export interface DashboardSummaryResponse {
   generated_at: string;
   policies: DashboardSummaryPolicy[];
+}
+
+// ------------------------------------------- 전체 오류 그룹 (통합 대시보드 하단)
+
+/**
+ * `GET /api/dashboard/error-groups` 의 항목.
+ *
+ * 전 활성 정책의 **최신 성공 query-run** 그룹을 모아 count desc, last_seen desc 로 준다.
+ * 회차 하나짜리 목록(`/query-runs/{id}/error-groups`)과 달리 어느 정책에서 나온 그룹인지
+ * 알아야 하므로 `policy_id`·`policy_name` 이 함께 온다.
+ *
+ * `latest_severity` 는 기존 fingerprint 조인 그대로다 — **LLM 추정** 값이고 발생량 기반
+ * 지표가 아니다. 화면이 심각도로 배경색을 칠할 때도 배지를 반드시 병기한다
+ * (색만으로 구분하면 색각 이상·흑백 출력에서 정보가 사라진다).
+ */
+export interface DashboardErrorGroupItem extends ErrorGroupSummary {
+  policy_id: number;
+  policy_name: string;
+}
+
+export interface DashboardErrorGroupsResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  items: DashboardErrorGroupItem[];
 }
 
 // ===================================================================== usage
@@ -622,6 +740,34 @@ export interface UsageAggregate {
   avg_latency_ms?: number | null;
 }
 
+/**
+ * `group_by` 분해 축.
+ *
+ * 생략하면 기존 모델별 집계(`items`)만 온다 — 이 파라미터는 **additive** 라 모르는
+ * 백엔드는 무시하고 기존 응답을 준다. 그래서 화면은 `buckets` 가 없는 상태를 실패가
+ * 아니라 "아직 분해를 못 준다"로 다룬다.
+ */
+export type UsageGroupBy = 'day' | 'policy';
+
+/**
+ * `group_by` 분해의 한 칸.
+ *
+ * - `day`: `key` = `YYYY-MM-DD` (`app_settings.timezone` 로컬 날짜), `label` 동일
+ * - `policy`: `key` = policy_id 문자열, `label` = 정책명. 정책 연결이 끊긴 작업은 `key="unknown"`
+ *
+ * `estimated_cost` 는 여기서도 **null 이 0 이 아니다** — 단가표에 없는 모델만 있는 칸은
+ * 막대를 0 으로 그리지 말고 `-` 로 적는다.
+ */
+export interface UsageBucket {
+  key: string;
+  label: string;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost: string | number | null;
+  job_count: number;
+  failure_count: number;
+}
+
 export interface UsageResponse {
   range_start: string;
   range_end: string;
@@ -634,6 +780,14 @@ export interface UsageResponse {
    * 비용을 계산할 수 있는 항목이 하나도 없으면 **null** 이며, 화면에는 `-` 로 표시한다.
    */
   total_estimated_cost: string | number | null;
+  /**
+   * `group_by` 를 준 요청에만 채워진다.
+   *
+   * 생략하면 **`null`** 이지 빈 배열이 아니다 — "분해를 요청하지 않았다"와 "분해했더니
+   * 아무것도 없었다"는 다른 상태이고, 화면 문구도 갈린다. 파라미터를 모르는 옛 백엔드는
+   * 키 자체를 안 보내므로 `undefined` 도 같이 받는다(둘 다 "분해 없음"이다).
+   */
+  buckets?: UsageBucket[] | null;
 }
 
 export interface UsageParams {
@@ -641,6 +795,8 @@ export interface UsageParams {
   range_end?: string;
   model?: string;
   provider?: string;
+  /** 생략하면 기존 모델별 집계 그대로. */
+  group_by?: UsageGroupBy;
 }
 
 // ================================================================== settings

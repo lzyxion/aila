@@ -15,6 +15,7 @@ from unittest.mock import patch
 from app.dashboard import summary as summary_service
 from app.enums import AnalysisJobStatus, QueryRunStatus
 from app.providers.logsource import LogSourceError
+from app.schemas.logrecord import CountPoint, CountSeries
 from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     NOW,
     FakeLogSource,
@@ -254,6 +255,71 @@ def test_a_slow_policy_is_dropped_by_the_per_policy_timeout(client, db) -> None:
 
     assert row["total_errors_24h"] is None
     assert summary_service.WARN_COUNT_TIMEOUT in codes(row)
+
+
+# ------------------------------------------------------- 24h 시계열 (Phase 6)
+
+
+def test_series_24h_reuses_the_points_of_the_same_count_query(client, db) -> None:
+    """추가 Loki 호출 없이, 합계를 만든 그 응답의 포인트를 그대로 싣는다."""
+    connection = make_connection(db)
+    make_policy(db, connection)
+    source = FakeLogSource(
+        count_series=count_series(("payment-api", 7.0), ("payment-api", 3.0))
+    )
+
+    row = get_summary(client, source).json()["policies"][0]
+
+    assert len(source.count_calls) == 1, "시계열 때문에 metric 을 두 번 부르면 안 된다"
+    assert row["total_errors_24h"] == 10.0
+    assert [point["value"] for point in row["series_24h"]] == [3.0, 7.0]
+    assert [point["timestamp"] for point in row["series_24h"]] == sorted(
+        point["timestamp"] for point in row["series_24h"]
+    )
+    assert sum(point["value"] for point in row["series_24h"]) == row["total_errors_24h"]
+
+
+def test_series_24h_folds_multiple_series_at_the_same_timestamp(client, db) -> None:
+    """`sum by (service)` 라 한 시각에 점이 여러 개 온다 — 카드 차트는 그 합을 그린다."""
+    connection = make_connection(db)
+    make_policy(db, connection)
+    moment = NOW - timedelta(hours=1)
+    source = FakeLogSource(
+        count_series=CountSeries(
+            step_seconds=summary_service.SUMMARY_STEP_SECONDS,
+            points=[
+                CountPoint(timestamp=moment, value=4.0, labels={"service": "payment-api"}),
+                CountPoint(timestamp=moment, value=6.0, labels={"service": "auth-api"}),
+                CountPoint(timestamp=NOW, value=1.0, labels={"service": "auth-api"}),
+            ],
+        )
+    )
+
+    row = get_summary(client, source).json()["policies"][0]
+
+    assert [point["value"] for point in row["series_24h"]] == [10.0, 1.0]
+    assert row["total_errors_24h"] == 11.0
+
+
+def test_series_24h_is_empty_when_the_count_query_fails(client, db) -> None:
+    """빈 배열 + null 합계 + 경고 — "0 건" 으로 보이는 선을 그리지 않는다."""
+    connection = make_connection(db)
+    make_policy(db, connection)
+    source = FakeLogSource(count_error=LogSourceError("Loki 502"))
+
+    row = get_summary(client, source).json()["policies"][0]
+
+    assert row["series_24h"] == []
+    assert row["total_errors_24h"] is None
+
+
+def test_series_24h_is_empty_for_an_inactive_policy(client, db) -> None:
+    connection = make_connection(db)
+    make_policy(db, connection, active=False)
+
+    row = get_summary(client, FakeLogSource(count_series=count_series())).json()["policies"][0]
+
+    assert row["series_24h"] == []
 
 
 def test_summary_has_no_policies_when_none_exist(client) -> None:

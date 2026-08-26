@@ -5,6 +5,9 @@
 - `POST /auth/logout` → 204 (세션 무효화 — 서버 행 삭제 + 쿠키 만료)
 - `GET  /auth/me`     → 200 {username, role} | 미인증 401
 - `POST /auth/users`  {username, password, role} → 201 {username, role} (admin 전용)
+- `GET  /auth/users`  → 200 {total, items} (admin 전용 — viewer 도 GET 이 막힌다)
+- `PATCH /auth/users/{id}` {role?, active?, password?} → 200 UserDetail (admin 전용)
+- `DELETE /auth/users/{id}` → 200 UserDetail (**비활성화**, 실삭제가 아니다)
 
 login·logout 만 전역 인증 의존성에서 제외된다 (`auth.dependencies.PUBLIC_API_PATHS`).
 `me` 가 제외되지 않는 것은 의도다 — 미인증이면 401 이 나와야 프런트가 `/login` 으로
@@ -21,7 +24,14 @@ from app.auth.dependencies import current_identity, require_admin, session_token
 from app.auth.service import Identity
 from app.config import get_settings
 from app.db import get_db
-from app.schemas.api import LoginRequest, UserCreateRequest, UserRead
+from app.schemas.api import (
+    LoginRequest,
+    UserCreateRequest,
+    UserDetail,
+    UserListResponse,
+    UserRead,
+    UserUpdateRequest,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -90,11 +100,65 @@ def create_user(
     db: Session = Depends(get_db),
     _admin: Identity = Depends(require_admin),
 ) -> UserRead:
-    """viewer(또는 추가 admin) 계정 생성. 최소 구현 — 수정·삭제는 두지 않았다."""
+    """viewer(또는 추가 admin) 계정 생성."""
     user = service.create_user(
         db, username=payload.username, password=payload.password, role=payload.role.value
     )
     return UserRead(username=user.username, role=user.role)
+
+
+@router.get("/users", response_model=UserListResponse)
+def list_users(
+    db: Session = Depends(get_db),
+    _admin: Identity = Depends(require_admin),
+) -> UserListResponse:
+    """계정 목록 (admin 전용).
+
+    전역 규칙은 "viewer 도 GET 은 된다" 지만 계정 목록은 예외다 — 사용자 이름
+    목록은 로그인 시도의 절반(계정 열거)이라 읽기도 admin 으로 막는다.
+    """
+    users = service.list_users(db)
+    return UserListResponse(
+        total=len(users), items=[UserDetail.model_validate(user) for user in users]
+    )
+
+
+@router.patch("/users/{user_id}", response_model=UserDetail)
+def update_user(
+    user_id: int,
+    payload: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    admin: Identity = Depends(require_admin),
+) -> UserDetail:
+    """역할·활성 여부·비밀번호 수정 (admin 전용).
+
+    마지막 남은 활성 admin 의 강등·비활성은 409, 자기 자신 비활성도 409 다.
+    `active=false` 와 비밀번호 변경은 그 계정의 세션을 전부 무효화한다 — 자기
+    비밀번호를 바꾸면 자기 세션도 끊긴다(의도: 유출을 전제로 바꾸는 조작이다).
+    """
+    user = service.update_user(
+        db,
+        user_id,
+        role=payload.role.value if payload.role is not None else None,
+        active=payload.active,
+        password=payload.password,
+        actor_id=admin.user_id,
+    )
+    return UserDetail.model_validate(user)
+
+
+@router.delete("/users/{user_id}", response_model=UserDetail)
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: Identity = Depends(require_admin),
+) -> UserDetail:
+    """계정 비활성화 (admin 전용). **행을 지우지 않는다** — 이력의 참조가 끊긴다.
+
+    세션은 함께 무효화된다. 자기 자신과 마지막 관리자는 409 로 막힌다.
+    """
+    user = service.deactivate_user(db, user_id, actor_id=admin.user_id)
+    return UserDetail.model_validate(user)
 
 
 __all__ = ["router"]

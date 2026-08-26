@@ -2,7 +2,9 @@
 
 `overview` 와의 분업이 이 모듈의 존재 이유다.
 - `overview` 는 **정책 하나**의 추이·상위 그룹을 준다 (정책 상세 화면).
-- `summary` 는 **모든 정책**의 상태 한 줄씩을 준다 (첫 화면). 추이 시리즈는 싣지 않는다.
+- `summary` 는 **모든 정책**의 상태 한 줄씩을 준다 (첫 화면). Phase 6 부터 카드용
+  24 시간 시계열(`series_24h`)을 함께 싣지만, 그것은 **합계를 만든 그 호출의 결과**를
+  접은 것이다 — Loki 호출 수는 그대로다. 정책 하나의 상세 추이는 여전히 `overview` 다.
 
 >>> 실패 격리 <<<
 정책 수만큼 `count_over_time` 호출이 나간다. 정책 하나의 Loki 가 죽어 있다고 화면
@@ -19,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import UTC, datetime, timedelta
 
@@ -33,7 +36,7 @@ from app.schemas.api import (
     DashboardSummaryLastRun,
     DashboardSummaryResponse,
 )
-from app.schemas.logrecord import FetchWarning, TimeRange
+from app.schemas.logrecord import CountPoint, FetchWarning, TimeRange
 
 logger = logging.getLogger(__name__)
 
@@ -105,10 +108,31 @@ def unanalyzed_group_count(db: Session, run_id: int) -> int:
     )
 
 
+def _fold_by_timestamp(points: Sequence[CountPoint]) -> list[CountPoint]:
+    """같은 시각의 여러 시리즈를 한 점으로 접는다 (라벨은 버린다).
+
+    metric 쿼리는 `sum by (service)` 라 서비스가 셋이면 한 시각에 점이 셋 나온다.
+    그대로 실으면 카드의 미니 차트가 같은 시각을 세 번 그린다. `total_errors_24h`
+    가 전 시리즈의 합인 것과 같은 기준으로 접어야 "선 아래 면적 = 총 건수" 가 된다.
+    """
+    totals: dict[datetime, float] = {}
+    for point in points:
+        totals[point.timestamp] = totals.get(point.timestamp, 0.0) + point.value
+    return [
+        CountPoint(timestamp=timestamp, value=totals[timestamp])
+        for timestamp in sorted(totals)
+    ]
+
+
 def _errors_24h(
     db: Session, policy: AnalysisPolicy
-) -> tuple[float | None, list[FetchWarning]]:
-    """정책별 최근 24 시간 오류 건수 (`count_over_time`). 실패는 `None` + 경고."""
+) -> tuple[float | None, list[CountPoint], list[FetchWarning]]:
+    """정책별 최근 24 시간 오류 건수 + 그 시리즈 (`count_over_time` 1 회).
+
+    실패는 `None` + 빈 시리즈 + 경고다. **추가 호출은 하지 않는다** — 카드의
+    시계열은 합계를 만든 바로 그 응답의 포인트를 접은 것이다. 따로 부르면 정책
+    수만큼의 Loki 호출이 두 배가 되고, 두 값이 서로 다른 순간을 가리키게 된다.
+    """
     warnings: list[FetchWarning] = []
     if not policy.active:
         warnings.append(
@@ -117,7 +141,7 @@ def _errors_24h(
                 message="비활성 정책이라 최근 24 시간 건수를 조회하지 않았습니다.",
             )
         )
-        return None, warnings
+        return None, [], warnings
 
     connection = db.get(LokiConnection, policy.loki_connection_id)
     if connection is None or not connection.active:
@@ -127,7 +151,7 @@ def _errors_24h(
                 message=f"정책 '{policy.name}' 의 로그 소스 연결을 쓸 수 없습니다.",
             )
         )
-        return None, warnings
+        return None, [], warnings
 
     end = _now()
     time_range = TimeRange(start=end - SUMMARY_RANGE, end=end)
@@ -140,7 +164,7 @@ def _errors_24h(
         warnings.append(
             FetchWarning(code=WARN_COUNT_FAILED, message=f"{type(exc).__name__}: {exc}")
         )
-        return None, warnings
+        return None, [], warnings
 
     if not getattr(provider, "supports_count", True):
         warnings.append(
@@ -149,13 +173,14 @@ def _errors_24h(
                 message="이 로그 소스 어댑터는 건수 metric 쿼리를 지원하지 않습니다.",
             )
         )
-        return None, warnings
+        return None, [], warnings
 
     query = policy.logql
 
-    def _call() -> tuple[float, list[FetchWarning]]:
+    def _call() -> tuple[float, list[CountPoint], list[FetchWarning]]:
         series = provider.count_over_time(query, time_range, SUMMARY_STEP_SECONDS)
-        return float(series.total), list(series.warnings)
+        # 합계와 시리즈가 **같은 응답**에서 나온다 (추가 호출 없음).
+        return float(series.total), _fold_by_timestamp(series.points), list(series.warnings)
 
     # 정책 하나가 느리다고 나머지 정책의 응답까지 붙잡지 않게 벽시계 제한을 건다.
     # `shutdown(wait=False)` — 버린 호출이 끝나기를 기다리지 않는다 (어댑터 타임아웃이 끝낸다).
@@ -163,7 +188,9 @@ def _errors_24h(
     try:
         future = pool.submit(_call)
         try:
-            total, call_warnings = future.result(timeout=SUMMARY_COUNT_TIMEOUT_SECONDS)
+            total, series, call_warnings = future.result(
+                timeout=SUMMARY_COUNT_TIMEOUT_SECONDS
+            )
         except FutureTimeout:
             # 남은 스레드는 어댑터 타임아웃에 걸려 알아서 끝난다 (결과만 버린다).
             future.cancel()
@@ -180,17 +207,17 @@ def _errors_24h(
                     ),
                 )
             )
-            return None, warnings
+            return None, [], warnings
         except Exception as exc:  # noqa: BLE001 - 정책 하나의 실패로 화면을 죽이지 않는다
             warnings.append(
                 FetchWarning(code=WARN_COUNT_FAILED, message=f"{type(exc).__name__}: {exc}")
             )
-            return None, warnings
+            return None, [], warnings
     finally:
         pool.shutdown(wait=False)
 
     warnings.extend(call_warnings)
-    return total, warnings
+    return total, series, warnings
 
 
 def _run_warnings(run: QueryRun) -> list[FetchWarning]:
@@ -244,7 +271,7 @@ def get_summary(db: Session) -> DashboardSummaryResponse:
         else:
             unanalyzed = unanalyzed_group_count(db, last_succeeded.id)
 
-        total_errors, count_warnings = _errors_24h(db, policy)
+        total_errors, series_24h, count_warnings = _errors_24h(db, policy)
         warnings.extend(count_warnings)
 
         items.append(
@@ -259,6 +286,7 @@ def get_summary(db: Session) -> DashboardSummaryResponse:
                 ),
                 unanalyzed_group_count=unanalyzed,
                 total_errors_24h=total_errors,
+                series_24h=series_24h,
                 warnings=warnings,
             )
         )

@@ -14,6 +14,8 @@ Phase 2 담당 트랙: **분석 플로우·usage·보고서**
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
@@ -54,12 +56,37 @@ def create_analysis_job(
 @router.get("/analysis-jobs", response_model=AnalysisJobListResponse)
 def list_analysis_jobs(
     status_filter: AnalysisJobStatus | None = Query(default=None, alias="status"),
+    q: str | None = Query(
+        default=None,
+        max_length=200,
+        description=(
+            "부분 일치 검색 — 서비스·정규화 메시지(error_groups) 또는 "
+            "모델·fingerprint(analysis_jobs) 중 하나라도 걸리면 포함한다."
+        ),
+    ),
+    requested_from: datetime | None = Query(
+        default=None, description="요청 시각 하한 (ISO datetime, UTC 로 정규화해 비교)"
+    ),
+    requested_to: datetime | None = Query(
+        default=None, description="요청 시각 상한 (ISO datetime, UTC 로 정규화해 비교)"
+    ),
     limit: int = Query(default=20, gt=0, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> AnalysisJobListResponse:
-    """분석 작업 목록 (최신순·페이지네이션·상태 필터). 프런트 이력 화면·폴링용."""
-    return service.list_analysis_jobs(db, job_status=status_filter, limit=limit, offset=offset)
+    """분석 작업 목록 (최신순·페이지네이션·상태 필터 + 검색).
+
+    검색 파라미터는 **추가**다 — 주지 않으면 기존 동작과 응답이 그대로다.
+    """
+    return service.list_analysis_jobs(
+        db,
+        job_status=status_filter,
+        q=q,
+        requested_from=requested_from,
+        requested_to=requested_to,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/analysis-jobs/{job_id}", response_model=AnalysisJobRead)

@@ -7,13 +7,14 @@ import { api } from './client';
 import type {
   AnalysisJobCreateRequest,
   AnalysisJobCreateResponse,
+  AnalysisJobListParams,
   AnalysisJobListResponse,
   AnalysisJobRead,
-  AnalysisJobStatus,
   AppSettingListResponse,
   AppSettingRead,
   AuthUser,
   ConnectionTestResponse,
+  DashboardErrorGroupsResponse,
   DashboardOverviewParams,
   DashboardOverviewResponse,
   DashboardSummaryResponse,
@@ -42,6 +43,11 @@ import type {
   SettingValue,
   UsageParams,
   UsageResponse,
+  UserCreateRequest,
+  UserCreateResponse,
+  UserListResponse,
+  UserRead,
+  UserUpdateRequest,
 } from './types';
 
 const P = '/api';
@@ -61,6 +67,25 @@ export const auth = {
   logout: () => api.post<void>(`${P}/auth/logout`, undefined, { parse: 'void' }),
   /** 미인증이면 401 이다. 부트스트랩 경로라 그 401 은 오류가 아니라 "로그인 안 함"이다. */
   me: () => api.get<AuthUser>(`${P}/auth/me`),
+};
+
+/**
+ * 계정 관리 — **admin 전용**이다. viewer 는 GET 도 403 을 받을 수 있으므로 화면이
+ * 라우트 자체를 가린다 (판정은 여전히 서버가 한다).
+ *
+ * 세 가지 보호가 서버에만 있다: 마지막 남은 active admin 의 강등·비활성(409), 자기 자신
+ * 비활성(409), `active=false`·비밀번호 변경 시 그 계정 세션 전부 무효화. 화면은 409 의
+ * `detail` 을 **그대로** 보여준다 — 문구를 프런트가 다시 쓰면 서버가 규칙을 바꿨을 때
+ * 화면만 옛말을 하게 된다.
+ */
+export const users = {
+  list: () => api.get<UserListResponse>(`${P}/auth/users`),
+  create: (payload: UserCreateRequest) =>
+    api.post<UserCreateResponse>(`${P}/auth/users`, payload),
+  update: (id: number, payload: UserUpdateRequest) =>
+    api.patch<UserRead>(`${P}/auth/users/${id}`, payload),
+  /** 실제 삭제가 아니라 `active=false` + 세션 무효화다. 자기 자신은 409. */
+  deactivate: (id: number) => api.delete(`${P}/auth/users/${id}`),
 };
 
 // --------------------------------------------------------- loki connections
@@ -155,13 +180,15 @@ export const analysisJobs = {
    * 분석 실행 목록 (최신순·페이지네이션).
    *
    * 응답은 배열이 아니라 `{total, limit, offset, items}` 봉투이고, 항목은 단건 조회와
-   * 모양이 다르다(`AnalysisJobListItem` — `result`·`usage` 가 없다). 화면은 항목만
-   * 쓰므로 여기서 벗겨서 넘긴다.
+   * 모양이 다르다(`AnalysisJobListItem` — `result`·`usage` 가 없다). **봉투째 넘긴다** —
+   * 페이지네이션 화면이 `total` 을 알아야 "몇 건 중 몇 건"을 쓸 수 있고, 여기서 벗기면
+   * 그 값이 화면에 닿을 방법이 없어진다.
+   *
+   * `q`·`requested_from`·`requested_to` 는 additive 파라미터다 — 모르는 백엔드는 무시하고
+   * 전체를 준다(오류가 아니다).
    */
-  list: (params?: { status?: AnalysisJobStatus; limit?: number; offset?: number }) =>
-    api
-      .get<AnalysisJobListResponse>(`${P}/analysis-jobs`, { query: { ...params } })
-      .then((response) => response.items),
+  list: (params?: AnalysisJobListParams) =>
+    api.get<AnalysisJobListResponse>(`${P}/analysis-jobs`, { query: { ...params } }),
   get: (id: number) => api.get<AnalysisJobRead>(`${P}/analysis-jobs/${id}`),
   /** 보고서는 저장하지 않고 요청 시점에 Markdown 으로 렌더링된다. */
   report: (id: number) =>
@@ -184,6 +211,18 @@ export const dashboard = {
    * 폴백한다 (`isEndpointMissing`).
    */
   summary: () => api.get<DashboardSummaryResponse>(`${P}/dashboard/summary`),
+  /**
+   * 통합 대시보드 하단의 **전체 오류 그룹** 목록.
+   *
+   * 전 활성 정책의 최신 성공 query-run 그룹을 모아 count desc, last_seen desc 로 준다 —
+   * 정책 카드를 하나씩 열어 보지 않아도 "지금 가장 많이 터지는 오류"가 한 화면에 나온다.
+   *
+   * 백엔드에 아직 경로가 없으면 호출부가 안내 폴백으로 물러난다 (`isEndpointMissing`).
+   */
+  errorGroups: (params?: { limit?: number; offset?: number }) =>
+    api.get<DashboardErrorGroupsResponse>(`${P}/dashboard/error-groups`, {
+      query: { limit: params?.limit, offset: params?.offset },
+    }),
 };
 
 // -------------------------------------------------------------------- usage

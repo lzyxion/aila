@@ -14,9 +14,17 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.dashboard import service, summary as summary_service
+from app.dashboard import (
+    error_groups as error_group_feed,
+    service,
+    summary as summary_service,
+)
 from app.db import get_db
-from app.schemas.api import DashboardOverviewResponse, DashboardSummaryResponse
+from app.schemas.api import (
+    DashboardErrorGroupListResponse,
+    DashboardOverviewResponse,
+    DashboardSummaryResponse,
+)
 
 TRACK = "정책 API"
 
@@ -32,6 +40,20 @@ def get_summary(db: Session = Depends(get_db)) -> DashboardSummaryResponse:
     + 경고 코드).
     """
     return summary_service.get_summary(db)
+
+
+@router.get("/error-groups", response_model=DashboardErrorGroupListResponse)
+def list_error_groups(
+    limit: int = Query(default=50, gt=0, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> DashboardErrorGroupListResponse:
+    """전 활성 정책의 **최신 성공 조회** 그룹을 한데 모은 목록 (Phase 6).
+
+    정책 하나의 그룹 목록은 기존 `/query-runs/{id}/error-groups` 가 그대로 담당한다.
+    여기서는 항목마다 `policy_id`·`policy_name` 이 붙어 출처를 되짚을 수 있다.
+    """
+    return error_group_feed.list_error_groups(db, limit=limit, offset=offset)
 
 
 @router.get("/overview", response_model=DashboardOverviewResponse)
