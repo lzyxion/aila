@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 
-import { ApiError } from '../api/client';
 import { useAnalysisJobs, useUsage } from '../api/queries';
 import type { UsageParams } from '../api/types';
 import { TokenByModelChart } from '../components/chartsLazy';
@@ -13,7 +12,6 @@ import {
   ErrorBlock,
   Field,
   LoadingBlock,
-  Notice,
   PageHeader,
   Select,
   Stat,
@@ -171,7 +169,7 @@ export function UsagePage() {
           description="같은 오류를 다시 분석하기 전에 fingerprint 기준 이력을 먼저 확인하십시오."
         >
           {jobsQuery.isPending && <LoadingBlock />}
-          {jobsQuery.isError && <JobListUnavailable error={jobsQuery.error} />}
+          {jobsQuery.isError && <ErrorBlock error={jobsQuery.error} />}
           {jobsQuery.data && jobsQuery.data.length === 0 && (
             <EmptyBlock>실행된 분석이 없습니다.</EmptyBlock>
           )}
@@ -181,11 +179,10 @@ export function UsagePage() {
                 <tr>
                   <Th>요청 시각</Th>
                   <Th>오류 그룹 · fingerprint</Th>
+                  <Th>서비스 · 오류</Th>
                   <Th>모델</Th>
                   <Th>상태</Th>
-                  <Th align="right">토큰</Th>
-                  <Th align="right">추정 비용</Th>
-                  <Th align="right">응답 시간</Th>
+                  <Th>요약</Th>
                 </tr>
               </thead>
               <tbody>
@@ -205,36 +202,31 @@ export function UsagePage() {
                       <p className="mt-0.5 font-mono text-xs text-slate-500">{job.fingerprint}</p>
                     </Td>
                     <Td>
+                      <p>{job.service ?? '-'}</p>
+                      <p className="mt-0.5 font-mono text-xs text-slate-500">
+                        {job.error_type ?? '-'}
+                        {job.environment ? ` · ${job.environment}` : ''}
+                      </p>
+                    </Td>
+                    <Td>
                       <p>{providerLabel(job.provider)}</p>
                       <p className="mt-0.5 font-mono text-xs text-slate-500">{job.model}</p>
                     </Td>
                     <Td>
                       <div className="flex flex-col items-start gap-1">
                         <AnalysisStatusBadge status={job.status} />
-                        {job.result?.severity && <SeverityBadge severity={job.result.severity} />}
+                        {job.severity && <SeverityBadge severity={job.severity} />}
                         {job.status === 'failed' && job.error_message && (
                           <span className="text-xs text-rose-700">{job.error_message}</span>
                         )}
                       </div>
                     </Td>
-                    <Td align="right">
-                      {job.usage
-                        ? `${formatNumber(job.usage.input_tokens)} / ${formatNumber(
-                            job.usage.output_tokens,
-                          )}`
-                        : '-'}
+                    <Td>
+                      {/* 목록 응답에는 토큰·비용이 없다 — 위쪽 모델별 집계에서 본다. */}
+                      <p className="max-w-md text-xs text-slate-600">
+                        {job.summary ?? job.normalized_message ?? '-'}
+                      </p>
                     </Td>
-                    <Td align="right">
-                      {job.usage ? (
-                        <>
-                          {formatEstimatedCost(job.usage.estimated_cost)}
-                          <span className="ml-1 text-xs text-slate-400">(추정)</span>
-                        </>
-                      ) : (
-                        '-'
-                      )}
-                    </Td>
-                    <Td align="right">{formatDuration(job.usage?.latency_ms)}</Td>
                   </tr>
                 ))}
               </tbody>
@@ -244,28 +236,4 @@ export function UsagePage() {
       </div>
     </div>
   );
-}
-
-/**
- * `GET /api/analysis-jobs` 는 백엔드 계약(API 초안·라우터 스켈레톤)에 아직 없다.
- * 실패를 오류로 띄우지 않고 무엇이 빠졌는지 그대로 알린다.
- */
-function JobListUnavailable({ error }: { error: unknown }) {
-  const status = error instanceof ApiError ? error.status : null;
-  if (status === 404 || status === 405 || status === 501) {
-    return (
-      <Notice tone="warning" title="분석 실행 목록 엔드포인트가 아직 없습니다">
-        <p>
-          설계 문서의 "분석 이력·사용량" 화면은 실행 목록을 요구하지만, API 초안에는{' '}
-          <code>GET /api/analysis-jobs</code> (목록)이 없고 단건 조회{' '}
-          <code>GET /api/analysis-jobs/{'{id}'}</code> 만 있습니다. 위쪽 모델별 집계는{' '}
-          <code>GET /api/usage</code> 로 정상 동작합니다.
-        </p>
-        <p className="mt-1 text-xs">
-          <code>VITE_USE_MOCK=true</code> 에서는 mock 이 목록을 제공하므로 화면을 확인할 수 있습니다.
-        </p>
-      </Notice>
-    );
-  }
-  return <ErrorBlock error={error} />;
 }

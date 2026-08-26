@@ -16,6 +16,8 @@ import { ApiError, type HttpMethod, type RequestOptions } from '../client';
 import type {
   AnalysisJobCreateRequest,
   AnalysisJobCreateResponse,
+  AnalysisJobListItem,
+  AnalysisJobListResponse,
   AnalysisJobRead,
   AnalysisJobSummary,
   ConnectionTestResponse,
@@ -193,6 +195,22 @@ function toJobSummary(job: AnalysisJobRead): AnalysisJobSummary {
     completed_at: job.completed_at ?? null,
     severity: job.result?.severity ?? null,
     summary: job.result?.summary ?? null,
+  };
+}
+
+/** 목록 항목. 조회 회차와 무관하게 보여야 하므로 그룹 메타데이터를 값으로 함께 싣는다. */
+function toJobListItem(job: AnalysisJobRead): AnalysisJobListItem {
+  const seed = groupSeeds.find((item) => item.id === job.error_group_id);
+  return {
+    ...toJobSummary(job),
+    error_group_id: job.error_group_id,
+    fingerprint: job.fingerprint,
+    llm_connection_id: job.llm_connection_id ?? null,
+    service: seed?.service ?? null,
+    environment: seed?.environment ?? null,
+    error_type: seed?.error_type ?? null,
+    normalized_message: seed?.normalized_message ?? null,
+    error_message: job.error_message ?? null,
   };
 }
 
@@ -669,13 +687,23 @@ route('POST', /^\/api\/error-groups\/(\d+)\/analysis-jobs$/, ([id], { body }) =>
 });
 
 /**
- * 주의: `GET /api/analysis-jobs` (목록)은 **백엔드 계약에 없다.**
- * 설계 문서 "분석 이력·사용량" 화면이 요구하는데 API 초안에 빠져 있어, mock 에서만
- * 제공하고 라이브 모드에서는 화면이 404/501 을 안내로 처리한다. 최종 보고 대상.
+ * `GET /api/analysis-jobs` — 최신순 목록.
+ *
+ * 응답은 배열이 아니라 `{total, limit, offset, items}` 봉투이고 항목은 단건 조회와
+ * 모양이 다르다(`result`·`usage` 없음, 심각도·요약은 평탄화). 라이브 백엔드와 mock 이
+ * 다른 모양을 주면 화면이 mock 에서만 동작하므로 여기서도 같은 봉투로 맞춘다.
  */
-route('GET', /^\/api\/analysis-jobs$/, () =>
-  allJobs().sort((a, b) => Date.parse(b.requested_at) - Date.parse(a.requested_at)),
-);
+route('GET', /^\/api\/analysis-jobs$/, () => {
+  const items = allJobs()
+    .sort((a, b) => Date.parse(b.requested_at) - Date.parse(a.requested_at))
+    .map(toJobListItem);
+  return {
+    total: items.length,
+    limit: items.length,
+    offset: 0,
+    items,
+  } satisfies AnalysisJobListResponse;
+});
 
 route('GET', /^\/api\/analysis-jobs\/(\d+)$/, ([id]) => {
   const job = state.jobs.get(Number(id));

@@ -379,6 +379,33 @@ export interface AnalysisJobCreateResponse extends AnalysisJobRead {
   reused: boolean;
 }
 
+/**
+ * app.schemas.api.AnalysisJobListItem — 목록 항목.
+ *
+ * 단건(`AnalysisJobRead`)과 **모양이 다르다.** 목록은 조회 회차와 무관하게 보여야 해서
+ * 그룹 메타데이터를 값으로 싣는 대신 `result`·`usage` 는 싣지 않는다 — 심각도·요약은
+ * `severity`/`summary` 로 평탄화되어 온다. 토큰·비용은 `GET /api/usage` 의 모델별
+ * 집계에서 본다.
+ */
+export interface AnalysisJobListItem extends AnalysisJobSummary {
+  error_group_id: number;
+  fingerprint: string;
+  llm_connection_id?: number | null;
+  service?: string | null;
+  environment?: string | null;
+  error_type?: string | null;
+  normalized_message?: string | null;
+  error_message?: string | null;
+}
+
+/** app.schemas.api.AnalysisJobListResponse — 최신순 페이지네이션 목록. */
+export interface AnalysisJobListResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  items: AnalysisJobListItem[];
+}
+
 // ================================================================= dashboard
 
 export interface ServiceErrorCount {

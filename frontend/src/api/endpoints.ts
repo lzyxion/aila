@@ -7,7 +7,9 @@ import { api } from './client';
 import type {
   AnalysisJobCreateRequest,
   AnalysisJobCreateResponse,
+  AnalysisJobListResponse,
   AnalysisJobRead,
+  AnalysisJobStatus,
   ConnectionTestResponse,
   DashboardOverviewParams,
   DashboardOverviewResponse,
@@ -103,13 +105,16 @@ export const errorGroups = {
 
 export const analysisJobs = {
   /**
-   * 분석 실행 목록.
+   * 분석 실행 목록 (최신순·페이지네이션).
    *
-   * **주의: 이 엔드포인트는 백엔드 계약(API 초안·라우터 스켈레톤)에 없다.**
-   * 설계 문서 "분석 이력·사용량" 화면이 실행 목록을 요구하는데 API 목록에 빠져 있다.
-   * mock 모드에서는 동작하고, 라이브 모드에서는 404/501 이 나므로 화면이 안내로 처리한다.
+   * 응답은 배열이 아니라 `{total, limit, offset, items}` 봉투이고, 항목은 단건 조회와
+   * 모양이 다르다(`AnalysisJobListItem` — `result`·`usage` 가 없다). 화면은 항목만
+   * 쓰므로 여기서 벗겨서 넘긴다.
    */
-  list: () => api.get<AnalysisJobRead[]>(`${P}/analysis-jobs`),
+  list: (params?: { status?: AnalysisJobStatus; limit?: number; offset?: number }) =>
+    api
+      .get<AnalysisJobListResponse>(`${P}/analysis-jobs`, { query: { ...params } })
+      .then((response) => response.items),
   get: (id: number) => api.get<AnalysisJobRead>(`${P}/analysis-jobs/${id}`),
   /** 보고서는 저장하지 않고 요청 시점에 Markdown 으로 렌더링된다. */
   report: (id: number) =>

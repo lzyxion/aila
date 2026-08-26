@@ -9,8 +9,9 @@
 
 ```
 demo-api (stdout JSON) ──> alloy ──push──> loki <──read── backend ──> postgres
-                                             ^
-                                          grafana  (유입 육안 검증 전용)
+                                             ^              │
+                                          grafana           └──> llm-mock
+                                  (유입 육안 검증 전용)   (LLM 스텁 + 페이로드 감사)
 ```
 
 ---
@@ -24,11 +25,12 @@ demo-api (stdout JSON) ──> alloy ──push──> loki <──read── ba
 | `alloy` | `grafana/alloy:v1.10.0` | 12345 | demo-api stdout 수집 → Loki push |
 | `grafana` | `grafana/grafana:12.0.2` | 3000 | Loki 유입 검증 (익명 Admin) |
 | `demo-api` | 로컬 빌드 | 8081 → 8000 | 장애 시나리오 6 종 로그 생산 |
+| `llm-mock` | 로컬 빌드 | 8090 → 8000 | OpenAI 호환 LLM 스텁 + 전송 페이로드 감사 |
 | `backend` | 로컬 빌드 | 8000 | **profile `app`** |
 | `frontend` | 로컬 빌드 | 5173 | **profile `app`** |
 
-기본 `docker compose up` 은 앞의 5 개만 띄운다. 빌드가 필요한 것은 `demo-api` 하나뿐이라
-**backend/frontend 소스가 없어도 데모 환경 전체가 뜬다.**
+기본 `docker compose up` 은 앞의 6 개를 띄운다. 빌드가 필요한 것은 `demo-api` 와
+`llm-mock` 둘뿐이라 **backend/frontend 소스가 없어도 데모 환경 전체가 뜬다.**
 
 ### 파일
 
@@ -48,6 +50,10 @@ infra/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app/{__init__,logging_setup,scenarios,main}.py
+├── llm-mock/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/{__init__,generator,main}.py
 └── scenarios/                   # 시나리오별 expected-analysis.md + 샘플 로그
 ```
 
@@ -75,6 +81,9 @@ docker compose down -v                # 정지 + 로그·DB 데이터까지 삭�
 ```powershell
 docker compose --profile app up -d --build
 docker compose --profile app exec backend alembic upgrade head   # 마이그레이션은 수동
+
+# 전 경로 E2E (연결 등록 → 시나리오 → 정책 → 마스킹 → 분석 → 보고서)
+..\backend\.venv\Scripts\python.exe ..\scripts\e2e_demo.py
 ```
 
 > 마이그레이션을 컨테이너 기동 시 자동 실행하지 않는다. 스키마 변경 시점은 사람이 통제해야 한다.
@@ -93,13 +102,26 @@ docker compose --profile app exec backend alembic upgrade head   # 마이그레�
 | `DEMO_RELEASE` / `DEMO_NEXT_RELEASE` | `v1.4.2` / `v1.5.0` | 시나리오 05 |
 | `DEMO_AUTO_TRAFFIC` | `true` | 백그라운드 트래픽 루프 |
 | `DEMO_INTERVAL_SECONDS` / `DEMO_EVENTS_PER_TICK` | `5` / `3` | 유입량 조절 |
-| `AILA_ENCRYPTION_KEY` | (빈 값) | profile `app` 의 backend 용 Fernet 키 |
+| `LLM_MOCK_PORT` / `LLM_MOCK_MODEL` | `8090` / `llm-mock-1` | llm-mock |
+| `LLM_MOCK_LATENCY_MS` / `LLM_MOCK_HISTORY` | `0` / `50` | 응답 지연·요청 보관 수 |
+| `AILA_ENCRYPTION_KEY` | 저장소에 적힌 데모 키 | profile `app` 의 backend 용 Fernet 키 |
+| `VITE_USE_MOCK` | `false` | 프런트 라이브 모드 (true 면 fixture 만 본다) |
+| `AILA_BACKEND_ORIGIN` | `http://backend:8000` | 프런트 dev 서버의 `/api` 프록시 대상 |
 
-Fernet 키 생성:
+`AILA_ENCRYPTION_KEY` 는 **기본값이 compose 에 그대로 적혀 있다.** 이게 없으면
+`compose up` 만으로 연결 등록이 실패해서 "Compose 만으로 데모를 재현한다"는 기준이
+깨지기 때문이다. 로컬·데모 전용이라 감수하는 선택이고, 데모 밖으로 나가는 순간 바꾼다.
+바꾸면 기존에 저장된 secret 은 복호화되지 않으므로 연결을 다시 등록해야 한다.
 
 ```powershell
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 저장소 루트 .env 에 AILA_ENCRYPTION_KEY=... 로 넣는다 (.env 는 커밋 금지)
 ```
+
+> `frontend` 컨테이너는 소스를 **이미지에 COPY** 한다 (bind mount 가 아니다).
+> 호스트에서 `frontend/src` 를 고쳐도 컨테이너에는 반영되지 않는다 —
+> `docker compose --profile app up -d --build frontend` 로 다시 굽거나,
+> 호스트에서 `npm run dev` 를 띄운다.
 
 ---
 
@@ -145,6 +167,80 @@ curl.exe -X POST "http://localhost:8081/scenarios/noise?count=20"
 
 > 시나리오 06 의 토큰·이메일·카드번호는 **전부 명백한 가짜다**
 > (`infra/demo-api/app/scenarios.py` 상단 상수 참조). 실제 자격증명을 넣지 말 것.
+
+---
+
+## llm-mock — LLM 스텁 겸 전송 페이로드 감사 지점
+
+`infra/llm-mock/` 은 **OpenAI 호환 `/v1/chat/completions` 스텁**이다. 외부로 나가는
+네트워크 호출이 전혀 없고, 요청은 컨테이너 메모리에만 남는다 (재시작하면 사라진다).
+
+두 가지 이유로 존재한다.
+
+1. **키 없이 데모가 끝까지 돈다.** 분석 단계에 실제 LLM 키가 필요하면
+   "Docker Compose 만으로 데모 환경을 재현한다"는 MVP 성공 기준이 깨진다.
+2. **보낸 요청을 되돌려 받을 수 있다.** 설계 문서는 시나리오 06 의 검증을
+   "LLM 요청 페이로드에 원문 토큰이 없음을 단언하는 자동 테스트"로 못박았다.
+   진짜 프로바이더는 우리가 보낸 요청 본문을 돌려주지 않으므로, 그 단언은
+   여기서만 가능하다. `scripts/e2e_demo.py` 의 g 단계가 이 엔드포인트를 쓴다.
+
+응답 본문은 하드코딩이 아니라 **요청에 실려 온 `response_format.json_schema` 를 순회해서**
+만든다. 백엔드가 `AnalysisResultSchema` 를 바꾸면 스텁도 따라 바뀌고, 스키마를 어기면
+백엔드의 공통 검증 경로(`parse_analysis_result`)가 그 자리에서 잡아낸다.
+
+| 엔드포인트 | 용도 |
+| --- | --- |
+| `POST /v1/chat/completions` | 스키마에 맞는 한국어 분석 결과 + `usage` 토큰. `response_format` 이 없으면(=연결 테스트) `pong` 만 돌려준다 |
+| `GET /debug/last-request` | 마지막 요청. `?kind=analysis` 로 연결 테스트(ping)를 걸러낸다 |
+| `GET /debug/requests` | 최근 요청 목록 (`?kind=`, `?limit=`) |
+| `POST /debug/reset` | 보관 중인 요청 비우기 (E2E 재실행 전) |
+| `GET /v1/models`, `GET /health` | 헬스·모델 목록 |
+
+`/debug/*` 응답의 `prompt_text` 는 system·user 메시지를 이어붙인 문자열이다.
+마스킹 감사는 여기 하나만 훑으면 된다.
+
+```powershell
+curl.exe "http://localhost:8090/health"
+curl.exe "http://localhost:8090/debug/last-request?kind=analysis"
+```
+
+> **Alloy 수집 대상이 아니다** (`aila.logs` 라벨을 붙이지 않았다).
+> 프롬프트가 Loki 로 들어가면 마스킹 감사가 의미를 잃는다.
+> 인증도 없으므로 이 컨테이너를 로컬 밖에 노출하지 말 것.
+
+### 실제 LLM(OpenAI·Anthropic)으로 바꾸기
+
+llm-mock 은 **연결 설정 하나**로 갈아끼운다. compose 를 고칠 필요가 없다.
+UI 는 `LLM 연결` 화면, API 는 `POST /api/llm-connections` 다.
+
+| provider | model 예시 | base_url | api_key |
+| --- | --- | --- | --- |
+| `openai` | `gpt-4o-mini` | 비움 (기본 엔드포인트) | `sk-...` |
+| `anthropic` | `claude-sonnet-4-6` | 비움 | `sk-ant-...` |
+| `openai_compatible` | 게이트웨이가 정한 이름 | **필수** (`http://.../v1`) | 게이트웨이 정책에 따름 |
+
+```powershell
+curl.exe -X POST "http://localhost:8000/api/llm-connections" `
+  -H "Content-Type: application/json" `
+  -d '{\"name\":\"openai\",\"provider\":\"openai\",\"model\":\"gpt-4o-mini\",\"is_default\":true,\"api_key\":\"sk-...\"}'
+
+# 연결 테스트도 실제 과금 호출이다 (서버가 최소 토큰으로 보낸다)
+curl.exe -X POST "http://localhost:8000/api/llm-connections/test" `
+  -H "Content-Type: application/json" -d '{\"connection_id\":2}'
+```
+
+`is_default=true` 로 만들면 기존 기본 연결이 자동으로 해제되고, 이후 분석은 새 연결로
+나간다. 이미 실행된 분석 이력의 `provider`/`model` 은 실행 시점 값으로 고정되어 있으므로
+바뀌지 않는다.
+
+바꾸고 나면 **감사 경로가 사라진다는 점**을 기억할 것 — 진짜 프로바이더에 보낸 요청
+본문은 되돌려 받을 수 없으므로 `scripts/e2e_demo.py` 의 g 단계는 llm-mock 에서만
+의미가 있다. 마스킹 회귀 검증은 llm-mock 기본 연결로 돌린다.
+
+API 키는 저장 시 Fernet 으로 암호화되고 응답에는 마스킹된 값만 실린다.
+`AILA_ENCRYPTION_KEY` 를 바꾸면 기존 키는 복호화되지 않으니 연결을 다시 등록해야 한다.
+추정 비용을 보려면 `app_settings.model_pricing` 에 단가표가 있어야 한다 — 없으면
+`estimated_cost` 는 0 이 아니라 `null` 로 남는다 (지어낸 값을 쓰지 않는다).
 
 ---
 

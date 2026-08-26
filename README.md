@@ -19,15 +19,96 @@ Loki 에 이미 쌓여 있는 애플리케이션 오류 로그를 운영자가 �
 
 ---
 
+## Quickstart — 데모 재현 (처음부터)
+
+필요한 것은 **Docker Desktop 하나**다. LLM API 키도, 외부 네트워크도 필요 없다 —
+분석 단계는 `infra/llm-mock`(OpenAI 호환 스텁)이 받는다.
+
+```powershell
+cd aila
+
+# 1) 전체 스택 (postgres·loki·alloy·grafana·demo-api·llm-mock·backend·frontend)
+docker compose --profile app up -d --build
+
+# 2) 스키마 적용 — 기동 시 자동으로 돌리지 않는다 (스키마 변경 시점은 사람이 통제한다)
+docker compose --profile app exec backend alembic upgrade head
+```
+
+떠 있는지 확인:
+
+| | 주소 |
+| --- | --- |
+| 제품 UI | <http://localhost:5173> |
+| 백엔드 API 문서 | <http://localhost:8000/docs> |
+| Grafana (Loki 유입 육안 확인) | <http://localhost:3000> |
+| demo-api (시나리오 트리거) | <http://localhost:8081/scenarios> |
+| llm-mock (전송 페이로드 감사) | <http://localhost:8090/debug/last-request> |
+
+### 3-A. 스크립트로 한 번에 (권장)
+
+```powershell
+backend\.venv\Scripts\python.exe scripts\e2e_demo.py
+```
+
+연결 등록 → 시나리오 6 종 트리거 → 정책 미리보기·실행 → 그룹화 → **마스킹 검증** →
+AI 분석 → **전송 페이로드 감사** → 보고서·사용량·대시보드까지 한 번에 돌리고
+마지막에 `ALL PASS` 를 찍는다. **멱등**하므로 몇 번을 다시 돌려도 된다.
+실패하면 어느 단계에서 무엇이 어긋났는지 출력하고 비0 으로 종료한다.
+
+httpx 만 있으면 되므로 백엔드 가상환경의 python 으로 도는 게 가장 간단하다
+(다른 python 이면 `pip install httpx`). 백엔드를 컨테이너가 아니라 호스트에서
+돌리는 중이라면 `--loki-url http://localhost:3100 --llm-base-url http://localhost:8090/v1`.
+
+이 스크립트가 증명하는 것 중 하나는 눈으로는 확인할 수 없다 —
+시나리오 06 의 가짜 비밀값이 **화면 응답과 LLM 요청 본문 양쪽 모두**에 남아 있지
+않다는 단언이다. 그래서 llm-mock 이 자기가 받은 요청을 `/debug/last-request` 로
+되돌려준다 (진짜 프로바이더로는 관측할 수 없는 경로다).
+
+### 3-B. UI 로 손으로 (같은 순서)
+
+1. **LLM 연결** 화면 → 새 연결
+   `provider=OpenAI 호환`, `model=llm-mock-1`, `base URL=http://llm-mock:8000/v1`,
+   `기본 연결로 지정` 체크 → **연결 테스트** → 저장.
+   (Loki 연결은 `base_url=http://loki:3100` 으로 같은 방식. 백엔드가 컨테이너 안에
+   있으므로 `localhost` 가 아니라 **서비스명**을 쓴다.)
+2. 장애를 하나 터뜨린다 — 시나리오 목록과 트리거 방법은 `infra/README.md`.
+   ```powershell
+   curl.exe "http://localhost:8081/debug/dump-context"                     # 06 비밀값
+   curl.exe -X POST "http://localhost:8081/scenarios/payment-timeout/burst?count=120"
+   ```
+   demo-api 는 뜨는 즉시 백그라운드 트래픽도 만들므로 아무것도 하지 않아도 데이터는 쌓인다.
+3. **분석 정책** 화면 → LogQL `{service="payment-api"} | json | level="ERROR"` →
+   **저장 전 미리보기**로 실제로 무엇이 잡히는지 확인 → 저장.
+4. **대시보드** → 정책 선택 → `정책 실행` → 상위 오류 그룹에서 하나 클릭.
+5. 그룹 상세에서 대표 로그가 `<MASKED:...>` 로 치환된 것을 확인하고 → `AI 분석 실행`.
+   결과에는 **원인 가설**과 **한계**가 반드시 함께 나온다 (스키마가 단정을 막는다).
+6. **분석 이력·사용량** 화면에서 토큰·추정 비용을 확인한다.
+
+### 정리
+
+```powershell
+docker compose --profile app down       # 정지 (볼륨 유지 — 다시 up 하면 데이터가 남아 있다)
+docker compose --profile app down -v    # 로그·DB 까지 삭제하고 처음부터
+```
+
+> **실제 LLM(OpenAI·Anthropic 키)으로 바꾸려면** — compose 를 고칠 필요 없이 연결
+> 하나만 새로 만들면 된다. provider·model·base_url 조합표와 주의점은
+> `infra/README.md` 의 "실제 LLM 으로 바꾸기" 절에 있다.
+
+---
+
 ## 디렉터리 구조
 
 ```
 aila/
 ├── README.md
 ├── .gitignore
-├── docker-compose.yml            # Phase 1 인프라 트랙이 만든다 (아직 없음)
-├── infra/                        # Loki·Alloy·Grafana·demo-api 설정, 장애 시나리오
-│   └── README.md
+├── docker-compose.yml            # 데모 스택 전체 (profile "app" 에 backend·frontend)
+├── scripts/
+│   └── e2e_demo.py               # 전 경로 E2E — 마스킹·전송 페이로드 감사 포함
+├── infra/                        # Loki·Alloy·Grafana·demo-api·llm-mock, 장애 시나리오
+│   ├── README.md
+│   └── llm-mock/                 # OpenAI 호환 스텁 + /debug/last-request (감사 지점)
 ├── frontend/                     # React + TypeScript + Vite
 │   └── README.md
 └── backend/

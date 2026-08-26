@@ -2,8 +2,8 @@
 #
 # 소유: Phase 1 — 인프라 트랙 (이 파일과 infra/** 만 인프라 트랙이 소유한다)
 #
-# 기본 프로필(프로필 없음)로 뜨는 것: postgres, loki, alloy, grafana, demo-api
-#   → 이미지 빌드는 demo-api 하나뿐이라 backend/frontend 소스 없이도 전부 기동된다.
+# 기본 프로필(프로필 없음)로 뜨는 것: postgres, loki, alloy, grafana, demo-api, llm-mock
+#   → 이미지 빌드는 demo-api·llm-mock 두 개뿐이라 backend/frontend 소스 없이도 전부 기동된다.
 # 선택 프로필 "app": backend, frontend
 #   → `docker compose --profile app up -d`
 #
@@ -161,6 +161,38 @@ services:
     logging: *default-logging
     networks: [aila]
 
+  # ---------------------------------------------------------------- llm-mock
+  # OpenAI 호환 /v1/chat/completions 스텁. 외부 호출 없이 분석 플로우를 끝까지 돌리고,
+  # **받은 요청 본문을 GET /debug/last-request 로 되돌려준다** — 설계 문서가 요구하는
+  # "LLM 요청 페이로드에 원문 토큰이 없음을 단언하는 자동 테스트"의 관측 지점이다.
+  # 진짜 프로바이더는 보낸 요청을 되돌려주지 않으므로 이 감사는 여기서만 가능하다.
+  #
+  # Alloy 수집 대상이 아니다 (aila.logs 라벨 없음) — 프롬프트가 Loki 에 들어가면
+  # 마스킹 감사의 의미가 없어진다.
+  llm-mock:
+    build:
+      context: ./infra/llm-mock
+      dockerfile: Dockerfile
+    image: aila/llm-mock:local
+    container_name: aila-llm-mock
+    restart: unless-stopped
+    environment:
+      LLM_MOCK_MODEL: ${LLM_MOCK_MODEL:-llm-mock-1}
+      # 보관하는 최근 요청 수 (메모리에만 있다)
+      LLM_MOCK_HISTORY: ${LLM_MOCK_HISTORY:-50}
+      # 응답 지연(ms). 프런트 로딩 상태를 눈으로 볼 때 올린다.
+      LLM_MOCK_LATENCY_MS: ${LLM_MOCK_LATENCY_MS:-0}
+    ports:
+      - "${LLM_MOCK_PORT:-8090}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    networks: [aila]
+
   # ----------------------------------------------------- backend (profile: app)
   # Phase 1 개발 편의용. Dockerfile 은 infra 트랙이 소유하므로 infra/ 에 둔다.
   backend:
@@ -174,8 +206,14 @@ services:
     environment:
       AILA_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aila}:${POSTGRES_PASSWORD:-aila}@postgres:5432/${POSTGRES_DB:-aila}
       # Fernet 키. 없으면 앱은 뜨지만 연결 secret 암복호화 시점에 실패한다.
-      # 생성: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      AILA_ENCRYPTION_KEY: ${AILA_ENCRYPTION_KEY:-}
+      #
+      # 기본값은 **저장소에 그대로 적힌 데모용 키**다. 이게 없으면 `compose up` 만으로는
+      # 연결 등록이 실패해서 "Compose 만으로 데모를 재현한다"는 기준이 깨진다.
+      # 로컬·데모 전용이라 감수하는 선택이고, 데모 밖으로 나가는 순간 반드시 바꾼다.
+      #   생성: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      #   덮어쓰기: 저장소 루트 .env 에 AILA_ENCRYPTION_KEY=... (커밋 금지)
+      # 키를 바꾸면 기존에 저장된 secret 은 복호화되지 않는다 (연결을 다시 등록한다).
+      AILA_ENCRYPTION_KEY: ${AILA_ENCRYPTION_KEY:-XuVO59h7hgJA3l_r9vExg89OHQTxg1GeeFjSKvzCUEk=}
       AILA_ENVIRONMENT: local
       AILA_CORS_ORIGINS: http://localhost:5173,http://localhost:3000
       AILA_MAX_QUERY_RANGE_MINUTES: "1440"
@@ -186,6 +224,8 @@ services:
       postgres:
         condition: service_healthy
       loki:
+        condition: service_started
+      llm-mock:
         condition: service_started
     logging: *default-logging
     networks: [aila]
@@ -201,7 +241,14 @@ services:
     container_name: aila-frontend
     restart: unless-stopped
     environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      # [주의] 컨테이너 안에서 localhost 는 frontend 자신이다. Vite dev 서버의 /api
+      # 프록시 대상(vite.config.ts 의 AILA_BACKEND_ORIGIN)을 서비스명으로 바꿔야
+      # 브라우저 → frontend:5173/api → backend:8000/api 로 이어진다.
+      AILA_BACKEND_ORIGIN: ${AILA_BACKEND_ORIGIN:-http://backend:8000}
+      # 라이브 모드. true 면 fixture 만 보고 백엔드에 붙지 않는다.
+      VITE_USE_MOCK: ${VITE_USE_MOCK:-false}
+      # 빈 값 = 같은 오리진의 /api (위 프록시를 탄다). CORS 설정에 의존하지 않는다.
+      VITE_API_BASE: ${VITE_API_BASE:-}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     depends_on:
