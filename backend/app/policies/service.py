@@ -53,7 +53,7 @@ from app.schemas.logrecord import FetchWarning, LogRecord, TimeRange
 
 #: 그룹당 대표 로그 수의 절대 상한. 프롬프트에 들어가는 양을 정책이 임의로 키우지 못하게 한다
 #: (설계: "마스킹된 대표 로그 최대 3 개" — 여유를 두되 무한대는 두지 않는다).
-MAX_SAMPLES_PER_GROUP_CAP = 20
+MAX_SAMPLES_PER_GROUP_CAP = get_settings().max_samples_per_group_cap
 
 #: `query_runs.warnings` 에 실리는 경고 코드. 프런트가 문자열이 아니라 코드로 분기한다.
 WARN_RANGE_CLAMPED = "range_clamped"

@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # (BackgroundTasks 는 프로세스 재시작 시 진행 중 작업을 잃는다)
     analysis_job_stale_seconds: int = 900
 
+    # 프롬프트에 싣는 마스킹된 대표 로그 수의 상한 (설계: "마스킹된 대표 로그 최대 3 개").
+    prompt_max_samples: int = 3
+    # 그룹당 대표 로그 수의 절대 상한. 정책이 프롬프트에 들어갈 양을 임의로 키우지 못하게 한다.
+    max_samples_per_group_cap: int = 20
+
     # --- 보존 ---
     # error_samples 기본 보존 일수 (app_settings 에 행이 없을 때).
     default_sample_retention_days: int = 30

@@ -352,22 +352,6 @@ def test_all_design_doc_routes_exist(api: FastAPI) -> None:
     assert not missing, f"누락된 라우트: {sorted(missing)}"
 
 
-def test_stub_handlers_return_501(client: TestClient) -> None:
-    """**아직 구현되지 않은** 핸들러는 501 을 준다 (DB 접속 없이).
-
-    Phase 진행에 따라 오케스트레이터가 케이스를 줄인다 — 구현된 라우트는
-    여기서 빼고 각 트랙의 자체 테스트가 동작을 검증한다.
-    (Phase 1 완료: policies / dashboard / error-groups / loki-connections 제외)
-    """
-    cases = [
-        client.get("/api/usage"),
-        client.get("/api/analysis-jobs/1"),
-        client.post("/api/error-groups/1/analysis-jobs", json={}),
-    ]
-    for response in cases:
-        assert response.status_code == 501, (response.request.url, response.text)
-
-
 def test_request_validation_still_applies(client: TestClient) -> None:
     """스텁이어도 요청 검증은 계약대로 동작한다 (422)."""
     response = client.post("/api/llm-connections", json={"name": "x"})

@@ -365,6 +365,32 @@ class AnalysisJobCreateResponse(AnalysisJobRead):
     reused: bool = False
 
 
+class AnalysisJobListItem(AnalysisJobSummary):
+    """분석 작업 목록 항목.
+
+    목록은 조회 회차와 무관하게 보여야 하므로 그룹 메타데이터를 값으로 함께 싣는다
+    (`error_groups` 는 조회 1 회 범위이고, 추적 기준은 `fingerprint` 다).
+    """
+
+    error_group_id: int
+    fingerprint: str
+    llm_connection_id: int | None = None
+    service: str | None = None
+    environment: str | None = None
+    error_type: str | None = None
+    normalized_message: str | None = None
+    error_message: str | None = None
+
+
+class AnalysisJobListResponse(BaseModel):
+    """최신순 페이지네이션 목록 (프런트 폴링·이력 화면용)."""
+
+    total: int = 0
+    limit: int = 20
+    offset: int = 0
+    items: list[AnalysisJobListItem] = Field(default_factory=list)
+
+
 # ================================================================== dashboard
 
 
@@ -416,6 +442,8 @@ class UsageResponse(BaseModel):
 __all__ = [
     "AnalysisJobCreateRequest",
     "AnalysisJobCreateResponse",
+    "AnalysisJobListItem",
+    "AnalysisJobListResponse",
     "AnalysisJobRead",
     "AnalysisJobSummary",
     "ConnectionTestResponse",
