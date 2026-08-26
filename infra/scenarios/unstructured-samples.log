@@ -1,0 +1,8 @@
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:40720 - "GET /health HTTP/1.1" 200 OK
+  at com.example.payment.SettlementJob.run(SettlementJob.java:132)
+{"timestamp": "2026-08-26 03:22:06", "service": "payment-api", "level": "ERROR", "message": "truncated by log driver buffer at 16k
+2026-08-26 03:22:12 WARN  [payment-api] connection pool usage 82% (release=v1.4.2) -- legacy formatter, not JSON

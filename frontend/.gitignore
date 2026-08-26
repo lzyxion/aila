@@ -1,0 +1,5 @@
+# 루트 .gitignore 가 node_modules/ · frontend/dist/ · .env.* 를 이미 덮는다.
+# 여기에는 프론트 전용 산출물만 둔다.
+.smoke/
+.vite/
+*.tsbuildinfo

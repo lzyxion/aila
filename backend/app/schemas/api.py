@@ -52,7 +52,9 @@ class LokiConnectionBase(BaseModel):
     source_type: SourceType = SourceType.LOKI
     base_url: str = Field(max_length=512)
     auth_type: AuthType = AuthType.NONE
-    #: 소스 라벨명 -> 표준 필드명 매핑. 예: {"app": "service", "env": "environment"}
+    #: 표준 필드명 -> 소스 라벨명 매핑 (권장, models.py 와 동일 방향).
+    #: 예: {"service": "app", "environment": "env"}
+    #: 어댑터(resolve_label_mapping)는 반대 방향도 수용하지만 새 데이터는 이 방향으로 쓴다.
     label_mapping: dict[str, str] = Field(default_factory=dict)
     active: bool = True
 

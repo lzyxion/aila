@@ -1,0 +1,219 @@
+{
+  "uid": "aila-ingest",
+  "title": "AILA — Loki 유입 검증",
+  "tags": ["aila", "ingest"],
+  "timezone": "browser",
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "service",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "aila-loki" },
+        "query": "label_values(service)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "environment",
+        "label": "environment",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "aila-loki" },
+        "query": "label_values(environment)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "이 대시보드의 용도",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "제품 UI 가 아니다. **Loki 에 로그가 실제로 들어왔는지** 확인하는 용도다.\n\n아래 패널이 전부 비어 있으면 수집 실패(Alloy/demo-api)이고, 데이터는 있는데 AILA 백엔드 조회가 비면 조회 버그다. 이 구분이 이 대시보드의 존재 이유다.\n\n`__error__` 패널에 라인이 보이는 것은 **정상**이다 — 비정형 로그가 `| json` 을 통과하지 못하는 상황을 의도적으로 재현하고 있다."
+      }
+    },
+    {
+      "type": "stat",
+      "title": "최근 5 분 유입 라인 수 (전체)",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "sum(count_over_time({service=~\".+\"}[5m]))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "최근 5 분 ERROR 라인 수",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "sum(count_over_time({level=\"ERROR\"}[5m]))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "최근 5 분 | json 파싱 실패 라인",
+      "description": "0 이 아닌 것이 정상이다. 비정형 로그 재현 시나리오가 살아 있다는 뜻.",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "sum(count_over_time({service=~\".+\"} | json | __error__=\"JSONParserErr\" [5m]))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "활성 release 라벨",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "count(count by (release) (count_over_time({service=~\".+\"}[5m])))"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "service / level 별 발생 추이 (count_over_time)",
+      "description": "백엔드도 라인을 세지 않고 이 방식(metric 쿼리)으로 건수를 구한다.",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, level) (count_over_time({service=~\"$service\", environment=~\"$environment\"}[1m]))",
+          "legendFormat": "{{service}} / {{level}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "release 별 ERROR 추이 (배포 직후 오류 증가 시나리오)",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (release) (count_over_time({level=\"ERROR\", environment=~\"$environment\"}[1m]))",
+          "legendFormat": "{{release}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "| json 파싱 실패 라인 (비정형 로그)",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=~\"$service\", environment=~\"$environment\"} | json | __error__=\"JSONParserErr\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "type": "logs",
+      "title": "ERROR 로그 원문",
+      "datasource": { "type": "loki", "uid": "aila-loki" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=~\"$service\", environment=~\"$environment\"} | json | level=\"ERROR\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      }
+    }
+  ]
+}

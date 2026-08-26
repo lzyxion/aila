@@ -18,7 +18,31 @@ Phase 1 담당 트랙: **그룹화·마스킹** (`app/grouping` + `app/masking`)
 - 정규화 규칙 버전을 `error_groups.normalization_rule_version` 에 저장한다.
 
 테스트는 정규화 레코드(`LogRecord`) fixture 기준으로 작성한다.
+
+구현은 `app.grouping.service` 에 있다. 다른 트랙은 아래 이름들만 import 한다.
+
+    from app.grouping.service import (
+        NORMALIZATION_RULE_VERSION, GroupedError, GroupedSample, group_records,
+    )
 """
 
-#: 정규화 규칙 버전. 규칙을 고치면 반드시 올린다.
-NORMALIZATION_RULE_VERSION = "v1"
+from app.grouping.fingerprint import compute_fingerprint
+from app.grouping.normalize import normalize
+from app.grouping.parsers import ParsedLog, parse_line
+from app.grouping.service import (
+    NORMALIZATION_RULE_VERSION,
+    GroupedError,
+    GroupedSample,
+    group_records,
+)
+
+__all__ = [
+    "NORMALIZATION_RULE_VERSION",
+    "GroupedError",
+    "GroupedSample",
+    "ParsedLog",
+    "compute_fingerprint",
+    "group_records",
+    "normalize",
+    "parse_line",
+]

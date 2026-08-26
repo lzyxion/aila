@@ -1,0 +1,37 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans:
+    'Pretendard', 'Pretendard Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  --font-mono:
+    'JetBrains Mono', 'Cascadia Code', ui-monospace, SFMono-Regular, 'D2Coding', Consolas,
+    monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    @apply bg-slate-100 text-slate-900 antialiased;
+    font-family: var(--font-sans);
+  }
+
+  /* 로그 라인·LogQL 은 폭이 넓다. 가로 스크롤은 각자의 컨테이너 안에서만 일어나게 한다. */
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  *:focus-visible {
+    @apply outline-2 outline-offset-2 outline-sky-600;
+  }
+}
+
+@layer components {
+  .aila-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-slate-400) transparent;
+  }
+}

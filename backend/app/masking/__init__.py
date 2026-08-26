@@ -18,7 +18,26 @@ Phase 1 담당 트랙: **그룹화·마스킹** (`app/grouping` + `app/masking`)
 - 이 모듈에서 되돌릴 수 없는 유일한 실패가 나온다. 우선순위 다툼이 생기면 마스킹이 먼저다.
 
 필수 자동 테스트: **LLM 요청 페이로드에 원문 토큰이 없음을 단언하는 테스트.**
+
+구현은 `app.masking.service` 에 있다. 다른 트랙은 아래 두 이름만 import 한다.
+
+    from app.masking.service import MASKING_RULE_VERSION, mask
 """
 
-#: 마스킹 규칙 버전. 규칙을 고치면 반드시 올린다.
-MASKING_RULE_VERSION = "v1"
+from app.masking.service import (
+    MASKING_RULE_VERSION,
+    MaskingPatternError,
+    compile_extra_patterns,
+    contains_placeholder,
+    mask,
+    mask_mapping,
+)
+
+__all__ = [
+    "MASKING_RULE_VERSION",
+    "MaskingPatternError",
+    "compile_extra_patterns",
+    "contains_placeholder",
+    "mask",
+    "mask_mapping",
+]

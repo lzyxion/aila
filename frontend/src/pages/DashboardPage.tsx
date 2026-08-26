@@ -1,0 +1,281 @@
+import { useMemo, useState } from 'react';
+import { Link } from 'react-router';
+
+import { useDashboardOverview, usePolicies, useRunPolicy } from '../api/queries';
+import type { DashboardOverviewParams, FetchWarning } from '../api/types';
+import { ErrorTrendChart, ServiceBarChart } from '../components/chartsLazy';
+import { AnalysisStatusBadge, SeverityBadge } from '../components/StatusBadges';
+import {
+  Button,
+  Card,
+  EmptyBlock,
+  ErrorBlock,
+  Field,
+  LoadingBlock,
+  Notice,
+  PageHeader,
+  Select,
+  Stat,
+  TableWrap,
+  Td,
+  Th,
+} from '../components/ui';
+import { formatDateTime, formatNumber, formatRelative, truncate, warningCodeLabel } from '../lib/format';
+
+/** 기간 프리셋. 서버가 `max_query_range_minutes` 로 상한을 강제하므로 UI 는 편의일 뿐이다. */
+const RANGES = [
+  { minutes: 60, label: '최근 1시간', step: 300 },
+  { minutes: 6 * 60, label: '최근 6시간', step: 900 },
+  { minutes: 24 * 60, label: '최근 24시간', step: 3600 },
+  { minutes: 3 * 24 * 60, label: '최근 3일', step: 3600 },
+];
+
+export function DashboardPage() {
+  const [rangeIndex, setRangeIndex] = useState(0);
+  const [policyId, setPolicyId] = useState<number | null>(null);
+
+  const policiesQuery = usePolicies();
+  const runPolicy = useRunPolicy();
+
+  const range = RANGES[rangeIndex];
+
+  // 파라미터를 rangeIndex/policyId 에서만 파생시켜야 캐시 키가 매 렌더 바뀌지 않는다.
+  const params = useMemo<DashboardOverviewParams>(() => {
+    const end = new Date();
+    const start = new Date(end.getTime() - range.minutes * 60_000);
+    return {
+      ...(policyId !== null ? { policy_id: policyId } : {}),
+      range_start: start.toISOString(),
+      range_end: end.toISOString(),
+      step_seconds: range.step,
+      top: 10,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeIndex, policyId]);
+
+  const overview = useDashboardOverview(params);
+
+  const activePolicies = (policiesQuery.data ?? []).filter((policy) => policy.active);
+  const selectedPolicy = activePolicies.find((policy) => policy.id === policyId) ?? null;
+
+  return (
+    <div>
+      <PageHeader
+        title="대시보드"
+        description={
+          <>
+            건수와 추이는 <code className="rounded bg-slate-200 px-1">count_over_time</code> metric
+            쿼리 결과입니다 — 로그 라인을 센 값이 아닙니다. 분석 상태는 그룹 id 가 아니라{' '}
+            <strong>fingerprint 기준</strong>이라 이전 조회에서 분석한 오류도 "분석 완료"로 보입니다.
+          </>
+        }
+        actions={
+          <Button
+            variant="primary"
+            disabled={!selectedPolicy || runPolicy.isPending}
+            onClick={() => {
+              if (!selectedPolicy) return;
+              runPolicy.mutate({ id: selectedPolicy.id, payload: {} });
+            }}
+          >
+            {runPolicy.isPending ? '조회 중…' : '정책 실행'}
+          </Button>
+        }
+      />
+
+      <Card className="mb-6">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="기간">
+            <Select
+              value={rangeIndex}
+              onChange={(event) => setRangeIndex(Number(event.target.value))}
+            >
+              {RANGES.map((item, index) => (
+                <option key={item.label} value={index}>
+                  {item.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field
+            label="정책"
+            hint={
+              selectedPolicy
+                ? `상한 ${formatNumber(selectedPolicy.max_lines)} 라인 · 대표 로그 ${selectedPolicy.max_samples_per_group} 개`
+                : '선택하지 않으면 전체 조회 결과를 보여줍니다.'
+            }
+          >
+            <Select
+              value={policyId ?? ''}
+              onChange={(event) =>
+                setPolicyId(event.target.value === '' ? null : Number(event.target.value))
+              }
+            >
+              <option value="">전체</option>
+              {activePolicies.map((policy) => (
+                <option key={policy.id} value={policy.id}>
+                  {policy.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <div className="sm:col-span-2 lg:col-span-2">
+            {selectedPolicy && (
+              <Field label="LogQL">
+                <pre className="aila-scroll overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs whitespace-pre text-slate-100">
+                  {selectedPolicy.logql}
+                </pre>
+              </Field>
+            )}
+          </div>
+        </div>
+
+        {runPolicy.isError && (
+          <div className="mt-4">
+            <ErrorBlock error={runPolicy.error} />
+          </div>
+        )}
+        {runPolicy.isSuccess && (
+          <div className="mt-4">
+            <Notice tone="success" title={`조회 #${runPolicy.data.id} 완료`}>
+              {formatNumber(runPolicy.data.fetched_count)} 라인 조회 ·{' '}
+              {formatNumber(runPolicy.data.dropped_count)} 라인 제외 ·{' '}
+              {runPolicy.data.group_count} 개 그룹
+            </Notice>
+          </div>
+        )}
+      </Card>
+
+      {overview.isPending && <LoadingBlock />}
+      {overview.isError && <ErrorBlock error={overview.error} />}
+
+      {overview.data && (
+        <div className="space-y-6">
+          <WarningList warnings={overview.data.warnings} />
+
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat
+              label="총 오류 건수 (metric)"
+              value={formatNumber(overview.data.total_errors)}
+              sub={range.label}
+              tone="accent"
+            />
+            <Stat
+              label="오류 그룹"
+              value={formatNumber(overview.data.top_groups.length)}
+              sub="상위 그룹만 표시"
+            />
+            <Stat
+              label="영향 서비스"
+              value={formatNumber(overview.data.by_service.length)}
+              sub="라벨 기준"
+            />
+            <Stat
+              label="미분석 그룹"
+              value={formatNumber(
+                overview.data.top_groups.filter((group) => !group.analysis_status).length,
+              )}
+              sub="fingerprint 기준"
+            />
+          </div>
+
+          <Card
+            title="시간대별 오류 건수"
+            description={`${formatDateTime(overview.data.range_start)} ~ ${formatDateTime(
+              overview.data.range_end,
+            )} · ${overview.data.step_seconds}초 간격 · metric 쿼리 기준`}
+          >
+            <ErrorTrendChart points={overview.data.series} />
+          </Card>
+
+          <div className="grid gap-6 lg:grid-cols-5">
+            <Card
+              title="서비스별 오류 건수"
+              description="라인 수가 아니라 metric 집계입니다."
+              className="lg:col-span-2"
+            >
+              <ServiceBarChart data={overview.data.by_service} />
+            </Card>
+
+            <Card
+              title="상위 오류 그룹"
+              description="분석 상태는 fingerprint 기준 — 이미 분석된 오류를 중복 요청(=중복 과금)하지 않기 위해서입니다."
+              className="lg:col-span-3"
+            >
+              {overview.data.top_groups.length === 0 ? (
+                <EmptyBlock>이 기간에 묶인 오류 그룹이 없습니다.</EmptyBlock>
+              ) : (
+                <TableWrap minWidth="36rem">
+                  <thead>
+                    <tr>
+                      <Th>메시지 · 서비스</Th>
+                      <Th align="right" className="whitespace-nowrap">
+                        발생 수
+                      </Th>
+                      <Th className="whitespace-nowrap">마지막 발생</Th>
+                      <Th className="whitespace-nowrap">분석 상태</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overview.data.top_groups.map((group) => (
+                      <tr key={group.id} className="hover:bg-slate-50">
+                        <Td>
+                          <Link
+                            to={`/error-groups/${group.id}`}
+                            className="font-medium text-sky-800 hover:underline"
+                            title={group.normalized_message}
+                          >
+                            {truncate(group.normalized_message, 90)}
+                          </Link>
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            {group.service ?? '(서비스 라벨 없음)'}
+                            {group.environment ? ` · ${group.environment}` : ''}
+                            {group.error_type ? ` · ${group.error_type}` : ''}
+                          </p>
+                        </Td>
+                        <Td align="right" className="font-semibold text-slate-900">
+                          {formatNumber(group.count)}
+                        </Td>
+                        <Td className="whitespace-nowrap">
+                          <span title={formatDateTime(group.last_seen)}>
+                            {formatRelative(group.last_seen)}
+                          </span>
+                        </Td>
+                        <Td className="whitespace-nowrap">
+                          <div className="flex flex-col items-start gap-1">
+                            <AnalysisStatusBadge status={group.analysis_status} />
+                            {group.latest_severity && (
+                              <SeverityBadge severity={group.latest_severity} />
+                            )}
+                          </div>
+                        </Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </TableWrap>
+              )}
+            </Card>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function WarningList({ warnings }: { warnings: FetchWarning[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Notice tone="warning" title="조회 경고">
+      <ul className="mt-1 space-y-1">
+        {warnings.map((warning, index) => (
+          <li key={`${warning.code}-${index}`}>
+            <strong>{warningCodeLabel(warning.code)}</strong>
+            {warning.count != null && ` (${formatNumber(warning.count)}건)`} — {warning.message}
+          </li>
+        ))}
+      </ul>
+    </Notice>
+  );
+}

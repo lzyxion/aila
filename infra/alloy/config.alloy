@@ -1,0 +1,146 @@
+// AILA 데모 로그 수집 파이프라인
+//
+//   docker discovery → (aila.logs=true 컨테이너만) → stdout/stderr 읽기
+//     → JSON 파싱 → service/environment/level/release 라벨 → Loki push
+//
+// 설계 원칙 두 가지가 여기 반영되어 있다.
+//
+//  1) 라벨은 낮은 카디널리티만 올린다. request_id 는 **라벨이 아니라**
+//     structured metadata 로 붙인다. 라벨로 올리면 스트림이 요청마다 갈라진다.
+//
+//  2) JSON 파싱에 실패한 라인도 **버리지 않는다.** stage.json 이 실패하면 그 엔트리는
+//     추출값 없이 다음 스테이지를 통과하므로, 컨테이너 라벨에서 온 service/environment
+//     만 붙은 채 Loki 에 들어간다. 그 결과 `| json | level="ERROR"` 같은 쿼리에서
+//     조용히 사라지는 라인이 실제로 생긴다 — 설계 문서가 경고한 그 상황을
+//     데모 환경에서 재현하기 위한 의도적 선택이다.
+//     (`{service="payment-api"} | json | __error__="JSONParserErr"` 로 확인할 수 있다)
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------- discovery
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "aila_targets" {
+  targets = discovery.docker.containers.targets
+
+  // 수집 대상 선정: compose 에서 `aila.logs: "true"` 라벨이 붙은 컨테이너만.
+  // (Loki·Grafana·Postgres 자신의 로그까지 넣으면 데모 데이터가 오염된다)
+  rule {
+    action        = "keep"
+    source_labels = ["__meta_docker_container_label_aila_logs"]
+    regex         = "true"
+  }
+
+  // fallback 라벨. 비정형(JSON 아님) 라인은 이 값만 갖는다.
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_aila_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_aila_environment"]
+    target_label  = "environment"
+  }
+
+  // /aila-demo-api → aila-demo-api
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+// ------------------------------------------------------------------ source
+
+loki.source.docker "aila" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.aila_targets.output
+  forward_to       = [loki.process.aila.receiver]
+  refresh_interval = "5s"
+}
+
+// ----------------------------------------------------------------- process
+
+loki.process "aila" {
+  forward_to = [loki.write.default.receiver]
+
+  // demo-api 의 구조화 로그 스키마.
+  // 비정형 라인이면 이 스테이지가 실패하고 extracted 는 비어 있는 채로 넘어간다.
+  stage.json {
+    expressions = {
+      ts          = "timestamp",
+      level       = "level",
+      service     = "service",
+      environment = "environment",
+      release     = "release",
+      request_id  = "request_id",
+      exception   = "exception",
+    }
+  }
+
+  // 로그 자체의 시각을 쓴다. 실패하면 docker 가 준 수집 시각을 그대로 둔다.
+  stage.timestamp {
+    source            = "ts"
+    format            = "RFC3339Nano"
+    action_on_failure = "skip"
+  }
+
+  // 추출값이 없으면 해당 라벨은 설정되지 않는다.
+  // JSON 라인은 여기서 컨테이너 라벨 fallback(service/environment)을 덮어쓴다.
+  // → 한 컨테이너가 payment-api / order-api / auth-api 스트림을 동시에 만들 수 있다.
+  stage.labels {
+    values = {
+      level       = "",
+      service     = "",
+      environment = "",
+      release     = "",
+    }
+  }
+
+  // 카디널리티가 높은 값은 라벨이 아니라 structured metadata 로.
+  // (Loki 3.x + schema v13 + allow_structured_metadata 필요)
+  stage.structured_metadata {
+    values = {
+      request_id = "",
+      exception  = "",
+    }
+  }
+
+  // 안전망: 위에서 정한 것 외의 라벨은 스트림으로 올라가지 않게 잘라낸다.
+  // (demo-api 가 실수로 새 JSON 필드를 라벨화해도 카디널리티가 터지지 않는다)
+  stage.label_keep {
+    values = ["service", "environment", "level", "release", "container", "stream"]
+  }
+}
+
+// ------------------------------------------------------------------- write
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+
+    // 데모 스택이라 재시도는 짧게. 오래 매달려 있으면 Alloy 가 뒤처진다.
+    max_backoff_period = "10s"
+    max_backoff_retries = 5
+  }
+
+  external_labels = {
+    collector = "alloy",
+  }
+}

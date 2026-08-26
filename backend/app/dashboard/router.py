@@ -1,9 +1,10 @@
-"""`/api/dashboard/overview` 라우터 (스켈레톤).
+"""`/api/dashboard/overview` 라우터.
 
 Phase 1 담당 트랙: **정책 API**
 
 계약상 제약: 건수·추이는 로그 라인을 세지 않고 `count_over_time` metric 쿼리로 구한다.
 라인 조회는 상한에 걸려 오류 폭증 시 실제보다 적게 나온다.
+상위 그룹은 저장된 그룹화 결과(DB)에서 집계하고, 분석 상태는 fingerprint 기준이다.
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.dashboard import service
 from app.db import get_db
 from app.schemas.api import DashboardOverviewResponse
-from app.stub import not_implemented
 
 TRACK = "정책 API"
 
@@ -32,4 +33,12 @@ def get_overview(
     top: int = Query(default=10, gt=0, le=100),
     db: Session = Depends(get_db),
 ) -> DashboardOverviewResponse:
-    not_implemented(TRACK)
+    return service.get_overview(
+        db,
+        policy_id=policy_id,
+        query_run_id=query_run_id,
+        range_start=range_start,
+        range_end=range_end,
+        step_seconds=step_seconds,
+        top=top,
+    )

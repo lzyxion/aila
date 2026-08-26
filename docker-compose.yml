@@ -1,0 +1,220 @@
+# AILA 로컬 데모 스택
+#
+# 소유: Phase 1 — 인프라 트랙 (이 파일과 infra/** 만 인프라 트랙이 소유한다)
+#
+# 기본 프로필(프로필 없음)로 뜨는 것: postgres, loki, alloy, grafana, demo-api
+#   → 이미지 빌드는 demo-api 하나뿐이라 backend/frontend 소스 없이도 전부 기동된다.
+# 선택 프로필 "app": backend, frontend
+#   → `docker compose --profile app up -d`
+#
+# grafana 는 제품 UI 가 아니라 **Loki 에 로그가 제대로 들어갔는지 눈으로 확인하는 용도**다.
+#
+# 이미지 태그는 환경변수로 덮어쓸 수 있다 (레지스트리에서 태그가 사라졌을 때 대비).
+#   예) LOKI_IMAGE=grafana/loki:3.4.2 docker compose up -d
+
+name: aila
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------- postgres
+  # 백엔드 메타데이터(정책·분석 작업·사용량) 저장소.
+  # 백엔드는 AILA_DATABASE_URL 로 붙는다. 호스트에서 alembic 을 돌릴 수 있게 5432 를 연다.
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    container_name: aila-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aila}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aila}
+      POSTGRES_DB: ${POSTGRES_DB:-aila}
+      # 컨테이너 로그를 stdout 으로 (Alloy 수집 대상은 아니지만 디버깅에 필요)
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aila} -d ${POSTGRES_DB:-aila}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+    networks: [aila]
+
+  # -------------------------------------------------------------------- loki
+  # 단일 바이너리(all-in-one) 모드 + filesystem 저장. 백엔드는 이걸 읽기만 한다.
+  loki:
+    image: ${LOKI_IMAGE:-grafana/loki:3.5.0}
+    container_name: aila-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      # /ready 는 준비 전 503 + "Ingester not ready" 를 돌려준다.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3100/ready | grep -q 'ready'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    logging: *default-logging
+    networks: [aila]
+
+  # ------------------------------------------------------------------- alloy
+  # docker discovery 로 `aila.logs=true` 라벨이 붙은 컨테이너의 stdout 을 읽어
+  # service / environment / level / release 라벨을 붙여 Loki 에 push 한다.
+  alloy:
+    image: ${ALLOY_IMAGE:-grafana/alloy:v1.10.0}
+    container_name: aila-alloy
+    restart: unless-stopped
+    # docker.sock 읽기에 root 가 필요하다 (이미지 기본 사용자가 비특권인 버전 대비).
+    user: root
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    ports:
+      - "${ALLOY_PORT:-12345}:12345"
+    volumes:
+      - ./infra/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+      # Windows/Docker Desktop(WSL2 백엔드)에서도 이 경로가 그대로 동작한다.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    logging: *default-logging
+    networks: [aila]
+
+  # ----------------------------------------------------------------- grafana
+  # Loki 유입 검증 전용. 익명 Admin 이므로 로컬 밖에 노출하지 말 것.
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:12.0.2}
+    container_name: aila-grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # 프로비저닝한 대시보드를 시작 화면으로
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/aila-ingest.json
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+    logging: *default-logging
+    networks: [aila]
+
+  # ---------------------------------------------------------------- demo-api
+  # 의도적으로 6 종 장애 시나리오를 재현하는 FastAPI 앱. 구조화 JSON 로그를 stdout 으로 낸다.
+  # aila.* 컨테이너 라벨이 Alloy 수집 대상 선정과 fallback 라벨 값이 된다.
+  # (JSON 라인은 본문의 service/environment 가 이 fallback 을 덮어쓴다)
+  demo-api:
+    build:
+      context: ./infra/demo-api
+      dockerfile: Dockerfile
+    image: aila/demo-api:local
+    container_name: aila-demo-api
+    restart: unless-stopped
+    environment:
+      DEMO_SERVICE_NAME: ${DEMO_SERVICE_NAME:-payment-api}
+      DEMO_ENVIRONMENT: ${DEMO_ENVIRONMENT:-staging}
+      DEMO_RELEASE: ${DEMO_RELEASE:-v1.4.2}
+      # 백그라운드 루프로 자동 트래픽을 만든다. 끄려면 false.
+      DEMO_AUTO_TRAFFIC: ${DEMO_AUTO_TRAFFIC:-true}
+      DEMO_INTERVAL_SECONDS: ${DEMO_INTERVAL_SECONDS:-5}
+      # 루프 1 회당 만드는 로그 이벤트 수
+      DEMO_EVENTS_PER_TICK: ${DEMO_EVENTS_PER_TICK:-3}
+    labels:
+      # Alloy discovery 용. 값이 바뀌면 infra/alloy/config.alloy 도 같이 고쳐야 한다.
+      aila.logs: "true"
+      aila.service: ${DEMO_SERVICE_NAME:-payment-api}
+      aila.environment: ${DEMO_ENVIRONMENT:-staging}
+    ports:
+      - "${DEMO_API_PORT:-8081}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    networks: [aila]
+
+  # ----------------------------------------------------- backend (profile: app)
+  # Phase 1 개발 편의용. Dockerfile 은 infra 트랙이 소유하므로 infra/ 에 둔다.
+  backend:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: ../infra/backend.Dockerfile
+    image: aila/backend:local
+    container_name: aila-backend
+    restart: unless-stopped
+    environment:
+      AILA_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aila}:${POSTGRES_PASSWORD:-aila}@postgres:5432/${POSTGRES_DB:-aila}
+      # Fernet 키. 없으면 앱은 뜨지만 연결 secret 암복호화 시점에 실패한다.
+      # 생성: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      AILA_ENCRYPTION_KEY: ${AILA_ENCRYPTION_KEY:-}
+      AILA_ENVIRONMENT: local
+      AILA_CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+      AILA_MAX_QUERY_RANGE_MINUTES: "1440"
+      AILA_MAX_LINES_PER_QUERY: "5000"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      loki:
+        condition: service_started
+    logging: *default-logging
+    networks: [aila]
+
+  # ---------------------------------------------------- frontend (profile: app)
+  # frontend/ 에 package.json 이 생긴 뒤부터 빌드된다 (Phase 1 프론트 트랙 소유).
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      dockerfile: ../infra/frontend.Dockerfile
+    image: aila/frontend:local
+    container_name: aila-frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      - backend
+    logging: *default-logging
+    networks: [aila]
+
+volumes:
+  postgres-data:
+  loki-data:
+  alloy-data:
+  grafana-data:
+
+networks:
+  aila:
+    driver: bridge

@@ -1,4 +1,4 @@
-"""`/api/query-runs/{id}/error-groups`, `/api/error-groups/{id}` 라우터 (스켈레톤).
+"""`/api/query-runs/{id}/error-groups`, `/api/error-groups/{id}` 라우터.
 
 Phase 1 담당 트랙: **정책 API**
 
@@ -15,8 +15,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.error_groups import service
 from app.schemas.api import ErrorGroupDetail, ErrorGroupListResponse
-from app.stub import not_implemented
 
 TRACK = "정책 API"
 
@@ -30,10 +30,10 @@ def list_error_groups(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> ErrorGroupListResponse:
-    not_implemented(TRACK)
+    return service.list_error_groups(db, run_id, limit=limit, offset=offset)
 
 
 @router.get("/error-groups/{group_id}", response_model=ErrorGroupDetail)
 def get_error_group(group_id: int, db: Session = Depends(get_db)) -> ErrorGroupDetail:
     """상세·마스킹된 대표 로그·발생 추이·같은 fingerprint 의 과거 분석 이력."""
-    not_implemented(TRACK)
+    return service.get_error_group(db, group_id)

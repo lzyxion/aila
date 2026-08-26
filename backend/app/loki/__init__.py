@@ -19,3 +19,8 @@ Phase 1 담당 트랙: **Loki 어댑터** (`app/loki` + `app/connections`)
 - `tail`(스트리밍)은 MVP 에서 쓰지 않는다. `query_range` 만 쓴다.
 - Loki 는 쓰기 대상이 아니다. **읽기 전용.**
 """
+
+from app.loki.factory import build_provider
+from app.loki.provider import LOKI_MAX_ENTRIES, LokiProvider
+
+__all__ = ["LOKI_MAX_ENTRIES", "LokiProvider", "build_provider"]

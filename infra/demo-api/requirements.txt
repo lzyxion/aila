@@ -1,0 +1,4 @@
+# demo-api 의존성. 백엔드(backend/pyproject.toml) 와 무관한 독립 이미지다.
+# 상한만 고정하고 하한을 느슨하게 둔다 — 데모 로그 생산자라 재현성보다 빌드 성공이 중요하다.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
