@@ -108,7 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings)
 
     app = FastAPI(
-        title="AILA — Loki 기반 AI 로그 분석기",
+        title="AILA — AI 로그 분석기",
         version=__version__,
         description=(
             "Loki 에 쌓인 오류 로그를 정책으로 조회하고, 유사 오류를 그룹으로 묶어 "

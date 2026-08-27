@@ -63,7 +63,7 @@ export function LoginPage() {
         <div className="mb-6 flex items-center justify-between gap-3">
           <div>
             <p className="text-2xl font-bold tracking-tight text-ink">AILA</p>
-            <p className="mt-0.5 text-sm text-muted">Loki 기반 AI 로그 분석기</p>
+            <p className="mt-0.5 text-sm text-muted">AI 로그 분석기</p>
           </div>
           <ThemeToggle />
         </div>

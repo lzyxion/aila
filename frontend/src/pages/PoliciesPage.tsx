@@ -346,7 +346,7 @@ function PolicyDetailCard({ policy, canEdit }: { policy: PolicyRead; canEdit: bo
       >
         <div className="space-y-4">
           <div>
-            <SectionLabel>쿼리 (LogQL)</SectionLabel>
+            <SectionLabel>쿼리</SectionLabel>
             <div className="mt-1.5">
               <LogLine>{policy.query}</LogLine>
             </div>

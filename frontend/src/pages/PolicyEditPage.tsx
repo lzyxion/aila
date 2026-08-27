@@ -56,6 +56,7 @@ import {
   Th,
 } from '../components/ui';
 import { formatIntervalMinutes, formatNumber, warningCodeLabel } from '../lib/format';
+import { queryLanguageOf } from '../lib/sources';
 
 /**
  * 자동 분석의 비용 문구 — **계약**이다.
@@ -179,6 +180,10 @@ export function PolicyEditPage() {
 
   const connectionId = form.log_source_connection_id === '' ? null : Number(form.log_source_connection_id);
   const labelsQuery = useLogSourceLabels(connectionId);
+  // 선택한 연결의 소스가 쿼리 언어를 정한다 — 라벨의 "(LogQL)" 병기는 여기서 나온다.
+  const selectedConnection = connections.find((connection) => connection.id === connectionId) ?? null;
+  const queryLanguage = queryLanguageOf(selectedConnection?.source_type);
+  const queryLabel = queryLanguage ? `쿼리 (${queryLanguage})` : '쿼리';
   const saving = createPolicy.isPending || updatePolicy.isPending;
 
   function validate(): string | null {
@@ -356,7 +361,7 @@ export function PolicyEditPage() {
                     <option value="">선택하십시오</option>
                     {connections.map((connection) => (
                       <option key={connection.id} value={connection.id}>
-                        {connection.name}
+                        {connection.name} · {connection.source_type}
                         {connection.active ? '' : ' (비활성)'}
                       </option>
                     ))}
@@ -388,7 +393,7 @@ export function PolicyEditPage() {
               </Field>
 
               <Field
-                label="쿼리 (LogQL)"
+                label={queryLabel}
                 required
                 className="sm:col-span-2"
                 hint="소스 고유 문법 그대로 저장됩니다."
@@ -543,7 +548,7 @@ export function PolicyEditPage() {
             }
           >
             <Field
-              label="분모 쿼리 (LogQL)"
+              label={queryLanguage ? `분모 쿼리 (${queryLanguage})` : '분모 쿼리'}
               hint="비워 두면 대시보드가 유입량과 비율을 계산하지 않습니다."
             >
               <Textarea

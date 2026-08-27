@@ -22,7 +22,13 @@ import {
   useTestLogSourceConnection,
   useUpdateLogSourceConnection,
 } from '../api/queries';
-import { AUTH_TYPES, type AuthType, type LogSourceConnectionRead } from '../api/types';
+import {
+  AUTH_TYPES,
+  SOURCE_TYPES,
+  type AuthType,
+  type LogSourceConnectionRead,
+  type SourceType,
+} from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
 import { AddIcon, ChevronRightIcon, LogSourceConnectionIcon, SaveIcon } from '../components/icons';
 import {
@@ -44,10 +50,13 @@ import {
   toneClass,
 } from '../components/ui';
 import { authTypeLabel, formatDateTime } from '../lib/format';
+import { sourceTypeLabel } from '../lib/sources';
 import { ConfirmButton } from './adminConfirm';
 
 interface FormState {
   name: string;
+  /** 만들 때만 고른다 — 연결의 소스 종류는 생성 후 바꿀 수 없다 (Update 스키마에 없음). */
+  source_type: SourceType;
   base_url: string;
   auth_type: AuthType;
   /** 평문 입력 전용. 비워 두면 기존 값을 유지한다 (응답에는 절대 오지 않는다). */
@@ -60,6 +69,7 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   name: '',
+  source_type: 'loki',
   base_url: '',
   auth_type: 'none',
   secret: '',
@@ -70,6 +80,7 @@ const EMPTY_FORM: FormState = {
 function toForm(connection: LogSourceConnectionRead): FormState {
   return {
     name: connection.name,
+    source_type: connection.source_type,
     base_url: connection.base_url,
     auth_type: connection.auth_type,
     secret: '',
@@ -199,7 +210,7 @@ export function LogSourceConnectionsPage() {
       createConnection.mutate(
         {
           name: form.name.trim(),
-          source_type: 'loki',
+          source_type: form.source_type,
           base_url: form.base_url.trim(),
           auth_type: form.auth_type,
           label_mapping: mapping,
@@ -344,6 +355,30 @@ export function LogSourceConnectionsPage() {
                   placeholder="local-loki"
                   onChange={(event) => setForm({ ...form, name: event.target.value })}
                 />
+              </Field>
+
+              {/*
+                소스 종류. 지금은 Loki 하나뿐이지만 선택 자리를 화면에 두는 것이 계약이다 —
+                두 번째 어댑터가 오면 이 목록(lib/sources.ts)에 한 줄 늘어나는 것으로 끝난다.
+                생성 후에는 바꿀 수 없다 (쿼리 문법·라벨 매핑이 소스에 묶이므로 Update 스키마에 없다).
+              */}
+              <Field
+                label="소스 종류"
+                hint={isEditing ? '소스 종류는 만들 때 정해지며 바꿀 수 없습니다.' : undefined}
+              >
+                <Select
+                  value={form.source_type}
+                  disabled={isEditing}
+                  onChange={(event) =>
+                    setForm({ ...form, source_type: event.target.value as SourceType })
+                  }
+                >
+                  {SOURCE_TYPES.map((sourceType) => (
+                    <option key={sourceType} value={sourceType}>
+                      {sourceTypeLabel(sourceType)} ({sourceType})
+                    </option>
+                  ))}
+                </Select>
               </Field>
 
               <Field label="base URL" required>

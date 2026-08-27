@@ -207,7 +207,7 @@ function SidebarContent({
       <div className="px-5 pt-5 pb-4">
         <NavLink to="/" className="block">
           <span className="block text-lg font-bold tracking-tight text-ink">AILA</span>
-          <span className="mt-0.5 block text-xs text-muted">Loki 기반 AI 로그 분석기</span>
+          <span className="mt-0.5 block text-xs text-muted">AI 로그 분석기</span>
         </NavLink>
       </div>
 

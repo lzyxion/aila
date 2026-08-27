@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aila-backend"
 version = "0.1.0"
-description = "AILA - Loki 기반 AI 로그 분석기 백엔드"
+description = "AILA - AI 로그 분석기 백엔드"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
