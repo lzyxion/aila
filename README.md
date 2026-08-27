@@ -136,8 +136,10 @@ aila/
     │   │                         #   진행 중 분석 작업 부분 유니크 인덱스 + 설정 기본값 시드
     │   ├── versions/0003_timezone_setting.py
     │   │                         #   app_settings 예약 키 timezone 시드 (스키마 변경 없음)
-    │   └── versions/0004_auth_and_scheduling.py
-    │                             #   users·user_sessions + 정책 스케줄 필드 + triggered_by
+    │   ├── versions/0004_auth_and_scheduling.py
+    │   │                         #   users·user_sessions + 정책 스케줄 필드 + triggered_by
+    │   └── versions/0005_baseline_and_expected_services.py
+    │                             #   정책 baseline_query + 연결 expected_services (Phase 7)
     ├── app/
     │   ├── main.py               # [freeze] 라우터 include 지점
     │   ├── config.py             # [freeze] AILA_* 환경변수
@@ -160,10 +162,11 @@ aila/
     │   ├── analysis/router.py        # /api/analysis-jobs (+ report)
     │   ├── dashboard/router.py       # /api/dashboard/overview (정책 상세)
     │   │                             #   + /api/dashboard/summary (정책 전체 요약)
+    │   │                             #   counting.py — 접기·회차 COUNT 공용 규칙 (Phase 7)
     │   ├── auth/                     # /api/auth/login|logout|me|users
     │   │                             #   passwords(scrypt) · service(세션) · dependencies(전역 보호)
     │   ├── scheduler/                # 60 초 tick — 정책 주기 실행 + 신규 fingerprint 자동 분석
-    │   ├── usage/router.py           # /api/usage
+    │   ├── usage/router.py           # /api/usage + /api/usage/daily-limit (한도 게이지)
     │   ├── app_settings/router.py    # /api/settings (예약 4 종 화이트리스트)
     │   │                             #   + /api/maintenance/purge-samples (policies/router.py)
     │   ├── loki/                 # (빈 구현) Loki 어댑터
@@ -449,3 +452,48 @@ curl.exe -b admin.jar -X POST http://localhost:8000/api/auth/users `
   여러 번 그리지 않도록 **시각 기준으로 합쳐서** 싣는다 (그래서 시리즈 합 = `total_errors_24h`).
 - 건수 조회가 실패하면 `total_errors_24h` 는 `null`, `series_24h` 는 **빈 배열**이다
   (0 짜리 선을 그리면 "오류가 없었다"로 읽힌다).
+
+## Phase 7 — 대시보드 지표 확장
+
+지표 공백 검증(옵시디언 "로그 모니터링 지표와 현재 대시보드의 공백" 문서)의 후속.
+접기·COUNT 공용 규칙은 `backend/app/dashboard/counting.py` 한 곳에 있다.
+
+### overview 확장 — `GET /api/dashboard/overview`
+
+- **`series` 는 시각별 합산이다** (summary 와 같은 규칙 — 같은 timestamp 는 한 번만
+  온다). 서비스별 분해는 `by_service` 가 담당한다. Phase 6 까지는 overview 만 접지
+  않아 서비스가 여럿이면 차트가 같은 시각을 여러 번 그렸다 — 이것이 이 phase 의
+  출발점이 된 결함이다.
+- **`group_count`·`unanalyzed_group_count`**: 조회 회차 **전체**의 DB COUNT.
+  `top_groups`(상위 N) 길이와 다르며, 회차가 없으면 0 이 아니라 `null` 이다.
+- **`ingest_total`·`ingest_series`·`error_ratio`**: 정책의 `baseline_query`(분모
+  쿼리 — 오류 셀렉터와 같은 라벨 범위의 **전체** 로그를 세는 쿼리)가 있을 때만
+  같은 provider·기간·step 으로 metric 1 회를 더 걸어 계산한다. 분모를 오류 쿼리에서
+  역산하지 않는다 — 미설정·실패는 `null` 이고(0 금지), 실패 사유는
+  `baseline_query_failed` 경고 하나로만 나간다. summary(홈)에는 넣지 않는다
+  (정책당 Loki 호출 2 배 방지).
+
+### 수집 중단 경고 — 연결의 `expected_services`
+
+연결에 기대 서비스 목록(표준 필드 `service` 기준)을 적어 두면, **조회 실행마다**
+(수동·스케줄 동일 경로 `_execute_query_run`) 그 기간에 로그를 한 줄도 내지 않은
+서비스를 `ingest_absent` 경고로 `query_runs.warnings` 에 남긴다.
+
+- **경고 기록뿐이다** — 알림·자동 실행 없음. "자동 트리거는 `auto_analyze_new`
+  하나" 계약은 그대로다.
+- 확인 쿼리는 정책 쿼리가 아니라 **라벨 셀렉터**다. 정책은 보통 `level="ERROR"` 로
+  좁혀져 있어, 그 쿼리로는 "오류 없는 정상 서비스"와 "로그가 끊긴 서비스"가 똑같이
+  0 으로 보인다.
+- 확인 자체의 실패는 `presence_check_failed` 로 강등하고 조회는 성공으로 남긴다.
+  `supports_presence=False` 어댑터(capability 플래그)는 경고 없이 건너뛴다.
+- 화면: 정책 상세와 홈 카드에 "수집 중단 의심" 배지. 연결 관리는 신설된
+  `/admin/loki-connections` 에서 한다.
+
+### 일일 한도 게이지 — `GET /api/usage/daily-limit`
+
+`{date, timezone, global_limit, global_used, policies[]}`. 사용량·하루 경계는
+429 를 내는 한도 검사와 **같은 함수**(`analysis.service.daily_usage`, usage 쪽은
+`usage/integrations.py` 지연 import)다 — 게이지와 429 가 다른 숫자를 보이면
+게이지는 없느니만 못하다. `policies` 는 **자체 `daily_analysis_limit` 이 설정된
+정책만** 싣는다. 엔드포인트가 없는 옛 백엔드에서 프론트는 게이지를 감춘다
+(`0/0` 은 "다 썼다"로 읽힌다).

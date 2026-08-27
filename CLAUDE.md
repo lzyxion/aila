@@ -32,13 +32,13 @@ python scripts/e2e_demo.py    # 9단계 ALL PASS 가 정상
 
 ## 구조 (backend/app/)
 
-`schemas/`(정규화 레코드·분석 결과·API 모델 — 공유 계약) · `providers/`(LogSourceProvider·LLMProvider ABC) · `loki/`(Loki 어댑터, `build_provider`) · `llm_providers/`(OpenAI·Anthropic 어댑터, `build_llm_provider`) · `grouping/`+`masking/`(마스킹→정규화→fingerprint, 순수 함수) · `policies/`(정책 CRUD·query-run 실행) · `error_groups/` · `analysis/`(작업 생성·BackgroundTasks 실행·보고서) · `dashboard/`(정책 상세 `overview` + 전체 요약 `summary` + 전 정책 오류 그룹 `error-groups`) · `usage/` · `app_settings/`(전역 설정 키 4종) · `connections/`+`llm_connections/`(연결 CRUD) · `auth/`(계정 CRUD·세션·전역 보호 의존성 — 마지막 admin 보호·세션 무효화는 `auth/service.py`) · `scheduler/`(60초 tick — 정책 주기 실행 + 신규 fingerprint 자동 분석)
+`schemas/`(정규화 레코드·분석 결과·API 모델 — 공유 계약) · `providers/`(LogSourceProvider·LLMProvider ABC) · `loki/`(Loki 어댑터, `build_provider`) · `llm_providers/`(OpenAI·Anthropic 어댑터, `build_llm_provider`) · `grouping/`+`masking/`(마스킹→정규화→fingerprint, 순수 함수) · `policies/`(정책 CRUD·query-run 실행) · `error_groups/` · `analysis/`(작업 생성·BackgroundTasks 실행·보고서) · `dashboard/`(정책 상세 `overview` + 전체 요약 `summary` + 전 정책 오류 그룹 `error-groups` — 접기·회차 COUNT 규칙은 `counting.py` 한 곳) · `usage/`(집계 + `daily-limit` 게이지 — 한도 검사와 같은 `daily_usage` 재사용) · `app_settings/`(전역 설정 키 4종) · `connections/`+`llm_connections/`(연결 CRUD) · `auth/`(계정 CRUD·세션·전역 보호 의존성 — 마지막 admin 보호·세션 무효화는 `auth/service.py`) · `scheduler/`(60초 tick — 정책 주기 실행 + 신규 fingerprint 자동 분석)
 
 트랙 간 결합은 `*/integrations.py` 의 지연 import 로만 한다 — 테스트 mock 지점도 거기다.
 
 ## 작업 규칙
 
-- **README 의 "계약상 제약" 절이 모든 변경의 상위 규칙이다.** 특히: 원본(마스킹 전) 로그를 DB 에 저장하는 코드를 절대 만들지 않는다 / LLM 전송 직전 마스킹을 우회하는 경로를 만들지 않는다 / **분석 자동 트리거는 정책의 `auto_analyze_new` 하나뿐이며 그 밖의 자동 실행(임계치·재분석·알림 연동)을 추가하지 않는다.**
+- **README 의 "계약상 제약" 절이 모든 변경의 상위 규칙이다.** 특히: 원본(마스킹 전) 로그를 DB 에 저장하는 코드를 절대 만들지 않는다 / LLM 전송 직전 마스킹을 우회하는 경로를 만들지 않는다 / **분석 자동 트리거는 정책의 `auto_analyze_new` 하나뿐이며 그 밖의 자동 실행(임계치·재분석·알림 연동)을 추가하지 않는다.** 수집 중단 확인(`ingest_absent`, Phase 7)도 조회 실행에 얹힌 **경고 기록**일 뿐이다 — 여기에 알림·자동 대응을 붙이는 것이 정확히 이 규칙이 막는 일이다.
 - **자동 분석의 유일한 진입점은 `analysis.service.create_analysis_job` 이다.** 스케줄러도 이 함수를 탄다 — `allow_ai_analysis`·멱등(부분 유니크 인덱스)·일일 한도(429)를 우회하는 별도 실행 경로를 만들지 않는다. 대상은 **fingerprint 분석 이력이 전혀 없는 그룹**으로 한정한다(실패 이력도 "이력 있음"이다 — 아니면 같은 실패를 매 회차 다시 태운다).
 - **`/api/**` 는 전역 의존성(`auth.dependencies.enforce_api_auth`)으로 보호된다.** 새 라우터에 인증을 따로 붙이지 않는다(기본이 "닫힘"이다). 예외를 늘리려면 `PUBLIC_API_PATHS` 를 고쳐야 하고, 그건 구멍을 뚫는 일이므로 이유를 DECISIONS 에 남긴다. viewer 는 GET 만 가능하다.
 - **스케줄러는 단일 uvicorn 워커 전제다.** 겹침 방지가 in-process 락이라 워커를 늘리면 같은 정책이 중복 실행된다(조용히 동작하는 것처럼 보인다).
