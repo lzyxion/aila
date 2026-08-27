@@ -28,7 +28,8 @@
 | --- | --- | --- |
 | 스케줄러 in-process 락 (단일 uvicorn 워커 전제) | 지금 필요 없는 분산 조정을 미리 넣지 않았다. **워커를 늘리면 조용히 깨진다** (같은 정책 중복 실행, 겉은 정상) | 워커를 늘리기 **전에** DB 어드바이저리 락으로 교체 — 순서가 반대가 되면 안 된다 |
 | BackgroundTasks 실행 (Redis 워커 아님) | 분석은 단발 호출이고 동시성이 낮다. 태스크가 engine 만 물려받아 새 세션을 여는 구조라 워커 전환 시에도 코드 형태가 유지된다 | 분석 동시성이 프로세스 하나로 부족해질 때 (설계 "향후 확장") |
-| 추가 LogSourceProvider (Elasticsearch·CloudWatch 등) | MVP 는 Loki 하나. 어댑터 경계(capability 플래그·`label_mapping`)는 이미 만들어져 있다 | 두 번째 소스 요구가 실제로 올 때 |
+| 추가 LogSourceProvider (Elasticsearch·CloudWatch 등) | MVP 는 Loki 하나. 어댑터 경계(capability 플래그·`label_mapping`·소스 고유 문법 그대로 저장)는 이미 만들어져 있다 | 두 번째 소스 요구가 실제로 올 때 |
+| Loki 고정 **이름**의 일반화 (`analysis_policies.logql` 컬럼, `loki_connections` 테이블·라우트, "LogQL" UI 라벨) | 동작 추상화는 끝났고 남은 건 이름뿐 — 지금 바꾸면 마이그레이션·손 사본·라우트 비용만 내고 기능 이득이 0 이다. 두 번째 소스의 실제 입력 요구(예: JSON DSL)를 모른 채 일반화하면 추측이 된다 | 두 번째 어댑터를 붙이는 그 phase 에서 함께 (rename revision 또는 additive 별칭 + `source_type` 분기 라벨). 그때까지 신규 필드는 `baseline_query` 처럼 **일반 이름**으로만 짓는다 |
 
 ## 4. 성능 유보 (규모 조건부)
 
