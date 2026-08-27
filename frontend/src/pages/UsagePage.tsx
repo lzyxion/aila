@@ -23,6 +23,7 @@ import type {
 import { asModelPricingTable } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
 import { TokenByModelChart, UsageBucketChart } from '../components/chartsLazy';
+import { DailyLimitGauge, PolicyDailyLimitTable } from '../components/DailyLimitGauge';
 import {
   Badge,
   Button,
@@ -97,6 +98,15 @@ export function UsagePage() {
 
   return (
     <div>
+      {/*
+        토큰·비용은 지나간 일을 보여주지만, 지금 분석을 눌렀을 때 429 가 나는지는 한도
+        게이지만 답한다. 그래서 기간 필터보다 위에 둔다 (기간을 바꿔도 이 값은 "오늘"이다).
+      */}
+      <div className="mb-6 space-y-6">
+        <DailyLimitGauge />
+        <PolicyDailyLimitTable />
+      </div>
+
       <Card
         title="사용량"
         description={

@@ -109,6 +109,12 @@ export const lokiConnectionSeed: LokiConnectionRead[] = [
     auth_type: 'none',
     label_mapping: { app: 'service', env: 'environment' },
     active: true,
+    /*
+      수집 확인 대상 (Phase 7). **일부러 하나를 없는 서비스로 둔다** — `billing-api` 는
+      groupSeeds 어디에도 없으므로 조회가 `ingest_absent` 경고를 남기고, 그래야 "수집 중단
+      의심" 배지가 실제로 그려지는지 화면·smoke 양쪽에서 확인할 수 있다.
+    */
+    expected_services: ['payment-api', 'order-api', 'billing-api'],
     has_secret: false,
     created_at: iso(-60 * 24 * 12),
     updated_at: iso(-60 * 24 * 3),
@@ -121,6 +127,8 @@ export const lokiConnectionSeed: LokiConnectionRead[] = [
     auth_type: 'bearer',
     label_mapping: { service_name: 'service', deployment_env: 'environment' },
     active: true,
+    // 빈 배열 = 수집 중단 확인을 하지 않는 연결. 두 상태가 화면에서 갈리는지 본다.
+    expected_services: [],
     has_secret: true,
     created_at: iso(-60 * 24 * 9),
     updated_at: iso(-60 * 24 * 1),
@@ -175,6 +183,12 @@ export const policySeed: PolicyRead[] = [
     name: 'payment-api 오류 (staging)',
     description: '결제 게이트웨이 관련 ERROR 전량. 외부 API 타임아웃 감지가 주 목적.',
     logql: '{service="payment-api", environment="staging"} | json | level="ERROR"',
+    /*
+      분모 쿼리 (Phase 7). 오류 셀렉터와 **같은 라벨 범위**이되 level 필터가 없다 — 이게
+      유입량이고, 오류 ÷ 유입량이 오류 비율이다. 정책 2·3 은 비워 둬서 "미설정이면 0 이
+      아니라 `-`" 경로를 화면에서 확인할 수 있게 한다.
+    */
+    baseline_query: '{service="payment-api", environment="staging"}',
     default_range_minutes: 60,
     max_lines: 1000,
     exclusions: ['healthcheck', 'GET /metrics'],
@@ -196,6 +210,7 @@ export const policySeed: PolicyRead[] = [
     name: '전체 서비스 ERROR/FATAL',
     description: '넓게 훑는 정책. 라인 상한을 낮게 잡아 비용을 막는다.',
     logql: '{environment="staging"} | json | level=~"ERROR|FATAL"',
+    baseline_query: null,
     default_range_minutes: 180,
     max_lines: 500,
     exclusions: [],
@@ -216,6 +231,7 @@ export const policySeed: PolicyRead[] = [
     name: 'auth-api 인증 실패 (보관)',
     description: '토큰 만료 급증 조사용. 지금은 비활성.',
     logql: '{service="auth-api"} | json | level="ERROR" | line_format "{{.msg}}"',
+    baseline_query: null,
     default_range_minutes: 360,
     max_lines: 2000,
     exclusions: ['expected-expiry'],

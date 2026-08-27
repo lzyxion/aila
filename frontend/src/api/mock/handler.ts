@@ -27,8 +27,10 @@ import type {
   AppSettingRead,
   AuthUser,
   ConnectionTestResponse,
+  DailyLimitResponse,
   DashboardOverviewResponse,
   DashboardSummaryPolicy,
+  FetchWarning,
   DashboardSummaryResponse,
   ErrorGroupDetail,
   ErrorGroupListResponse,
@@ -185,6 +187,40 @@ function persistSession(user: AuthUser | null): void {
   }
 }
 
+// ------------------------------------------------- 수집 중단 확인 (Phase 7)
+
+/**
+ * 연결의 `expected_services` 중 **로그를 한 줄도 내지 않은** 서비스.
+ *
+ * 실제 백엔드는 조회 기간의 관측 라벨과 대조하지만, mock 에는 groupSeeds 가 유일한
+ * "관측된 세계"다. 목록에 있는데 seed 에 없는 서비스가 곧 부재 서비스다 — 그래서 fixture 의
+ * `billing-api` 하나가 언제나 경고를 만든다.
+ */
+function absentServices(expected: string[] | undefined): string[] {
+  const present = new Set(groupSeeds.map((seed) => seed.service));
+  return (expected ?? []).filter((service) => !present.has(service));
+}
+
+/**
+ * 부재 서비스를 조회 회차 경고로. **경고 기록일 뿐 알림·자동 실행이 아니다** (계약).
+ * `count` 는 부재 서비스 수이고, 메시지에 서비스 이름을 그대로 실어 화면이 색 없이도
+ * 무엇이 끊겼는지 말할 수 있게 한다.
+ */
+function ingestAbsentWarning(expected: string[] | undefined): FetchWarning | null {
+  const absent = absentServices(expected);
+  if (absent.length === 0) return null;
+  return {
+    code: 'ingest_absent',
+    // 문구도 라이브 백엔드(`policies/service.py` 의 WARN_INGEST_ABSENT)와 같은 모양으로
+    // 맞춘다 — 화면이 메시지를 그대로 보여주므로 mock 에서만 다른 문장이 나오면 안 된다.
+    message: `이 기간에 로그를 한 줄도 내지 않은 서비스가 있습니다 (수집 중단 의심): ${absent.join(', ')}`,
+    count: absent.length,
+  };
+}
+
+/** 시드 회차(5001)의 수집 중단 경고. 연결 1 의 `expected_services` 에서 나온다. */
+const SEED_INGEST_ABSENT = ingestAbsentWarning(lokiConnectionSeed[0].expected_services);
+
 const state: MockState = {
   session: loadSession(),
   users: structuredClone(userSeed),
@@ -209,6 +245,8 @@ const state: MockState = {
           message: '`| json` 파싱에 실패한 라인이 있습니다. `| __error__=""` 처리를 검토하십시오.',
           count: 47,
         },
+        // 수집 중단 의심 — 카드·정책 상세의 배지가 이 경고에서 온다 (계약: 기록일 뿐).
+        ...(SEED_INGEST_ABSENT ? [SEED_INGEST_ABSENT] : []),
       ],
       error_message: null,
       group_count: groupSeeds.length,
@@ -606,6 +644,8 @@ route('POST', /^\/api\/loki-connections$/, (_p, { body }) => {
     auth_type: payload.auth_type ?? 'none',
     label_mapping: payload.label_mapping ?? {},
     active: payload.active ?? true,
+    // 수집 확인 대상 (Phase 7). 주지 않으면 빈 배열 = 확인하지 않음.
+    expected_services: payload.expected_services ?? [],
     // 평문 secret 은 저장도 반환도 하지 않는다 — 존재 여부만 남긴다.
     has_secret: Boolean(payload.secret),
     created_at: nowIso(),
@@ -653,6 +693,9 @@ route('PATCH', /^\/api\/loki-connections\/(\d+)$/, ([id], { body }) => {
   if (payload.auth_type != null) found.auth_type = payload.auth_type;
   if (payload.label_mapping != null) found.label_mapping = payload.label_mapping;
   if (payload.active != null) found.active = payload.active;
+  // 빈 배열은 "확인을 끈다"는 **명시적 값**이라 그대로 반영한다. 생략(undefined)만
+  // "변경 없음"이다 — 둘을 같게 다루면 한 번 켠 확인을 끌 방법이 사라진다.
+  if (payload.expected_services != null) found.expected_services = payload.expected_services;
   if (payload.secret != null) found.has_secret = payload.secret.length > 0;
   found.updated_at = nowIso();
   return found;
@@ -817,6 +860,9 @@ route('POST', /^\/api\/policies$/, (_p, { body }) => {
     name: payload.name,
     description: payload.description ?? null,
     logql: payload.logql,
+    // 빈 문자열은 미설정과 같다 — 화면이 빈 입력을 null 로 보내지만, 다른 클라이언트가
+    // 빈 문자열을 보내도 "설정했는데 아무것도 못 세는" 상태를 만들지 않는다.
+    baseline_query: payload.baseline_query?.trim() || null,
     default_range_minutes: payload.default_range_minutes,
     max_lines: payload.max_lines,
     exclusions: payload.exclusions ?? [],
@@ -923,6 +969,10 @@ route('PATCH', /^\/api\/policies\/(\d+)$/, ([id], { body }) => {
   if (payload.name != null) found.name = payload.name;
   if (payload.description !== undefined) found.description = payload.description;
   if (payload.logql != null) found.logql = payload.logql;
+  // 명시적 null 이 분모 쿼리를 **지운다**. 생략은 변경 없음이다.
+  if (payload.baseline_query !== undefined) {
+    found.baseline_query = payload.baseline_query?.trim() || null;
+  }
   if (payload.default_range_minutes != null)
     found.default_range_minutes = payload.default_range_minutes;
   if (payload.max_lines != null) found.max_lines = payload.max_lines;
@@ -982,6 +1032,16 @@ route('POST', /^\/api\/policies\/(\d+)\/query-runs$/, ([id], { body }) => {
         message: '`| json` 파싱에 실패한 라인이 있습니다.',
         count: 47,
       },
+      /*
+        수집 중단 확인은 **조회할 때** 한다 — 연결에 적힌 서비스와 실제 관측을 대조해
+        회차 경고로 남긴다. 새로 만든 회차에도 같은 규칙을 적용하지 않으면, 정책을 한 번
+        실행하는 순간 홈 카드의 배지가 조용히 사라진다(가장 최근 회차가 기준이므로).
+      */
+      ...(() => {
+        const connection = state.lokiConnections.find((c) => c.id === policy.loki_connection_id);
+        const warning = ingestAbsentWarning(connection?.expected_services);
+        return warning ? [warning] : [];
+      })(),
     ],
     error_message: null,
     group_count: groupSeeds.length,
@@ -1299,6 +1359,18 @@ route('GET', /^\/api\/dashboard\/error-groups$/, (_p, { query }) => {
   } satisfies DashboardErrorGroupsResponse;
 });
 
+/**
+ * `GET /api/dashboard/overview` — 정책 하나의 상세 (Phase 7 필드 포함).
+ *
+ * 계약대로 만들어야 하는 지점:
+ * - `series` 는 **시각별 합산**이다 (같은 timestamp 가 두 번 나오지 않는다). 서비스별
+ *   분해는 `by_service` 가 담당한다 — 두 곳에서 같은 일을 하면 차트가 같은 시각을 여러 번
+ *   그린다.
+ * - `group_count`·`unanalyzed_group_count` 는 **회차 전체 COUNT** 다. `top_groups` 는
+ *   상위 N 이라 길이를 지표로 쓰면 항상 N 에 붙는다.
+ * - `ingest_total`·`error_ratio` 는 정책에 `baseline_query` 가 있을 때만 계산한다.
+ *   미설정·실패는 **0 이 아니라 null** 이고 `ingest_series` 는 빈 배열이다.
+ */
 route('GET', /^\/api\/dashboard\/overview$/, (_p, { query }) => {
   const stepSeconds = Number(query.step_seconds ?? 300);
   const policyId = query.policy_id ? Number(query.policy_id) : null;
@@ -1331,6 +1403,24 @@ route('GET', /^\/api\/dashboard\/overview$/, (_p, { query }) => {
     }))
     .sort((a, b) => b.count - a.count);
 
+  /*
+    분모 쿼리가 있는 정책만 유입량을 계산한다. **오류 시리즈와 같은 눈금이 아니다** —
+    유입량은 오류보다 두 자릿수 크므로 화면이 차트를 나눈다. 합계는 시리즈에서 뽑아야
+    두 값이 어긋나지 않는다(요약 카드의 24h 규칙과 같다).
+  */
+  const policy = policyId === null ? null : state.policies.find((p) => p.id === policyId);
+  const hasBaseline = Boolean(policy?.baseline_query);
+  const ingestSeries = hasBaseline
+    ? makeSeries(rangeMinutes, stepSeconds, (t) => seriesShapes.steady(t) * 46 + 380)
+    : [];
+  const ingestTotal = hasBaseline
+    ? ingestSeries.reduce((acc, point) => acc + point.value, 0)
+    : null;
+  // 분모가 null 이거나 0 이면 비율도 null 이다 — 0 으로 적으면 "오류가 없었다"로 읽힌다.
+  const errorRatio = ingestTotal !== null && ingestTotal > 0 ? totalErrors / ingestTotal : null;
+
+  const analyzedFingerprints = new Set(allJobs().map((job) => job.fingerprint));
+
   const response: DashboardOverviewResponse = {
     policy_id: policyId,
     query_run_id: LATEST_RUN_ID,
@@ -1341,6 +1431,14 @@ route('GET', /^\/api\/dashboard\/overview$/, (_p, { query }) => {
     series,
     by_service,
     top_groups: groups.slice(0, top),
+    // 회차 전체 COUNT — 상위 N 과 다른 숫자여야 화면의 폴백 분기를 검증할 수 있다.
+    group_count: groups.length,
+    unanalyzed_group_count: groups.filter(
+      (group) => !analyzedFingerprints.has(group.fingerprint),
+    ).length,
+    ingest_total: ingestTotal,
+    ingest_series: ingestSeries,
+    error_ratio: errorRatio,
     warnings: [
       {
         code: 'parse_error',
@@ -1387,6 +1485,43 @@ function localDateKey(iso8601: string): string {
     return iso8601.slice(0, 10);
   }
 }
+
+/**
+ * `GET /api/usage/daily-limit` — 오늘의 분석 한도 소진 게이지 (Phase 7).
+ *
+ * "오늘"의 경계는 429 를 내는 한도 검사와 **같은 계산**이다 (`app_settings.timezone` 의
+ * 로컬 자정). 게이지와 429 가 다른 숫자를 보이면 게이지를 믿을 수 없으므로, mock 도
+ * 사용량 분해(`group_by=day`)와 **같은 `localDateKey`** 를 쓴다.
+ *
+ * `policies` 에는 **자체 한도를 가진 정책만** 싣는다 — 한도가 없는 정책은 전역 게이지에
+ * 이미 포함되어 있고, 여기 실으면 "정책마다 별도 상한이 있다"로 읽힌다.
+ */
+route('GET', /^\/api\/usage\/daily-limit$/, () => {
+  const zone = String(
+    state.settings[SETTING_TIMEZONE]?.value ?? SETTING_DEFAULTS[SETTING_TIMEZONE],
+  );
+  const today = localDateKey(nowIso());
+  const todayJobs = allJobs().filter((job) => localDateKey(job.requested_at) === today);
+  const globalLimit = Number(
+    state.settings[SETTING_DAILY_ANALYSIS_LIMIT]?.value ??
+      SETTING_DEFAULTS[SETTING_DAILY_ANALYSIS_LIMIT],
+  );
+
+  return {
+    date: today,
+    timezone: zone,
+    global_limit: globalLimit,
+    global_used: todayJobs.length,
+    policies: state.policies
+      .filter((policy) => policy.daily_analysis_limit != null)
+      .map((policy) => ({
+        policy_id: policy.id,
+        name: policy.name,
+        limit: policy.daily_analysis_limit as number,
+        used: todayJobs.filter((job) => GROUP_POLICY[job.error_group_id] === policy.id).length,
+      })),
+  } satisfies DailyLimitResponse;
+});
 
 route('GET', /^\/api\/usage$/, (_p, { query }) => {
   const rangeStart = query.range_start ? String(query.range_start) : iso(-60 * 24 * 7);

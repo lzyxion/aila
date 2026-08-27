@@ -113,6 +113,37 @@ export function UsageStatusBadge({ status }: { status: UsageStatus }) {
   );
 }
 
+// ------------------------------------------------------- 수집 중단 (Phase 7)
+
+/**
+ * 수집 중단 의심 배지 (`ingest_absent`).
+ *
+ * 연결에 적힌 `expected_services` 중 조회 기간에 로그를 **한 줄도 내지 않은** 서비스가
+ * 있다는 뜻이다. 오류가 0 건인 것과 로그 자체가 끊긴 것은 정반대의 사건인데 화면에서는
+ * 똑같이 "조용한 정책"으로 보이기 때문에 눈에 띄는 자리에 둔다.
+ *
+ * 표기 규칙 두 가지:
+ * - **색만으로 구분하지 않는다.** 배지에 "수집 중단 의심"이라는 글자를 반드시 함께 싣고,
+ *   서비스 이름은 메시지에서 그대로 가져와 배지 옆에 적는다 (색각 이상·흑백 출력 대비).
+ * - 이건 **기록일 뿐 알림이 아니다.** 배지를 눌러 무언가가 자동으로 실행되지 않는다
+ *   (계약: 자동 트리거는 정책의 `auto_analyze_new` 하나뿐이다).
+ */
+export function IngestAbsentBadge({
+  warning,
+  compact = false,
+}: {
+  warning: { code: string; message: string; count?: number | null };
+  compact?: boolean;
+}) {
+  return (
+    <Badge tone="danger" title={warning.message} className={compact ? undefined : 'max-w-full'}>
+      <span aria-hidden>⚠</span>
+      수집 중단 의심
+      {warning.count != null && warning.count > 1 ? ` · ${warning.count}개 서비스` : ''}
+    </Badge>
+  );
+}
+
 // ------------------------------------------------------------------ 권한·역할
 
 export function RoleBadge({ role }: { role: UserRole }) {

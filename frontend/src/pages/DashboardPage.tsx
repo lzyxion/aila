@@ -9,11 +9,21 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 
-import { useDashboardOverview, usePolicies, useRunPolicy } from '../api/queries';
+import {
+  useDashboardOverview,
+  usePolicies,
+  usePolicyQueryRuns,
+  useRunPolicy,
+} from '../api/queries';
 import { policySchedule, type DashboardOverviewParams, type FetchWarning } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
 import { ErrorTrendChart, ServiceBarChart } from '../components/chartsLazy';
-import { AnalysisStatusBadge, ScheduleBadge, SeverityBadge } from '../components/StatusBadges';
+import {
+  AnalysisStatusBadge,
+  IngestAbsentBadge,
+  ScheduleBadge,
+  SeverityBadge,
+} from '../components/StatusBadges';
 import {
   Badge,
   Button,
@@ -32,7 +42,15 @@ import {
   Td,
   Th,
 } from '../components/ui';
-import { formatDateTime, formatNumber, formatRelative, truncate, warningCodeLabel } from '../lib/format';
+import {
+  formatDateTime,
+  formatNumber,
+  formatRatio,
+  formatRelative,
+  ingestAbsentWarnings,
+  truncate,
+  warningCodeLabel,
+} from '../lib/format';
 
 /** 기간 프리셋. 서버가 `max_query_range_minutes` 로 상한을 강제하므로 UI 는 편의일 뿐이다. */
 const RANGES = [
@@ -72,12 +90,62 @@ export function DashboardPage() {
   }, [rangeIndex, policyId]);
 
   const overview = useDashboardOverview(overviewParams);
+  /*
+    수집 중단 경고는 **조회 회차**에 남는다 (`query_runs.warnings`). 대시보드가 보는
+    overview 는 metric 쿼리 결과라 그 경고를 반드시 싣지는 않으므로, 최근 회차 한 건을
+    따로 읽어 배지의 근거로 쓴다. 경로가 없는 백엔드에서는 훅이 조용히 실패하고
+    (retry 없음) 배지만 사라진다.
+  */
+  const recentRuns = usePolicyQueryRuns(policyId, 1);
 
   const allPolicies = policiesQuery.data ?? [];
   const activePolicies = allPolicies.filter((policy) => policy.active);
   // 비활성 정책의 대시보드로 직접 들어올 수 있다 — 목록에 없다고 빈 화면을 주지 않는다.
   const selectedPolicy = allPolicies.find((policy) => policy.id === policyId) ?? null;
   const schedule = selectedPolicy ? policySchedule(selectedPolicy) : null;
+
+  /*
+    수집 중단 경고. 세 출처를 합치고 메시지로 중복을 접는다 — 방금 누른 실행 결과, 최근
+    회차, overview. 어느 하나만 보면 "실행한 직후에만 보이는 배지"나 "새로고침해야 사라지는
+    배지"가 된다.
+
+    이건 **기록**이다. 배지가 떠도 아무것도 자동으로 실행되지 않는다 (계약: 자동 트리거는
+    정책의 auto_analyze_new 하나뿐).
+  */
+  const latestRun = recentRuns.data?.items?.[0] ?? null;
+  const absentWarnings = ingestAbsentWarnings(
+    runPolicy.isSuccess ? runPolicy.data.warnings : undefined,
+    latestRun?.warnings,
+    overview.data?.warnings,
+  );
+
+  /*
+    지표 두 개는 **회차 전체 COUNT** 가 정답이다 (`group_count`·`unanalyzed_group_count`).
+    필드를 아직 안 내려주는 백엔드에서만 상위 N 으로 폴백하고, 그 사실을 부제에 적는다 —
+    두 상태를 같은 문구로 적으면 "그룹이 10개뿐"이라는 오해가 굳는다.
+  */
+  const data = overview.data;
+  const groupCountIsExact = typeof data?.group_count === 'number';
+  const groupCount = groupCountIsExact ? (data?.group_count ?? 0) : (data?.top_groups.length ?? 0);
+  const unanalyzedIsExact = typeof data?.unanalyzed_group_count === 'number';
+  const unanalyzedCount = unanalyzedIsExact
+    ? (data?.unanalyzed_group_count ?? 0)
+    : (data?.top_groups.filter((group) => !group.analysis_status).length ?? 0);
+
+  /*
+    유입량·오류 비율은 정책의 분모 쿼리(`baseline_query`)가 있어야 계산된다. **null 은 0 이
+    아니다** — 화면은 `-` 로 쓰고, 왜 비었는지를 값 옆에 적는다 (미설정 / 실패 / 정책 미선택은
+    사용자가 할 일이 서로 다르다).
+  */
+  const baselineMissing =
+    selectedPolicy !== null && !(selectedPolicy.baseline_query ?? '').trim();
+  const baselineHint =
+    selectedPolicy === null
+      ? '정책을 선택해야 계산합니다'
+      : baselineMissing
+        ? '분모 쿼리 미설정'
+        : '분모 쿼리 실패 — 0 이 아닙니다';
+  const showIngestChart = (data?.ingest_series?.length ?? 0) > 0;
 
   return (
     <div>
@@ -120,6 +188,31 @@ export function DashboardPage() {
           >
             정책 설정 →
           </Link>
+        </div>
+      )}
+
+      {/*
+        수집 중단 의심 — 오류가 0 건인 것과 로그 자체가 끊긴 것은 정반대의 사건인데
+        화면에서는 똑같이 "조용한 정책"으로 보인다. 그래서 지표보다 위에 둔다.
+      */}
+      {absentWarnings.length > 0 && (
+        <div className="mb-4">
+          <Notice tone="danger" title="수집 중단 의심">
+            <ul className="mt-1 space-y-1">
+              {absentWarnings.map((warning, index) => (
+                <li key={`${warning.code}-${index}`} className="flex flex-wrap items-center gap-2">
+                  <IngestAbsentBadge warning={warning} />
+                  <span>{warning.message}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs">
+              연결에 등록한 <strong>수집 확인 대상 서비스</strong>가 조회 기간에 로그를 한 줄도
+              내지 않았습니다. 오류가 0 건인 것과 로그가 끊긴 것은 다릅니다 — 수집 파이프라인
+              (Alloy·Loki)을 먼저 확인하십시오. 이 경고는 <strong>기록일 뿐</strong>이며 아무것도
+              자동으로 실행하지 않습니다.
+            </p>
+          </Notice>
         </div>
       )}
 
@@ -276,9 +369,20 @@ export function DashboardPage() {
 
       {overview.data && (
         <div className="space-y-6">
-          <WarningList warnings={overview.data.warnings} />
+          {/* 수집 중단은 위에서 이미 전용 블록으로 말했다 — 여기서 또 적지 않는다. */}
+          <WarningList
+            warnings={overview.data.warnings.filter(
+              (warning) => warning.code !== 'ingest_absent',
+            )}
+          />
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {/*
+            지표 타일. `group_count`·`unanalyzed_group_count` 는 **회차 전체 COUNT** 다 —
+            `top_groups.length`(상위 N)를 지표 자리에 쓰면 정책이 커질수록 항상 "10"이 되어
+            숫자가 상한에 붙어 버린다. 필드가 없는 옛 백엔드에서만 옛 계산으로 폴백하고,
+            그 경우 부제에 "상위 N 기준"이라고 적어 두 상태를 구분한다.
+          */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             <Stat
               label="총 오류 건수 (metric)"
               value={formatNumber(overview.data.total_errors)}
@@ -286,32 +390,93 @@ export function DashboardPage() {
               tone="accent"
             />
             <Stat
+              label="유입량 (분모)"
+              value={
+                overview.data.ingest_total == null ? (
+                  <span className="text-slate-400">-</span>
+                ) : (
+                  formatNumber(overview.data.ingest_total)
+                )
+              }
+              sub={overview.data.ingest_total == null ? baselineHint : '같은 기간 전체 로그 (metric)'}
+            />
+            <Stat
+              label="오류 비율"
+              value={
+                overview.data.error_ratio == null ? (
+                  <span className="text-slate-400">-</span>
+                ) : (
+                  formatRatio(overview.data.error_ratio)
+                )
+              }
+              sub={overview.data.error_ratio == null ? baselineHint : '오류 ÷ 유입량'}
+            />
+            <Stat
               label="오류 그룹"
-              value={formatNumber(overview.data.top_groups.length)}
-              sub="상위 그룹만 표시"
+              value={formatNumber(groupCount)}
+              sub={groupCountIsExact ? '이 회차 전체' : `상위 ${overview.data.top_groups.length}개 기준`}
+            />
+            <Stat
+              label="미분석 그룹"
+              value={formatNumber(unanalyzedCount)}
+              sub={
+                unanalyzedIsExact
+                  ? '이 회차 전체 · fingerprint 기준'
+                  : `상위 ${overview.data.top_groups.length}개 기준 · fingerprint`
+              }
             />
             <Stat
               label="영향 서비스"
               value={formatNumber(overview.data.by_service.length)}
               sub="라벨 기준"
             />
-            <Stat
-              label="미분석 그룹"
-              value={formatNumber(
-                overview.data.top_groups.filter((group) => !group.analysis_status).length,
-              )}
-              sub="fingerprint 기준"
-            />
           </div>
 
-          <Card
-            title="시간대별 오류 건수"
-            description={`${formatDateTime(overview.data.range_start)} ~ ${formatDateTime(
-              overview.data.range_end,
-            )} · ${overview.data.step_seconds}초 간격 · metric 쿼리 기준`}
-          >
-            <ErrorTrendChart points={overview.data.series} />
-          </Card>
+          {/* 분모 쿼리가 없으면 유입량·비율 칸이 왜 비어 있는지 같은 자리에 적는다. */}
+          {baselineMissing && selectedPolicy && (
+            <Notice tone="neutral" title="분모 쿼리가 설정되지 않았습니다">
+              유입량과 오류 비율은 <strong>분모 쿼리</strong>(오류 셀렉터와 같은 라벨 범위의 전체
+              로그를 세는 쿼리)가 있어야 계산합니다. 값이 <code>-</code> 인 것은{' '}
+              <strong>0 이라는 뜻이 아닙니다</strong>.{' '}
+              <Link
+                to={`/policies/${selectedPolicy.id}/edit`}
+                className="font-medium text-sky-800 underline"
+              >
+                정책 수정
+              </Link>{' '}
+              에서 <strong>분모 쿼리</strong>를 채우면 이 자리에 표시됩니다.
+            </Notice>
+          )}
+
+          <div className="grid gap-6 lg:grid-cols-3">
+            <Card
+              title="시간대별 오류 건수"
+              description={`${formatDateTime(overview.data.range_start)} ~ ${formatDateTime(
+                overview.data.range_end,
+              )} · ${overview.data.step_seconds}초 간격 · metric 쿼리 기준`}
+              className={showIngestChart ? 'lg:col-span-2' : 'lg:col-span-3'}
+            >
+              <ErrorTrendChart points={overview.data.series} />
+            </Card>
+
+            {/*
+              유입량은 오류와 **눈금이 다르다** (보통 두 자릿수 크다). 한 축에 겹치면 오류
+              곡선이 바닥에 눌려 모양이 사라지므로 차트를 나누고 색으로만 묶는다.
+            */}
+            {showIngestChart && (
+              <Card
+                title="유입량 추이 (분모)"
+                description="오류와 눈금이 달라 축을 나눴습니다. 같은 기간·같은 간격입니다."
+              >
+                <ErrorTrendChart
+                  points={overview.data.ingest_series}
+                  height={260}
+                  label="유입 건수"
+                  tone="series2"
+                />
+              </Card>
+            )}
+          </div>
 
           <div className="grid gap-6 lg:grid-cols-5">
             <Card
@@ -323,8 +488,14 @@ export function DashboardPage() {
             </Card>
 
             <Card
-              title="상위 오류 그룹"
-              description="분석 상태는 fingerprint 기준 — 이미 분석된 오류를 중복 요청(=중복 과금)하지 않기 위해서입니다."
+              title={`상위 오류 그룹 (${formatNumber(overview.data.top_groups.length)}개)`}
+              description={
+                <>
+                  이 표는 <strong>상위 몇 개</strong>만 보여줍니다 — 회차 전체 그룹 수는 위의{' '}
+                  <strong>오류 그룹</strong> 지표입니다. 분석 상태는 fingerprint 기준이라 이미
+                  분석된 오류를 중복 요청(=중복 과금)하지 않습니다.
+                </>
+              }
               className="lg:col-span-3"
             >
               {overview.data.top_groups.length === 0 ? (

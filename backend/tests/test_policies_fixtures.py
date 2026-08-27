@@ -122,7 +122,11 @@ def client(session_factory) -> Iterator[TestClient]:
 
 
 def make_connection(
-    db: Session, *, name: str = "loki-local", active: bool = True
+    db: Session,
+    *,
+    name: str = "loki-local",
+    active: bool = True,
+    expected_services: list[str] | None = None,
 ) -> LokiConnection:
     connection = LokiConnection(
         name=name,
@@ -131,6 +135,7 @@ def make_connection(
         auth_type=AuthType.NONE.value,
         label_mapping={"app": "service", "env": "environment"},
         active=active,
+        expected_services=expected_services,
     )
     db.add(connection)
     db.commit()
@@ -329,6 +334,7 @@ class FakeLogSource:
 
     supports_count = True
     supports_label_discovery = True
+    supports_presence = False
     source_type = SourceType.LOKI.value
 
     def __init__(
@@ -339,14 +345,23 @@ class FakeLogSource:
         count_series: CountSeries | None = None,
         count_error: Exception | None = None,
         supports_count: bool = True,
+        supports_presence: bool = False,
+        present_services: set[str] | None = None,
+        presence_error: Exception | None = None,
     ) -> None:
         self.fetch_result = fetch_result or FetchResult()
         self.fetch_error = fetch_error
         self.count_series = count_series or CountSeries(step_seconds=300)
         self.count_error = count_error
         self.supports_count = supports_count
+        self.supports_presence = supports_presence
+        self.present_services = present_services if present_services is not None else set()
+        self.presence_error = presence_error
         self.fetch_calls: list[tuple[str, Any, int]] = []
         self.count_calls: list[tuple[str, Any, int]] = []
+        self.presence_calls: list[tuple[list[str], Any]] = []
+        #: 분모 쿼리처럼 쿼리마다 다른 시리즈를 돌려줘야 할 때 쓴다 (query -> CountSeries).
+        self.count_series_by_query: dict[str, CountSeries] = {}
 
     def test_connection(self):  # pragma: no cover - 이 트랙 테스트에서 쓰지 않는다
         raise NotImplementedError
@@ -362,9 +377,20 @@ class FakeLogSource:
 
     def count_over_time(self, query: str, range: Any, step: int) -> CountSeries:  # noqa: A002
         self.count_calls.append((query, range, step))
+        if query in self.count_series_by_query:
+            series = self.count_series_by_query[query]
+            if isinstance(series, Exception):  # pragma: no cover - 방어
+                raise series
+            return series
         if self.count_error is not None:
             raise self.count_error
         return self.count_series
+
+    def service_presence(self, services: list[str], range: Any) -> set[str]:  # noqa: A002
+        self.presence_calls.append((list(services), range))
+        if self.presence_error is not None:
+            raise self.presence_error
+        return set(self.present_services)
 
 
 def count_series(*values: tuple[str, float], step_seconds: int = 300) -> CountSeries:

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from app.enums import AnalysisJobStatus, QueryRunStatus, Severity
 from app.providers.logsource import LogSourceError
+from app.schemas.logrecord import CountPoint, CountSeries
 from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     NOW,
     FakeLogSource,
@@ -29,6 +30,8 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
     no_real_log_source,
     session_factory,
 )
+
+BASELINE_QUERY = '{service="payment-api"}'
 
 
 def _overview(client, provider: FakeLogSource, **params):
@@ -292,3 +295,206 @@ def test_step_bounds_are_enforced_by_the_router(client, db) -> None:
     assert (
         client.get("/api/dashboard/overview", params={"step_seconds": 7200}).status_code == 422
     )
+
+
+# ------------------------------------------------- Phase 7: 시각별 합산 시리즈
+
+
+def _two_services_at_one_moment() -> CountSeries:
+    """`sum by (service)` 가 한 시각에 서비스 수만큼 점을 주는 실제 모양."""
+    moment = NOW - timedelta(minutes=5)
+    return CountSeries(
+        step_seconds=300,
+        points=[
+            CountPoint(timestamp=moment, value=7.0, labels={"service": "payment-api"}),
+            CountPoint(timestamp=moment, value=5.0, labels={"service": "auth-api"}),
+            CountPoint(timestamp=NOW, value=2.0, labels={"service": "payment-api"}),
+        ],
+    )
+
+
+def test_series_is_folded_by_timestamp(client, db) -> None:
+    """같은 시각의 점이 여러 번 실리면 차트가 그 시각을 여러 번 그린다.
+
+    summary 카드는 Phase 6 부터 접어서 실었는데 overview 는 접지 않아, 같은 데이터가
+    화면 두 곳에서 다른 모양으로 보였다.
+    """
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+
+    body = _overview(
+        client, FakeLogSource(count_series=_two_services_at_one_moment()), query_run_id=run.id
+    ).json()
+
+    timestamps = [point["timestamp"] for point in body["series"]]
+    assert len(timestamps) == len(set(timestamps)) == 2
+    # 접은 값의 합 = 총 건수 ("선 아래 면적 = 총 건수" 가 성립해야 한다).
+    assert sum(point["value"] for point in body["series"]) == body["total_errors"] == 14.0
+    assert body["series"][0]["value"] == 12.0
+    # 접힌 점에는 라벨을 싣지 않는다 (서비스 분해는 by_service 의 몫).
+    assert body["series"][0]["labels"] == {}
+
+
+def test_folding_happens_after_by_service_is_computed(client, db) -> None:
+    """접기는 라벨을 버린다 — 먼저 접으면 서비스별 건수가 통째로 사라진다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    make_error_group(db, run, fingerprint="fp-1", count=99)
+
+    body = _overview(
+        client, FakeLogSource(count_series=_two_services_at_one_moment()), query_run_id=run.id
+    ).json()
+
+    assert {item["service"]: item["count"] for item in body["by_service"]} == {
+        "payment-api": 9.0,
+        "auth-api": 5.0,
+    }
+    # 라벨이 살아 있었으므로 DB 폴백은 일어나지 않는다.
+    assert "by_service_from_lines" not in {w["code"] for w in body["warnings"]}
+
+
+# ------------------------------------------------ Phase 7: 회차 전체 COUNT
+
+
+def test_group_counts_are_totals_not_the_top_n(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    analyzed = make_error_group(db, run, fingerprint="fp-1", count=10)
+    make_error_group(db, run, fingerprint="fp-2", count=9)
+    make_error_group(db, run, fingerprint="fp-3", count=8)
+    make_analysis_job(db, analyzed)
+
+    body = _overview(client, FakeLogSource(), query_run_id=run.id, top=1).json()
+
+    assert len(body["top_groups"]) == 1  # 상위 N 은 목록일 뿐이다
+    assert body["group_count"] == 3
+    assert body["unanalyzed_group_count"] == 2
+
+
+def test_failed_analysis_still_counts_as_analysed(client, db) -> None:
+    """실패를 미분석으로 세면 같은 실패를 매 회차 다시 태우게 된다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection)
+    run = make_query_run(db, policy)
+    group = make_error_group(db, run, fingerprint="fp-1", count=3)
+    make_analysis_job(db, group, status=AnalysisJobStatus.FAILED.value, severity=None)
+
+    body = _overview(client, FakeLogSource(), query_run_id=run.id).json()
+
+    assert body["group_count"] == 1
+    assert body["unanalyzed_group_count"] == 0
+
+
+def test_group_counts_are_null_without_a_run(client, db) -> None:
+    """0 으로 적으면 "그룹이 없었다" 로 읽혀 "아직 한 번도 돌지 않았다" 와 구분되지 않는다."""
+    body = client.get("/api/dashboard/overview").json()
+
+    assert body["group_count"] is None
+    assert body["unanalyzed_group_count"] is None
+
+
+# --------------------------------------------- Phase 7: 유입량 · 오류 비율
+
+
+def _provider_with_baseline(errors: CountSeries, ingest: CountSeries | None) -> FakeLogSource:
+    provider = FakeLogSource(count_series=errors)
+    if ingest is not None:
+        provider.count_series_by_query = {BASELINE_QUERY: ingest}
+    return provider
+
+
+def test_baseline_query_yields_ingest_total_and_ratio(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection, baseline_query=BASELINE_QUERY)
+    run = make_query_run(db, policy)
+    ingest = CountSeries(
+        step_seconds=300,
+        points=[
+            CountPoint(timestamp=NOW, value=300.0, labels={"service": "payment-api"}),
+            CountPoint(timestamp=NOW, value=100.0, labels={"service": "auth-api"}),
+        ],
+    )
+    provider = _provider_with_baseline(count_series(("payment-api", 12.0)), ingest)
+
+    body = _overview(client, provider, query_run_id=run.id).json()
+
+    assert body["ingest_total"] == 400.0
+    assert body["error_ratio"] == 0.03
+    # 분모 시리즈도 시각별로 접혀 나간다.
+    assert body["ingest_series"] == [
+        {"timestamp": body["ingest_series"][0]["timestamp"], "value": 400.0, "labels": {}}
+    ]
+
+    # 오류 쿼리와 **같은 기간·step** 으로 정확히 한 번 더 부른다.
+    assert [call[0] for call in provider.count_calls] == [policy.logql, BASELINE_QUERY]
+    assert provider.count_calls[0][1] == provider.count_calls[1][1]
+    assert provider.count_calls[0][2] == provider.count_calls[1][2]
+
+
+def test_ratio_is_null_when_the_denominator_is_zero(client, db) -> None:
+    """0 으로 나눌 수 없다 — 비율은 null 이고, 유입 0 자체는 사실이므로 그대로 싣는다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection, baseline_query=BASELINE_QUERY)
+    run = make_query_run(db, policy)
+    provider = _provider_with_baseline(
+        count_series(("payment-api", 4.0)), CountSeries(step_seconds=300)
+    )
+
+    body = _overview(client, provider, query_run_id=run.id).json()
+
+    assert body["ingest_total"] == 0.0
+    assert body["ingest_series"] == []
+    assert body["error_ratio"] is None
+
+
+def test_baseline_failure_degrades_to_a_warning(client, db) -> None:
+    """분모 하나가 죽었다고 추이·상위 그룹까지 사라지면 안 된다."""
+    connection = make_connection(db)
+    policy = make_policy(db, connection, baseline_query=BASELINE_QUERY)
+    run = make_query_run(db, policy)
+    make_error_group(db, run, fingerprint="fp-1", count=4)
+    provider = FakeLogSource(count_error=LogSourceError("Loki 503"))
+    # 오류 쿼리만 성공시키고 분모 쿼리는 count_error 로 떨어뜨린다.
+    provider.count_series_by_query = {policy.logql: count_series(("payment-api", 6.0))}
+
+    body = _overview(client, provider, query_run_id=run.id).json()
+
+    assert "baseline_query_failed" in {w["code"] for w in body["warnings"]}
+    assert body["ingest_total"] is None  # 0 이 아니다 — 0 은 "유입이 없었다" 로 읽힌다
+    assert body["ingest_series"] == []
+    assert body["error_ratio"] is None
+    assert body["total_errors"] == 6.0
+    assert [item["fingerprint"] for item in body["top_groups"]] == ["fp-1"]
+
+
+def test_without_baseline_query_no_extra_metric_call(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection)  # baseline_query 없음
+    run = make_query_run(db, policy)
+    provider = FakeLogSource(count_series=count_series(("payment-api", 3.0)))
+
+    body = _overview(client, provider, query_run_id=run.id).json()
+
+    assert len(provider.count_calls) == 1
+    assert body["ingest_total"] is None
+    assert body["ingest_series"] == []
+    assert body["error_ratio"] is None
+    assert "baseline_query_failed" not in {w["code"] for w in body["warnings"]}
+
+
+def test_baseline_is_skipped_when_the_adapter_cannot_count(client, db) -> None:
+    connection = make_connection(db)
+    policy = make_policy(db, connection, baseline_query=BASELINE_QUERY)
+    run = make_query_run(db, policy)
+
+    body = _overview(
+        client, FakeLogSource(supports_count=False), query_run_id=run.id
+    ).json()
+
+    codes = {w["code"] for w in body["warnings"]}
+    assert {"count_unsupported", "baseline_query_failed"} <= codes
+    assert body["ingest_total"] is None
+    assert body["error_ratio"] is None

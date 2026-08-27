@@ -45,6 +45,9 @@ class LogSourceProvider(ABC):
     #: capability 플래그 — 구현체가 오버라이드한다. UI 비활성화 판단에 쓴다.
     supports_count: bool = True
     supports_label_discovery: bool = True
+    #: `service_presence()` 를 구현했는가. False 면 수집 중단 확인을 조용히 건너뛴다
+    #: (경고도 남기지 않는다 — 소스가 못 하는 일은 정책 설정의 문제가 아니다).
+    supports_presence: bool = False
 
     #: 소스 종류 식별자 (`loki_connections.source_type` 값과 같아야 한다).
     source_type: str = "loki"
@@ -79,6 +82,17 @@ class LogSourceProvider(ABC):
 
         `supports_count=False` 인 구현체는 `NotImplementedError` 를 던진다.
         """
+
+    def service_presence(self, services: list[str], range: TimeRange) -> set[str]:  # noqa: A002
+        """`services` (표준 필드 `service` 기준 이름) 중 이 기간에 로그를 **한 줄이라도**
+        내보낸 서비스의 집합을 돌려준다.
+
+        수집 중단 확인용이다 — 호출자는 `services - 반환값` 을 부재로 판정한다.
+        소스 라벨명 차이는 어댑터가 `label_mapping` 으로 흡수하고, 셀렉터 구성
+        (이름 이스케이프 포함)도 어댑터 몫이다. `supports_presence=False` 인 구현체는
+        이 기본 구현(NotImplementedError)을 그대로 둔다.
+        """
+        raise NotImplementedError
 
 
 __all__ = ["LogSourceError", "LogSourceProvider"]

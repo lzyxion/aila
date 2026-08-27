@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.enums import (
     AnalysisJobStatus,
@@ -125,6 +125,16 @@ class LokiConnectionBase(BaseModel):
     #: 어댑터(resolve_label_mapping)는 반대 방향도 수용하지만 새 데이터는 이 방향으로 쓴다.
     label_mapping: dict[str, str] = Field(default_factory=dict)
     active: bool = True
+    #: 로그를 내보내고 있어야 정상인 서비스 이름 목록 (Phase 7).
+    #: 비어 있으면 수집 중단 확인을 하지 않는다. 값은 **표준 필드 `service` 기준**이다
+    #: (소스 라벨명이 달라도 label_mapping 이 흡수한다).
+    expected_services: list[str] = Field(default_factory=list)
+
+    @field_validator("expected_services", mode="before")
+    @classmethod
+    def _none_as_empty(cls, value: object) -> object:
+        # DB 컬럼(0005)은 nullable 이다 — ORM 의 None 을 "설정 안 함"(빈 목록)으로 읽는다.
+        return [] if value is None else value
 
 
 class LokiConnectionCreate(LokiConnectionBase):
@@ -139,6 +149,8 @@ class LokiConnectionUpdate(BaseModel):
     secret: str | None = None
     label_mapping: dict[str, str] | None = None
     active: bool | None = None
+    #: 빈 목록을 주면 수집 중단 확인을 끈다. None 은 "변경 없음"이다.
+    expected_services: list[str] | None = None
 
 
 class LokiConnectionRead(LokiConnectionBase):
@@ -265,6 +277,9 @@ class PolicyBase(BaseModel):
     allow_ai_analysis: bool = True
     #: 정책별 일일 분석 상한. None 이면 전역 한도만 적용.
     daily_analysis_limit: int | None = Field(default=None, ge=0)
+    #: 유입량·오류 비율의 **분모 쿼리** (Phase 7). 오류 셀렉터와 같은 라벨 범위의
+    #: 전체 로그를 세는 소스 고유 문법 쿼리. None 이면 유입량·비율을 계산하지 않는다.
+    baseline_query: str | None = None
 
     # --- 스케줄 (Phase 5) ---
     #: 켜면 스케줄러가 주기 실행한다. `schedule_interval_minutes` 가 함께 있어야 한다(422).
@@ -291,6 +306,8 @@ class PolicyUpdate(BaseModel):
     max_samples_per_group: int | None = Field(default=None, gt=0)
     allow_ai_analysis: bool | None = None
     daily_analysis_limit: int | None = Field(default=None, ge=0)
+    #: `daily_analysis_limit` 와 같은 관례 — 명시적 null 로 지운다 (exclude_unset).
+    baseline_query: str | None = None
     schedule_enabled: bool | None = None
     schedule_interval_minutes: int | None = Field(default=None, gt=0)
     auto_analyze_new: bool | None = None
@@ -535,7 +552,16 @@ class ServiceErrorCount(BaseModel):
 
 
 class DashboardOverviewResponse(BaseModel):
-    """오류 추이·상위 그룹. 건수는 metric 쿼리 기반이며 로그 라인 수가 아니다."""
+    """오류 추이·상위 그룹. 건수는 metric 쿼리 기반이며 로그 라인 수가 아니다.
+
+    Phase 7 추가 필드 규칙:
+    - `series` 는 **시각별로 합산된** 포인트다 (같은 timestamp 는 한 번만 나온다).
+      서비스별 분해는 `by_service` 가 담당한다.
+    - `group_count`·`unanalyzed_group_count` 는 조회 회차 전체의 `COUNT` 다 —
+      `top_groups` 목록 길이(상위 N)와 다르다.
+    - `ingest_total`·`error_ratio` 는 정책의 `baseline_query` 가 있을 때만 계산한다.
+      실패·미설정은 **0 이 아니라 null** 이다 (0 은 "유입이 없었다"로 읽힌다).
+    """
 
     policy_id: int | None = None
     query_run_id: int | None = None
@@ -546,6 +572,16 @@ class DashboardOverviewResponse(BaseModel):
     series: list[CountPoint] = Field(default_factory=list)
     by_service: list[ServiceErrorCount] = Field(default_factory=list)
     top_groups: list[ErrorGroupSummary] = Field(default_factory=list)
+    #: 이 조회 회차의 전체 오류 그룹 수 (DB COUNT). 회차가 없으면 null.
+    group_count: int | None = None
+    #: 그중 fingerprint 분석 이력이 전혀 없는 그룹 수 (DB COUNT). 회차가 없으면 null.
+    unanalyzed_group_count: int | None = None
+    #: 같은 기간·step 의 분모 쿼리(`baseline_query`) 총 건수. 미설정·실패 시 null.
+    ingest_total: float | None = None
+    #: 분모 쿼리의 시각별 합산 시리즈. `ingest_total` 이 null 이면 빈 배열.
+    ingest_series: list[CountPoint] = Field(default_factory=list)
+    #: total_errors / ingest_total. 분모가 null 이거나 0 이면 null.
+    error_ratio: float | None = None
     warnings: list[FetchWarning] = Field(default_factory=list)
 
 
@@ -659,6 +695,36 @@ class UsageResponse(BaseModel):
     #: 추정 합계. 정산 근거가 아니다.
     #: 비용을 계산할 수 있는 항목이 하나도 없으면 0 이 아니라 **None** 이다.
     total_estimated_cost: Decimal | None = None
+
+
+class PolicyDailyUsage(BaseModel):
+    """`GET /usage/daily-limit` 의 정책 한 줄 — **자체 한도를 가진 정책만** 싣는다.
+
+    한도가 없는 정책은 전역 게이지에 이미 포함되어 있다. 여기 실으면 "정책마다
+    별도 상한이 있다"로 오해하게 만든다.
+    """
+
+    policy_id: int
+    name: str
+    limit: int = Field(ge=0)
+    used: int = 0
+
+
+class DailyLimitResponse(BaseModel):
+    """`GET /usage/daily-limit` — 오늘의 분석 한도 소진 현황 게이지.
+
+    "오늘"의 경계는 분석 한도와 동일하다: `app_settings.timezone` 의 로컬 자정
+    (`analysis.service.daily_usage` 와 같은 계산을 쓴다 — 게이지와 429 가 다른
+    숫자를 보면 게이지를 믿을 수 없다).
+    """
+
+    #: 기준 로컬 날짜 ("YYYY-MM-DD")와 그 타임존 이름.
+    date: str
+    timezone: str
+    global_limit: int = Field(ge=0)
+    global_used: int = 0
+    #: 자체 `daily_analysis_limit` 를 가진 정책들의 소진 현황.
+    policies: list[PolicyDailyUsage] = Field(default_factory=list)
 
 
 # ================================================================== settings

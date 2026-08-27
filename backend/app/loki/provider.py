@@ -124,6 +124,21 @@ def wrap_count_over_time(query: str, step: int, service_label: str = "service") 
     return f"sum({body})"
 
 
+def escape_label_value_regex(name: str) -> str:
+    """서비스 이름 하나를 `=~"..."` 안에 넣을 수 있는 형태로 두 겹 이스케이프한다.
+
+    층이 두 개라서 한 번으로는 부족하다.
+
+    1. **정규식 층** — `=~` 는 RE2 정규식이라 `.` `+` `(` 같은 문자가 메타로 먹는다.
+       `re.escape` 로 리터럴화한다 (Loki 의 `=~` 는 완전 앵커라 부분 일치가 되지 않는다).
+    2. **LogQL 문자열 층** — 셀렉터 값은 Go 스타일 따옴표 문자열이다. 1 번이 만든
+       백슬래시를 그대로 두면 `\\.` 가 문자열 해제 단계에서 "알 수 없는 이스케이프"로
+       **쿼리 자체가 파싱 실패**한다. 그래서 백슬래시를 한 번 더 늘리고, 이름에 박힌
+       따옴표는 문자열을 끊지 못하게 escape 한다.
+    """
+    return re.escape(name).replace("\\", "\\\\").replace('"', '\\"')
+
+
 def resolve_label_mapping(label_mapping: Mapping[str, str] | None) -> dict[str, str]:
     """표준 필드 -> 소스 라벨명 매핑을 확정한다. 없는 항목의 기본값은 동일 이름이다.
 
@@ -158,6 +173,8 @@ class LokiProvider(LogSourceProvider):
 
     supports_count = True
     supports_label_discovery = True
+    #: 수집 중단 확인(`service_presence`)을 metric 쿼리 1 회로 할 수 있다.
+    supports_presence = True
     source_type = "loki"
 
     def __init__(
@@ -497,6 +514,48 @@ class LokiProvider(LogSourceProvider):
             )
         return CountSeries(step_seconds=step_seconds, points=points, warnings=warnings)
 
+    def service_presence(self, services: list[str], range: TimeRange) -> set[str]:  # noqa: A002
+        """이 기간에 로그를 **한 줄이라도** 낸 서비스의 집합 (metric 쿼리 1 회).
+
+        정책 쿼리를 쓰지 않는 것이 요점이다 — 정책은 보통 `level="ERROR"` 로 좁혀져
+        있어서, 그 쿼리로는 "오류가 없는 정상 서비스" 와 "로그가 아예 끊긴 서비스" 가
+        똑같이 0 으로 보인다. 여기서는 라벨 셀렉터만으로 전체 로그를 센다.
+
+        step 은 기간 전체를 한 버킷으로 잡는다. 필요한 것은 추이가 아니라 "있었나"
+        하나뿐이라, 버킷을 잘게 나눌수록 응답만 커진다.
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for value in services or ():
+            name = str(value).strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        if not names:
+            return set()
+
+        label = self._standard_labels["service"]
+        if not _LABEL_NAME_RE.match(label):
+            raise LogSourceError(
+                f"서비스 라벨 이름을 LogQL 셀렉터에 쓸 수 없습니다: {label!r}"
+            )
+
+        pattern = "|".join(escape_label_value_regex(name) for name in names)
+        selector = f'{{{label}=~"{pattern}"}}'
+        # 기간 전체를 1 버킷으로. `count_over_time` 이 자기 라벨(`sum by (label)`)을
+        # 유지하므로 돌아온 시리즈의 라벨이 곧 "관측된 서비스" 다.
+        step = max(1, int((range.end - range.start).total_seconds()))
+        series = self.count_over_time(selector, range, step)
+
+        present: set[str] = set()
+        for point in series.points:
+            if point.value <= 0:
+                continue
+            observed = point.labels.get(label)
+            if observed:
+                present.add(observed)
+        return present
+
     # ------------------------------------------------------------- 정규화
 
     def _to_record(self, timestamp: datetime, message: str, labels: dict[str, str]) -> LogRecord:
@@ -516,6 +575,7 @@ __all__ = [
     "ERROR_LABEL",
     "LOKI_MAX_ENTRIES",
     "LokiProvider",
+    "escape_label_value_regex",
     "is_metric_query",
     "resolve_label_mapping",
     "wrap_count_over_time",

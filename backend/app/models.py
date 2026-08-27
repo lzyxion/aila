@@ -85,6 +85,10 @@ class LokiConnection(TimestampMixin, Base):
         JSONType, nullable=False, default=dict, server_default="{}"
     )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    #: 로그를 내보내고 있어야 정상인 서비스 이름 목록 (list[str], revision 0005).
+    #: NULL·빈 목록이면 수집 중단 확인을 하지 않는다. 조회 실행 시 이 목록과
+    #: 실제 관측된 서비스를 대조해 `ingest_absent` 경고를 run.warnings 에 남긴다.
+    expected_services: Mapped[list | None] = mapped_column(JSONType, nullable=True)
 
     policies: Mapped[list[AnalysisPolicy]] = relationship(back_populates="loki_connection")
 
@@ -147,6 +151,10 @@ class AnalysisPolicy(TimestampMixin, Base):
     )
     #: 정책별 일일 분석 횟수 상한. NULL 이면 전역 한도(app_settings)만 적용한다.
     daily_analysis_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 유입량·오류 비율의 분모 쿼리 (revision 0005). 오류 셀렉터와 **같은 라벨 범위**의
+    #: 전체 로그를 세는 소스 고유 문법 쿼리다. NULL 이면 유입량·비율을 계산하지 않는다
+    #: (오류 쿼리에서 셀렉터를 역산하지 않는다 — 조용히 틀리는 지표가 없느니만 못하다).
+    baseline_query: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- 스케줄 (revision 0004) ---
     #: 켜져 있고 `schedule_interval_minutes` 가 있으면 스케줄러 tick 이 주기 실행한다.

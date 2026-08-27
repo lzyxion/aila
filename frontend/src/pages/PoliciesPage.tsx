@@ -267,6 +267,21 @@ function PolicyDetailCard({ policy, canEdit }: { policy: PolicyRead; canEdit: bo
         <pre className="aila-scroll mt-1 overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs whitespace-pre text-slate-100">
           {policy.logql}
         </pre>
+        {/*
+          분모 쿼리는 선택 항목이라 없는 정책이 더 많다 — 없을 때도 자리를 남겨 "설정할 수
+          있는 값"임을 보이고, 미설정을 0 이 아니라 문장으로 적는다.
+        */}
+        <p className="mt-3 text-xs font-medium text-slate-500">분모 쿼리 (유입량 기준)</p>
+        {policy.baseline_query ? (
+          <pre className="aila-scroll mt-1 overflow-x-auto rounded-lg bg-slate-800 px-3 py-2 text-xs whitespace-pre text-slate-100">
+            {policy.baseline_query}
+          </pre>
+        ) : (
+          <p className="mt-1 text-xs text-slate-500">
+            미설정 — 대시보드가 유입량·오류 비율을 계산하지 않습니다.
+          </p>
+        )}
+
         <dl className="mt-3 grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
           <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
             <dt className="text-slate-500">기본·상한 기간</dt>

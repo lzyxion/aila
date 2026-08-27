@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.connections.service import normalize_service_names
 from app.crypto import DecryptionError, EncryptionKeyMissingError, encrypt
 from app.db import get_db
 from app.enums import AuthType, SourceType
@@ -49,6 +50,8 @@ def _to_read(connection: LokiConnection) -> LokiConnectionRead:
         auth_type=AuthType(connection.auth_type),
         label_mapping=dict(connection.label_mapping or {}),
         active=connection.active,
+        # 컬럼은 nullable 이다 (revision 0005) — "설정 안 함" 은 빈 목록으로 나간다.
+        expected_services=normalize_service_names(connection.expected_services),
         has_secret=bool(connection.encrypted_secret),
         created_at=connection.created_at,
         updated_at=connection.updated_at,
@@ -131,6 +134,7 @@ def create_loki_connection(
         encrypted_secret=_encrypt_secret(payload.secret),
         label_mapping=dict(payload.label_mapping or {}),
         active=payload.active,
+        expected_services=normalize_service_names(payload.expected_services),
     )
     db.add(connection)
     db.commit()
@@ -217,6 +221,9 @@ def update_loki_connection(
         connection.label_mapping = dict(changes["label_mapping"])
     if changes.get("active") is not None:
         connection.active = bool(changes["active"])
+    if changes.get("expected_services") is not None:
+        # 빈 목록은 "수집 중단 확인 끄기" 라는 의사표시다 (None = 변경 없음과 다르다).
+        connection.expected_services = normalize_service_names(changes["expected_services"])
     if "secret" in changes:
         # 명시적 null 은 "secret 제거", 문자열은 재암호화 저장이다.
         connection.encrypted_secret = _encrypt_secret(changes["secret"])

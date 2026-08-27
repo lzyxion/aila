@@ -62,6 +62,8 @@ interface FormState {
   name: string;
   description: string;
   logql: string;
+  /** 빈 문자열이면 저장 시 `null` 로 보낸다 — "지운다"와 "안 건드린다"를 구분해야 한다. */
+  baseline_query: string;
   default_range_minutes: number;
   max_lines: number;
   exclusionsText: string;
@@ -81,6 +83,7 @@ const EMPTY_FORM: FormState = {
   name: '',
   description: '',
   logql: '{service="", environment="staging"} | json | level="ERROR"',
+  baseline_query: '',
   default_range_minutes: 60,
   max_lines: 1000,
   exclusionsText: '',
@@ -100,6 +103,7 @@ function toForm(policy: PolicyRead): FormState {
     name: policy.name,
     description: policy.description ?? '',
     logql: policy.logql,
+    baseline_query: policy.baseline_query ?? '',
     default_range_minutes: policy.default_range_minutes,
     max_lines: policy.max_lines,
     exclusionsText: policy.exclusions.join('\n'),
@@ -203,6 +207,9 @@ export function PolicyEditPage() {
       name: form.name.trim(),
       description: form.description.trim() || null,
       logql: form.logql.trim(),
+      // 빈 입력은 **null** 이다 — 빈 문자열을 보내면 "쿼리를 설정했는데 아무것도 세지
+      // 못하는" 상태가 되고, 화면은 그걸 "분모 쿼리 실패"로 읽는다.
+      baseline_query: form.baseline_query.trim() || null,
       default_range_minutes: form.default_range_minutes,
       max_lines: form.max_lines,
       exclusions: parseExclusions(form.exclusionsText),
@@ -387,6 +394,31 @@ export function PolicyEditPage() {
                 </p>
               </div>
             )}
+
+            {/*
+              분모 쿼리 — **선택 항목**이다. 없으면 대시보드가 유입량·오류 비율을 그리지
+              않을 뿐 조회·그룹화·분석은 그대로 동작한다. 그래서 필수 표시를 붙이지 않고,
+              "무엇을 세는 쿼리인가"를 힌트에 정확히 적는다 (오류 쿼리를 그대로 붙여 넣으면
+              비율이 항상 100% 가 된다).
+            */}
+            <Field
+              label="분모 쿼리 (유입량 기준)"
+              className="sm:col-span-2"
+              hint={
+                <>
+                  오류 셀렉터와 <strong>같은 라벨 범위</strong>의 전체 로그를 세는 쿼리 —
+                  유입량·오류 비율의 <strong>분모</strong>입니다. 비워 두면 대시보드가 유입량과
+                  비율을 계산하지 않습니다(0 이 아니라 <code>-</code> 로 표시됩니다).
+                </>
+              }
+            >
+              <Textarea
+                rows={2}
+                placeholder={'{service="payment-api", environment="staging"}'}
+                value={form.baseline_query}
+                onChange={(event) => setForm({ ...form, baseline_query: event.target.value })}
+              />
+            </Field>
 
             <Field label="기본 기간 (분)" required hint="기본값이자 실행 상한입니다.">
               <Input

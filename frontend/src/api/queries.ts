@@ -66,6 +66,7 @@ export const queryKeys = {
   dashboardErrorGroups: (params: { limit: number; offset: number }) =>
     ['dashboard', 'error-groups', params] as const,
   usage: (params: UsageParams) => ['usage', params] as const,
+  dailyLimit: ['usage', 'daily-limit'] as const,
   settings: ['settings'] as const,
   setting: (key: string) => ['settings', key] as const,
 };
@@ -183,6 +184,15 @@ export function useUpdateLokiConnection() {
   return useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: LokiConnectionUpdate }) =>
       lokiConnections.update(id, payload),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.lokiConnections }),
+  });
+}
+
+/** 실제 삭제가 아니라 `active=false` 다 — 정책·조회 이력이 이 연결을 참조한다. */
+export function useDeactivateLokiConnection() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => lokiConnections.deactivate(id),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.lokiConnections }),
   });
 }
@@ -452,6 +462,22 @@ export function useDashboardErrorGroups(params: { limit: number; offset: number 
 
 export function useUsage(params: UsageParams) {
   return useQuery({ queryKey: queryKeys.usage(params), queryFn: () => usage.get(params) });
+}
+
+/**
+ * 오늘의 분석 한도 소진 게이지 (Phase 7).
+ *
+ * 백엔드에 아직 경로가 없을 수 있으므로(404/405/501) **재시도하지 않는다** — 화면은
+ * 그 경우 게이지를 감춘다. 분석이 끝날 때마다 소진량이 바뀌므로 `['usage']` 무효화에
+ * 같이 걸리도록 키를 `usage` 아래에 둔다.
+ */
+export function useDailyLimit() {
+  return useQuery({
+    queryKey: queryKeys.dailyLimit,
+    queryFn: () => usage.dailyLimit(),
+    retry: false,
+    staleTime: 30_000,
+  });
 }
 
 // ------------------------------------------------------------------- settings

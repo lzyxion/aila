@@ -21,15 +21,15 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.dashboard.counting import fold_by_timestamp, group_count, unanalyzed_group_count
 from app.enums import QueryRunStatus
-from app.models import AnalysisJob, AnalysisPolicy, ErrorGroup, LokiConnection, QueryRun
+from app.models import AnalysisPolicy, LokiConnection, QueryRun
 from app.policies import integrations
 from app.schemas.api import (
     DashboardPolicySummary,
@@ -75,53 +75,6 @@ def _latest_run(db: Session, policy_id: int, *, succeeded_only: bool = False) ->
     if succeeded_only:
         stmt = stmt.where(QueryRun.status == QueryRunStatus.SUCCEEDED.value)
     return db.scalars(stmt).first()
-
-
-def _group_count(db: Session, run_id: int) -> int:
-    return int(
-        db.scalar(select(func.count(ErrorGroup.id)).where(ErrorGroup.query_run_id == run_id)) or 0
-    )
-
-
-def unanalyzed_group_count(db: Session, run_id: int) -> int:
-    """`run_id` 의 그룹 중 **fingerprint 분석 이력이 전혀 없는** 그룹 수.
-
-    판정 기준이 그룹 id 가 아니라 fingerprint 인 것이 핵심이다 — 그룹 id 는 조회
-    회차마다 새로 생기므로, id 로 세면 어제 분석한 오류가 오늘도 "미분석" 으로 잡혀
-    자동 분석이 매 회차 같은 오류를 다시 태운다.
-
-    상태도 보지 않는다. 실패한 분석도 "이력이 있다" 로 친다 — 실패를 미분석으로 세면
-    같은 실패를 자동 분석이 무한히 재시도한다.
-    """
-    exists = (
-        select(AnalysisJob.id)
-        .where(AnalysisJob.fingerprint == ErrorGroup.fingerprint)
-        .exists()
-    )
-    return int(
-        db.scalar(
-            select(func.count(ErrorGroup.id)).where(
-                ErrorGroup.query_run_id == run_id, ~exists
-            )
-        )
-        or 0
-    )
-
-
-def _fold_by_timestamp(points: Sequence[CountPoint]) -> list[CountPoint]:
-    """같은 시각의 여러 시리즈를 한 점으로 접는다 (라벨은 버린다).
-
-    metric 쿼리는 `sum by (service)` 라 서비스가 셋이면 한 시각에 점이 셋 나온다.
-    그대로 실으면 카드의 미니 차트가 같은 시각을 세 번 그린다. `total_errors_24h`
-    가 전 시리즈의 합인 것과 같은 기준으로 접어야 "선 아래 면적 = 총 건수" 가 된다.
-    """
-    totals: dict[datetime, float] = {}
-    for point in points:
-        totals[point.timestamp] = totals.get(point.timestamp, 0.0) + point.value
-    return [
-        CountPoint(timestamp=timestamp, value=totals[timestamp])
-        for timestamp in sorted(totals)
-    ]
 
 
 def _errors_24h(
@@ -180,7 +133,7 @@ def _errors_24h(
     def _call() -> tuple[float, list[CountPoint], list[FetchWarning]]:
         series = provider.count_over_time(query, time_range, SUMMARY_STEP_SECONDS)
         # 합계와 시리즈가 **같은 응답**에서 나온다 (추가 호출 없음).
-        return float(series.total), _fold_by_timestamp(series.points), list(series.warnings)
+        return float(series.total), fold_by_timestamp(series.points), list(series.warnings)
 
     # 정책 하나가 느리다고 나머지 정책의 응답까지 붙잡지 않게 벽시계 제한을 건다.
     # `shutdown(wait=False)` — 버린 호출이 끝나기를 기다리지 않는다 (어댑터 타임아웃이 끝낸다).
@@ -237,7 +190,7 @@ def _last_run_payload(db: Session, run: QueryRun) -> DashboardSummaryLastRun:
         started_at=run.started_at,
         status=run.status,
         fetched_count=run.fetched_count,
-        group_count=_group_count(db, run.id),
+        group_count=group_count(db, run.id),
         warnings=_run_warnings(run),
     )
 

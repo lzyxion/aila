@@ -14,6 +14,7 @@ import type {
   AppSettingRead,
   AuthUser,
   ConnectionTestResponse,
+  DailyLimitResponse,
   DashboardErrorGroupsResponse,
   DashboardOverviewParams,
   DashboardOverviewResponse,
@@ -229,6 +230,16 @@ export const dashboard = {
 
 export const usage = {
   get: (params: UsageParams) => api.get<UsageResponse>(`${P}/usage`, { query: { ...params } }),
+  /**
+   * 오늘의 분석 한도 소진 게이지 (Phase 7).
+   *
+   * "오늘"의 경계는 429 를 내는 한도 검사와 **같은 계산**이다(`app_settings.timezone` 의
+   * 로컬 자정) — 게이지와 429 가 다른 숫자를 보이면 게이지를 믿을 수 없다.
+   *
+   * 백엔드에 아직 경로가 없으면 호출부가 게이지를 **감춘다** (`isEndpointMissing`) —
+   * 한도를 모르는 상태를 "0/0" 으로 그리면 "다 썼다"로 읽힌다.
+   */
+  dailyLimit: () => api.get<DailyLimitResponse>(`${P}/usage/daily-limit`),
 };
 
 // ----------------------------------------------------------------- settings

@@ -86,6 +86,60 @@ def test_update_policy(client, db) -> None:
     assert updated["logql"] == created["logql"]
 
 
+# ------------------------------------------------ baseline_query (Phase 7)
+
+
+def test_baseline_query_round_trips(client, db) -> None:
+    connection = make_connection(db)
+    baseline = '{service="payment-api"}'
+
+    created = client.post(
+        "/api/policies", json=_payload(connection.id, baseline_query=baseline)
+    ).json()
+
+    assert created["baseline_query"] == baseline
+    assert client.get(f"/api/policies/{created['id']}").json()["baseline_query"] == baseline
+    assert db.get(AnalysisPolicy, created["id"]).baseline_query == baseline
+
+
+def test_blank_baseline_query_is_stored_as_null(client, db) -> None:
+    """빈 쿼리가 "설정됨" 으로 남으면 대시보드가 매번 분모 실패만 띄운다."""
+    connection = make_connection(db)
+
+    created = client.post(
+        "/api/policies", json=_payload(connection.id, baseline_query="   ")
+    ).json()
+
+    assert created["baseline_query"] is None
+    assert db.get(AnalysisPolicy, created["id"]).baseline_query is None
+
+
+def test_baseline_query_can_be_set_and_cleared_by_patch(client, db) -> None:
+    connection = make_connection(db)
+    created = client.post("/api/policies", json=_payload(connection.id)).json()
+    assert created["baseline_query"] is None
+
+    updated = client.patch(
+        f"/api/policies/{created['id']}", json={"baseline_query": '{service="x"}'}
+    ).json()
+    assert updated["baseline_query"] == '{service="x"}'
+
+    # 건드리지 않은 요청은 값을 유지한다 (exclude_unset).
+    kept = client.patch(f"/api/policies/{created['id']}", json={"max_lines": 10}).json()
+    assert kept["baseline_query"] == '{service="x"}'
+
+    # 명시적 null 로 지운다 — `daily_analysis_limit` 와 같은 관례다.
+    cleared = client.patch(
+        f"/api/policies/{created['id']}", json={"baseline_query": None}
+    ).json()
+    assert cleared["baseline_query"] is None
+
+    blanked = client.patch(
+        f"/api/policies/{created['id']}", json={"baseline_query": " \t "}
+    ).json()
+    assert blanked["baseline_query"] is None
+
+
 def test_delete_deactivates_instead_of_removing(client, db) -> None:
     """정책을 지우면 query_runs·분석 이력이 맥락을 잃으므로 비활성화만 한다."""
     connection = make_connection(db)

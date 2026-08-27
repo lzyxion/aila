@@ -24,7 +24,8 @@ import type { DashboardSummaryPolicy, PolicyRead } from '../api/types';
 import { policySchedule } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
 import { Sparkline } from '../components/chartsLazy';
-import { QueryRunStatusBadge, ScheduleBadge } from '../components/StatusBadges';
+import { DailyLimitGauge } from '../components/DailyLimitGauge';
+import { IngestAbsentBadge, QueryRunStatusBadge, ScheduleBadge } from '../components/StatusBadges';
 import {
   Badge,
   Button,
@@ -46,6 +47,7 @@ import {
   formatDateTime,
   formatNumber,
   formatRelative,
+  ingestAbsentWarnings,
   warningCodeLabel,
 } from '../lib/format';
 import { AllErrorGroupsPanel } from './ErrorGroupsPage';
@@ -94,6 +96,15 @@ export function HomePage() {
           )
         }
       />
+
+      {/*
+        오늘의 분석 한도. 카드를 훑기 전에 "지금 분석을 몇 번 더 돌릴 수 있는가"가 보여야
+        한다 — 한도를 모르고 실행을 누르면 429 가 처음 알려주는 셈이 된다. 백엔드에 아직
+        경로가 없으면 이 줄은 통째로 사라진다.
+      */}
+      <div className="mb-6">
+        <DailyLimitGauge />
+      </div>
 
       {summaryQuery.isPending && <LoadingBlock />}
 
@@ -281,12 +292,29 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
   const unanalyzed = policy.unanalyzed_group_count;
   // 백엔드가 아직 이 필드를 안 내려주면 `undefined` 다 — 빈 배열과 같게 다룬다(오류 아님).
   const series = policy.series_24h ?? [];
+  /*
+    수집 중단 의심. `last_run.warnings` 에 실려 온다 — 카드에서 이 사실이 다른 경고와 같은
+    무게로 묻히면 안 된다. "오류 0 건"과 "로그가 끊겼다"는 정반대의 사건인데 카드에서는
+    둘 다 조용해 보이기 때문이다. 아래 일반 경고 목록에서는 빼서 같은 말을 두 번 하지 않는다.
+  */
+  const absentWarnings = ingestAbsentWarnings(lastRun?.warnings, policy.warnings);
+  const otherRunWarnings = (lastRun?.warnings ?? []).filter(
+    (warning) => warning.code !== 'ingest_absent',
+  );
+  const otherPolicyWarnings = policy.warnings.filter(
+    (warning) => warning.code !== 'ingest_absent',
+  );
 
   return (
     <section
       className={cx(
         'flex flex-col rounded-xl border bg-white shadow-sm shadow-slate-200/50',
-        unanalyzed > 0 ? 'border-amber-300' : 'border-slate-200',
+        // 색은 보조 신호다 — 같은 사실이 배지와 문장으로도 카드 안에 적혀 있다.
+        absentWarnings.length > 0
+          ? 'border-rose-300'
+          : unanalyzed > 0
+            ? 'border-amber-300'
+            : 'border-slate-200',
         !policy.active && 'opacity-75',
       )}
     >
@@ -307,7 +335,17 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
             enabled={policy.schedule_enabled}
             intervalMinutes={policy.schedule_interval_minutes}
           />
+          {absentWarnings.map((warning, index) => (
+            <IngestAbsentBadge key={`${warning.code}-${index}`} warning={warning} compact />
+          ))}
         </div>
+        {absentWarnings.length > 0 && (
+          <ul className="mt-2 space-y-0.5 text-xs text-rose-800">
+            {absentWarnings.map((warning, index) => (
+              <li key={`msg-${warning.code}-${index}`}>{warning.message}</li>
+            ))}
+          </ul>
+        )}
       </header>
 
       <div className="grid grid-cols-2 gap-px bg-slate-100">
@@ -386,9 +424,9 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
               {formatNumber(lastRun.fetched_count)} 라인 조회 ·{' '}
               <strong className="text-slate-800">{formatNumber(lastRun.group_count)}</strong> 개 그룹
             </p>
-            {lastRun.warnings.length > 0 && (
+            {otherRunWarnings.length > 0 && (
               <div className="flex flex-wrap gap-1">
-                {lastRun.warnings.map((warning, index) => (
+                {otherRunWarnings.map((warning, index) => (
                   <Badge key={`${warning.code}-${index}`} tone="warning" title={warning.message}>
                     {warningCodeLabel(warning.code)}
                   </Badge>
@@ -400,9 +438,9 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
           <p className="mt-1.5 text-sm text-slate-500">아직 실행 이력이 없습니다.</p>
         )}
 
-        {policy.warnings.length > 0 && (
+        {otherPolicyWarnings.length > 0 && (
           <ul className="mt-3 space-y-1 text-xs text-amber-800">
-            {policy.warnings.map((warning, index) => (
+            {otherPolicyWarnings.map((warning, index) => (
               <li key={`${warning.code}-${index}`}>
                 <strong>{warningCodeLabel(warning.code)}</strong> — {warning.message}
               </li>

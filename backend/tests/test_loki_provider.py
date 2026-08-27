@@ -16,6 +16,7 @@ import respx
 from app.loki.provider import (
     LOKI_MAX_ENTRIES,
     LokiProvider,
+    escape_label_value_regex,
     is_metric_query,
     resolve_label_mapping,
     wrap_count_over_time,
@@ -531,3 +532,79 @@ def test_timeout_message_does_not_leak_url_credentials() -> None:
         make_provider(base_url=CREDENTIAL_URL).fetch_logs(LOGQL, RANGE, 10)
 
     assert "sup3rs3cr3t" not in str(excinfo.value)
+
+
+# ------------------------------------------------- service_presence (Phase 7)
+
+
+def test_escape_label_value_regex_covers_both_layers() -> None:
+    r"""정규식 층(`re.escape`)과 LogQL 문자열 층을 모두 통과해야 한다.
+
+    한 층만 이스케이프하면 `{app=~"a\.b"}` 가 되고, Loki 는 문자열 해제 단계에서
+    알 수 없는 이스케이프로 보고 **쿼리 전체를 파싱 실패**시킨다.
+    """
+    assert escape_label_value_regex("payment-api") == "payment\\\\-api"
+    assert escape_label_value_regex("auth.api") == "auth\\\\.api"
+    # 이름에 박힌 따옴표가 셀렉터 문자열을 끊지 못한다.
+    assert '"' not in escape_label_value_regex('a"b').replace('\\"', "")
+
+
+@respx.mock
+def test_service_presence_uses_one_escaped_selector_query() -> None:
+    route = respx.get(QUERY_RANGE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=matrix_payload(
+                [
+                    {
+                        "metric": {"app": "payment-api"},
+                        "values": [[START.timestamp(), "12"]],
+                    }
+                ]
+            ),
+        )
+    )
+    provider = make_provider(label_mapping={"service": "app"})
+
+    present = provider.service_presence(
+        ["payment-api", "auth.api", "payment-api", "  "], RANGE
+    )
+
+    assert present == {"payment-api"}  # auth.api 는 시리즈가 오지 않았다 = 부재
+    params = route.calls.last.request.url.params
+    # metric 쿼리 1 회. 이름은 이스케이프되고, 기간 전체가 한 버킷이다.
+    assert params["query"] == (
+        'sum by (app) (count_over_time({app=~"payment\\\\-api|auth\\\\.api"} [3600s]))'
+    )
+    assert params["step"] == "3600"
+    assert len(route.calls) == 1
+
+
+@respx.mock
+def test_service_presence_ignores_zero_valued_series() -> None:
+    """`count_over_time` 은 0 짜리 시리즈를 줄 수 있다 — 0 은 "한 줄도 없었다" 다."""
+    respx.get(QUERY_RANGE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=matrix_payload(
+                [
+                    {"metric": {"service": "a"}, "values": [[START.timestamp(), "0"]]},
+                    {"metric": {"service": "b"}, "values": [[START.timestamp(), "3"]]},
+                ]
+            ),
+        )
+    )
+
+    assert make_provider().service_presence(["a", "b"], RANGE) == {"b"}
+
+
+@respx.mock
+def test_service_presence_without_names_makes_no_request() -> None:
+    route = respx.get(QUERY_RANGE_URL)
+
+    assert make_provider().service_presence([" ", ""], RANGE) == set()
+    assert not route.called
+
+
+def test_loki_provider_declares_presence_support() -> None:
+    assert LokiProvider.supports_presence is True

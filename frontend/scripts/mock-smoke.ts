@@ -16,12 +16,14 @@ import type {
   AnalysisJobRead,
   AppSettingRead,
   AuthUser,
+  DailyLimitResponse,
   DashboardErrorGroupsResponse,
   DashboardOverviewResponse,
   DashboardSummaryResponse,
   ErrorGroupDetail,
   ErrorGroupListResponse,
   LLMModelListResponse,
+  LokiConnectionRead,
   PolicyPreviewResponse,
   PolicyRead,
   QueryRunListResponse,
@@ -526,6 +528,54 @@ async function main(): Promise<void> {
       overview.top_groups.some((g) => g.analysis_status === null),
   );
 
+  console.log('정책 상세 지표 (계약 — Phase 7 overview)');
+  // top 을 일부러 작게 잡는다 — 지표가 `top_groups.length`(상위 N)를 쓰고 있으면 여기서 갈린다.
+  const detail1 = await mockRequest<DashboardOverviewResponse>('GET', '/api/dashboard/overview', {
+    query: { policy_id: 1, step_seconds: 300, top: 3 },
+  });
+  check(
+    'group_count 는 회차 전체 COUNT (상위 N 이 아니다)',
+    detail1.group_count === 6 && detail1.top_groups.length === 3,
+    `group_count=${detail1.group_count} top=${detail1.top_groups.length}`,
+  );
+  check(
+    'unanalyzed_group_count 도 회차 전체 기준',
+    typeof detail1.unanalyzed_group_count === 'number' &&
+      detail1.unanalyzed_group_count > 0 &&
+      detail1.unanalyzed_group_count <= (detail1.group_count ?? 0),
+  );
+  // 시각별 합산이 계약이다 — 같은 timestamp 가 두 번 오면 차트가 한 시각을 여러 번 그린다.
+  check(
+    'series 는 시각별 합산 (timestamp 중복 없음)',
+    new Set(detail1.series.map((point) => point.timestamp)).size === detail1.series.length,
+  );
+  check(
+    '분모 쿼리가 있는 정책은 ingest_total 이 숫자',
+    typeof detail1.ingest_total === 'number' && detail1.ingest_total > 0,
+  );
+  check(
+    'ingest_series 합계가 ingest_total 과 일치 (같은 결과 재사용)',
+    detail1.ingest_series.reduce((acc, point) => acc + point.value, 0) === detail1.ingest_total,
+  );
+  check(
+    'error_ratio = total_errors / ingest_total',
+    detail1.error_ratio !== null &&
+      detail1.error_ratio != null &&
+      Math.abs(detail1.error_ratio - detail1.total_errors / (detail1.ingest_total ?? 1)) < 1e-9,
+  );
+  check(
+    'error_ratio 는 0 초과 1 이하 (분모가 오류보다 크다)',
+    (detail1.error_ratio ?? 0) > 0 && (detail1.error_ratio ?? 0) <= 1,
+  );
+
+  // 분모 쿼리가 없는 정책 — **0 이 아니라 null** 이어야 화면이 `-` 로 그린다.
+  const detail2 = await mockRequest<DashboardOverviewResponse>('GET', '/api/dashboard/overview', {
+    query: { policy_id: 2, step_seconds: 300, top: 10 },
+  });
+  check('분모 쿼리 미설정이면 ingest_total 은 null (0 이 아니다)', detail2.ingest_total === null);
+  check('미설정이면 ingest_series 는 빈 배열', detail2.ingest_series.length === 0);
+  check('미설정이면 error_ratio 도 null', detail2.error_ratio === null);
+
   console.log('policies');
   const created = await mockRequest<PolicyRead>('POST', '/api/policies', {
     body: {
@@ -590,6 +640,112 @@ async function main(): Promise<void> {
   check(
     '없는 정책의 이력은 404',
     await expectStatus(() => mockRequest('GET', '/api/policies/999999/query-runs', {}), 404),
+  );
+
+  console.log('분모 쿼리 (계약 — baseline_query)');
+  const seeded = await mockRequest<PolicyRead[]>('GET', '/api/policies', {});
+  check(
+    '분모 쿼리를 가진 정책과 없는 정책이 둘 다 있다',
+    seeded.some((policy) => typeof policy.baseline_query === 'string' && policy.baseline_query) &&
+      seeded.some((policy) => !policy.baseline_query),
+  );
+  const withBaseline = await mockRequest<PolicyRead>('POST', '/api/policies', {
+    body: {
+      loki_connection_id: 1,
+      name: 'smoke-baseline',
+      logql: '{service="payment-api"} | json | level="ERROR"',
+      baseline_query: '{service="payment-api"}',
+      default_range_minutes: 30,
+      max_lines: 100,
+      exclusions: [],
+      max_samples_per_group: 2,
+      allow_ai_analysis: true,
+      daily_analysis_limit: null,
+    },
+  });
+  check('저장한 분모 쿼리가 그대로 남는다', withBaseline.baseline_query === '{service="payment-api"}');
+  // 빈 입력은 화면이 **null 로** 보낸다 — 빈 문자열이 저장되면 "설정했는데 못 세는" 상태가 된다.
+  const clearedBaseline = await mockRequest<PolicyRead>(
+    'PATCH',
+    `/api/policies/${withBaseline.id}`,
+    { body: { baseline_query: null } },
+  );
+  check('명시적 null 로 분모 쿼리를 지운다', clearedBaseline.baseline_query === null);
+  const emptyBaseline = await mockRequest<PolicyRead>('PATCH', `/api/policies/${withBaseline.id}`, {
+    body: { baseline_query: '   ' },
+  });
+  check('빈 문자열도 미설정으로 접힌다', emptyBaseline.baseline_query === null);
+  await mockRequest<void>('DELETE', `/api/policies/${withBaseline.id}`, {});
+
+  console.log('수집 확인 대상 (계약 — expected_services)');
+  const lokiConns = await mockRequest<LokiConnectionRead[]>('GET', '/api/loki-connections', {});
+  check(
+    '연결에 expected_services 가 실린다',
+    lokiConns.every((connection) => Array.isArray(connection.expected_services)),
+  );
+  check(
+    '확인 대상이 있는 연결과 없는 연결이 둘 다 있다',
+    lokiConns.some((connection) => (connection.expected_services ?? []).length > 0) &&
+      lokiConns.some((connection) => (connection.expected_services ?? []).length === 0),
+  );
+  const newConn = await mockRequest<LokiConnectionRead>('POST', '/api/loki-connections', {
+    body: {
+      name: 'smoke-loki',
+      source_type: 'loki',
+      base_url: 'http://loki:3100',
+      auth_type: 'none',
+      label_mapping: { app: 'service' },
+      active: true,
+      expected_services: ['payment-api', 'billing-api'],
+    },
+  });
+  check(
+    '저장한 확인 대상이 그대로 남는다',
+    newConn.expected_services.join(',') === 'payment-api,billing-api',
+  );
+  check('secret 은 응답에 평문으로 오지 않는다', !JSON.stringify(newConn).includes('secret":"'));
+  // 빈 배열은 "확인을 끈다"는 명시적 값이다 — 생략(변경 없음)과 구분되어야 한다.
+  const offConn = await mockRequest<LokiConnectionRead>(
+    'PATCH',
+    `/api/loki-connections/${newConn.id}`,
+    { body: { expected_services: [] } },
+  );
+  check('빈 배열로 수집 확인을 끌 수 있다', offConn.expected_services.length === 0);
+  const untouched = await mockRequest<LokiConnectionRead>(
+    'PATCH',
+    `/api/loki-connections/${newConn.id}`,
+    { body: { name: 'smoke-loki-2' } },
+  );
+  check('생략은 변경 없음이다', untouched.expected_services.length === 0);
+  await mockRequest<void>('DELETE', `/api/loki-connections/${newConn.id}`, {});
+
+  console.log('수집 중단 경고 (계약 — ingest_absent)');
+  const badgeRuns = await mockRequest<QueryRunListResponse>('GET', '/api/policies/1/query-runs', {
+    query: { limit: 20, offset: 0 },
+  });
+  const absentWarnings = badgeRuns.items
+    .flatMap((run) => run.warnings)
+    .filter((warning) => warning.code === 'ingest_absent');
+  check('조회 회차 경고에 ingest_absent 가 남는다', absentWarnings.length > 0);
+  check(
+    '메시지에 부재 서비스 이름이 그대로 실린다 (색 없이도 읽힌다)',
+    absentWarnings.some((warning) => warning.message.includes('billing-api')),
+  );
+  check(
+    'count 는 부재 서비스 수',
+    absentWarnings.every((warning) => typeof warning.count === 'number' && warning.count >= 1),
+  );
+  // 홈 카드의 배지는 `last_run.warnings` 로 그린다 — 여기 없으면 카드에서 사라진다.
+  const badgeSummary = await mockRequest<DashboardSummaryResponse>(
+    'GET',
+    '/api/dashboard/summary',
+    {},
+  );
+  check(
+    'summary 의 last_run.warnings 에도 실린다 (홈 카드 배지의 출처)',
+    badgeSummary.policies.some((policy) =>
+      (policy.last_run?.warnings ?? []).some((warning) => warning.code === 'ingest_absent'),
+    ),
   );
 
   console.log('llm 모델 목록 (계약 1)');
@@ -732,6 +888,40 @@ async function main(): Promise<void> {
   // 분해를 요청하지 않으면 **null** 이다 — 빈 배열이면 "분해했더니 비었다"와 구분되지 않고,
   // 화면이 안내 문구 대신 "기록 없음"을 보여주게 된다. 라이브 백엔드도 null 을 싣는다.
   check('group_by 없이 부르면 buckets 는 null (빈 배열이 아니다)', usage.buckets === null);
+
+  console.log('일일 한도 게이지 (계약 — GET /usage/daily-limit)');
+  const dailyLimit = await mockRequest<DailyLimitResponse>('GET', '/api/usage/daily-limit', {});
+  check(
+    '봉투 {date, timezone, global_limit, global_used, policies}',
+    typeof dailyLimit.date === 'string' &&
+      typeof dailyLimit.timezone === 'string' &&
+      typeof dailyLimit.global_limit === 'number' &&
+      typeof dailyLimit.global_used === 'number' &&
+      Array.isArray(dailyLimit.policies),
+  );
+  check('date 는 로컬 날짜 YYYY-MM-DD', /^\d{4}-\d{2}-\d{2}$/.test(dailyLimit.date));
+  // 하루 경계는 사용량 분해(group_by=day)와 **같은 계산**이어야 두 화면의 "오늘"이 같다.
+  check('timezone 은 app_settings 값 (서버 로케일이 아니다)', dailyLimit.timezone === 'Asia/Seoul');
+  check(
+    '오늘 사용량은 0 이상이고 전체 실행 수를 넘지 않는다',
+    dailyLimit.global_used >= 0 && dailyLimit.global_used <= usage.total_jobs + 5,
+  );
+  check(
+    '정책 행은 {policy_id, name, limit, used}',
+    dailyLimit.policies.every(
+      (policy) =>
+        typeof policy.policy_id === 'number' &&
+        typeof policy.name === 'string' &&
+        typeof policy.limit === 'number' &&
+        typeof policy.used === 'number',
+    ),
+  );
+  check('자체 한도를 가진 정책이 실린다', dailyLimit.policies.some((policy) => policy.policy_id === 1));
+  // 한도가 없는 정책을 실으면 "정책마다 별도 상한이 있다"로 읽힌다 (계약).
+  check(
+    '자체 한도가 없는 정책은 실리지 않는다',
+    !dailyLimit.policies.some((policy) => policy.policy_id === 2),
+  );
 
   console.log('사용량 분해 (계약 3 — group_by)');
   const byDay = await mockRequest<UsageResponse>('GET', '/api/usage', {

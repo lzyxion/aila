@@ -87,6 +87,20 @@ export function formatTokens(value: number | null | undefined): string {
   return `${value.toLocaleString('ko-KR')} tok`;
 }
 
+/**
+ * 비율 표기 (0.023 -> "2.3%").
+ *
+ * **null 은 0% 가 아니다** — 분모 쿼리를 설정하지 않았거나 계산에 실패한 상태이고,
+ * 0% 로 적으면 "오류가 하나도 없었다"로 읽힌다. 그래서 `-` 를 준다 (추정 비용과 같은 규칙).
+ */
+export function formatRatio(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '-';
+  return `${(value * 100).toLocaleString('ko-KR', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}%`;
+}
+
 /** 스케줄 주기 표기. 분 단위로 저장되지만 화면에서는 "6시간"이 읽기 쉽다. */
 export function formatIntervalMinutes(minutes: number | null | undefined): string {
   if (minutes === null || minutes === undefined || !Number.isFinite(minutes)) return '-';
@@ -213,9 +227,45 @@ export function warningCodeLabel(code: string): string {
       return '최근 실행 실패';
     case 'no_successful_run':
       return '성공한 실행 없음';
+    case 'connection_unavailable':
+      return '연결 사용 불가';
+    case 'count_unsupported':
+      return 'metric 미지원 소스';
+    case 'count_query_timeout':
+      return 'metric 쿼리 시간 초과';
+    // Phase 7 — 수집 중단 확인 · 유입량 분모 쿼리
+    case 'ingest_absent':
+      return '수집 중단 의심';
+    case 'presence_check_failed':
+      return '수집 확인 실패';
+    case 'baseline_query_failed':
+      return '분모 쿼리 실패';
     default:
       return code;
   }
+}
+
+/**
+ * 수집 중단 경고(`ingest_absent`)만 골라낸다.
+ *
+ * 여러 출처(조회 회차·overview·방금 실행한 결과)의 경고 목록이 같은 사실을 두 번 싣는
+ * 일이 있으므로 **메시지 기준으로 중복을 접는다** — 같은 배지가 두 개 붙으면 "두 번
+ * 일어난 일"로 읽힌다.
+ */
+export function ingestAbsentWarnings(
+  ...groups: Array<Array<{ code: string; message: string; count?: number | null }> | undefined>
+): Array<{ code: string; message: string; count?: number | null }> {
+  const seen = new Set<string>();
+  const rows: Array<{ code: string; message: string; count?: number | null }> = [];
+  for (const group of groups) {
+    for (const warning of group ?? []) {
+      if (warning.code !== 'ingest_absent') continue;
+      if (seen.has(warning.message)) continue;
+      seen.add(warning.message);
+      rows.push(warning);
+    }
+  }
+  return rows;
 }
 
 export function truncate(text: string, max = 140): string {

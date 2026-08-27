@@ -198,6 +198,12 @@ export interface LokiConnectionBase {
   /** 소스 라벨명 -> 표준 필드명 매핑. 예: {"app": "service"} */
   label_mapping: Record<string, string>;
   active: boolean;
+  /**
+   * 로그를 내보내고 있어야 정상인 서비스 이름 목록 (Phase 7, 표준 필드 `service` 기준).
+   * 비어 있으면 수집 중단 확인을 하지 않는다. 조회 실행 시 부재 서비스가
+   * `ingest_absent` 경고로 run.warnings 에 남는다.
+   */
+  expected_services: string[];
 }
 
 export interface LokiConnectionCreate extends LokiConnectionBase {
@@ -212,6 +218,8 @@ export interface LokiConnectionUpdate {
   secret?: string | null;
   label_mapping?: Record<string, string> | null;
   active?: boolean | null;
+  /** 빈 배열을 주면 수집 중단 확인을 끈다. 생략은 "변경 없음"이다. */
+  expected_services?: string[] | null;
 }
 
 export interface LokiConnectionRead extends LokiConnectionBase {
@@ -321,6 +329,11 @@ export interface PolicyBase {
   allow_ai_analysis: boolean;
   /** 정책별 일일 분석 상한. null 이면 전역 한도만 적용. */
   daily_analysis_limit?: number | null;
+  /**
+   * 유입량·오류 비율의 **분모 쿼리** (Phase 7). 오류 셀렉터와 같은 라벨 범위의
+   * 전체 로그를 세는 소스 고유 문법 쿼리. null 이면 대시보드가 유입량·비율을 그리지 않는다.
+   */
+  baseline_query?: string | null;
 
   // --- 스케줄 (0004 마이그레이션, additive) ---
   /** 스케줄 조회를 켠다. 끄면 아래 두 값은 무시된다. */
@@ -349,6 +362,8 @@ export interface PolicyUpdate {
   max_samples_per_group?: number | null;
   allow_ai_analysis?: boolean | null;
   daily_analysis_limit?: number | null;
+  /** 명시적 null 로 분모 쿼리를 지운다. 생략은 "변경 없음"이다. */
+  baseline_query?: string | null;
   active?: boolean | null;
   schedule_enabled?: boolean | null;
   schedule_interval_minutes?: number | null;
@@ -601,7 +616,16 @@ export interface ServiceErrorCount {
   count: number;
 }
 
-/** 건수는 metric 쿼리 기반이며 로그 라인 수가 아니다. */
+/**
+ * 건수는 metric 쿼리 기반이며 로그 라인 수가 아니다.
+ *
+ * Phase 7 규칙:
+ * - `series` 는 시각별 합산이다 (같은 timestamp 는 한 번만 온다).
+ * - `group_count`·`unanalyzed_group_count` 는 회차 전체 COUNT 다 — `top_groups.length`
+ *   (상위 N)를 지표 자리에 쓰지 않는다.
+ * - `ingest_total`·`error_ratio` 는 정책에 `baseline_query` 가 있을 때만 온다.
+ *   미설정·실패는 0 이 아니라 **null** 이며, 화면에는 `-` 로 표시한다.
+ */
 export interface DashboardOverviewResponse {
   policy_id?: number | null;
   query_run_id?: number | null;
@@ -612,6 +636,11 @@ export interface DashboardOverviewResponse {
   series: CountPoint[];
   by_service: ServiceErrorCount[];
   top_groups: ErrorGroupSummary[];
+  group_count?: number | null;
+  unanalyzed_group_count?: number | null;
+  ingest_total?: number | null;
+  ingest_series: CountPoint[];
+  error_ratio?: number | null;
   warnings: FetchWarning[];
 }
 
@@ -788,6 +817,29 @@ export interface UsageResponse {
    * 키 자체를 안 보내므로 `undefined` 도 같이 받는다(둘 다 "분해 없음"이다).
    */
   buckets?: UsageBucket[] | null;
+}
+
+/** `GET /usage/daily-limit` 의 정책 한 줄 — **자체 한도를 가진 정책만** 온다. */
+export interface PolicyDailyUsage {
+  policy_id: number;
+  name: string;
+  limit: number;
+  used: number;
+}
+
+/**
+ * `GET /usage/daily-limit` — 오늘의 분석 한도 소진 게이지.
+ *
+ * "오늘"의 경계는 429 를 내는 한도 검사와 **같은 계산**이다
+ * (`app_settings.timezone` 로컬 자정). 게이지와 429 가 다른 숫자를 보이면 안 된다.
+ */
+export interface DailyLimitResponse {
+  /** 기준 로컬 날짜 "YYYY-MM-DD" 와 그 타임존 이름. */
+  date: string;
+  timezone: string;
+  global_limit: number;
+  global_used: number;
+  policies: PolicyDailyUsage[];
 }
 
 export interface UsageParams {

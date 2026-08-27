@@ -598,3 +598,87 @@ def test_query_run_history_empty_policy_returns_empty_page(client, db) -> None:
     body = client.get(f"/api/policies/{policy.id}/query-runs").json()
 
     assert body == {"total": 0, "limit": 20, "offset": 0, "items": []}
+
+
+# ------------------------------------------- 수집 중단 확인 (Phase 7)
+#
+# 연결의 `expected_services` 중 이 기간에 로그가 없는 서비스를 **경고로만** 남긴다.
+# 알림도 자동 실행도 붙이지 않는다 — 자동 트리거는 `auto_analyze_new` 하나뿐이다.
+
+
+def _presence_provider(**overrides) -> FakeLogSource:
+    kwargs = {"supports_presence": True, "present_services": set()}
+    kwargs.update(overrides)
+    return FakeLogSource(**kwargs)
+
+
+def test_absent_expected_services_are_warned(client, db) -> None:
+    connection = make_connection(
+        db, expected_services=["payment-api", "auth-api", "cart-api"]
+    )
+    policy = make_policy(db, connection)
+    provider = _presence_provider(present_services={"payment-api"})
+
+    response, _, _ = _run(client, policy.id, provider)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == QueryRunStatus.SUCCEEDED.value
+    warning = next(w for w in body["warnings"] if w["code"] == "ingest_absent")
+    assert warning["count"] == 2
+    assert "auth-api" in warning["message"] and "cart-api" in warning["message"]
+    assert "payment-api" not in warning["message"]
+
+    # 확인은 조회한 것과 같은 기간으로, 기대 목록 전체를 한 번에 묻는다.
+    names, time_range = provider.presence_calls[0]
+    assert names == ["payment-api", "auth-api", "cart-api"]
+    assert time_range.start.isoformat() == body["range_start"].replace("Z", "+00:00")
+
+
+def test_no_warning_when_every_expected_service_reported(client, db) -> None:
+    connection = make_connection(db, expected_services=["payment-api", "auth-api"])
+    policy = make_policy(db, connection)
+    provider = _presence_provider(present_services={"payment-api", "auth-api"})
+
+    response, _, _ = _run(client, policy.id, provider)
+
+    assert "ingest_absent" not in _warning_codes(response.json())
+
+
+def test_presence_check_failure_does_not_fail_the_run(client, db) -> None:
+    """부재 확인이 안 됐다고 잘 읽어 온 로그·그룹까지 버릴 이유는 없다."""
+    connection = make_connection(db, expected_services=["payment-api"])
+    policy = make_policy(db, connection)
+    provider = _presence_provider(presence_error=LogSourceError("Loki 503"))
+
+    response, _, _ = _run(client, policy.id, provider, [grouped_error("fp-1")])
+
+    body = response.json()
+    assert body["status"] == QueryRunStatus.SUCCEEDED.value
+    assert body["group_count"] == 1
+    failure = next(w for w in body["warnings"] if w["code"] == "presence_check_failed")
+    assert "Loki 503" in failure["message"]
+    assert "ingest_absent" not in _warning_codes(body)
+
+
+def test_adapter_without_presence_support_is_skipped_silently(client, db) -> None:
+    """소스가 못 하는 일은 정책 설정의 잘못이 아니다 — 남길 경고가 없다."""
+    connection = make_connection(db, expected_services=["payment-api"])
+    policy = make_policy(db, connection)
+    provider = _presence_provider(supports_presence=False)
+
+    response, _, _ = _run(client, policy.id, provider)
+
+    assert provider.presence_calls == []
+    assert _warning_codes(response.json()) & {"ingest_absent", "presence_check_failed"} == set()
+
+
+def test_presence_check_is_skipped_without_expected_services(client, db) -> None:
+    connection = make_connection(db)  # expected_services 미설정
+    policy = make_policy(db, connection)
+    provider = _presence_provider()
+
+    response, _, _ = _run(client, policy.id, provider)
+
+    assert response.status_code == 201
+    assert provider.presence_calls == []

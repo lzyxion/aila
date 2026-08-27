@@ -27,8 +27,19 @@ from app.models import (
     ErrorGroup,
     QueryRun,
 )
-from app.policies.service import analysis_timezone
-from app.schemas.api import UsageAggregate, UsageBucket, UsageResponse
+from app.policies.service import (
+    analysis_timezone,
+    analysis_timezone_name,
+    global_daily_analysis_limit,
+)
+from app.schemas.api import (
+    DailyLimitResponse,
+    PolicyDailyUsage,
+    UsageAggregate,
+    UsageBucket,
+    UsageResponse,
+)
+from app.usage import integrations
 
 #: 기간을 주지 않았을 때의 기본 조회 범위.
 DEFAULT_RANGE_DAYS = 30
@@ -258,12 +269,62 @@ def get_usage(
     )
 
 
+# --------------------------------------------------- 일일 한도 소진 게이지
+
+
+def get_daily_limit(db: Session) -> DailyLimitResponse:
+    """오늘의 분석 한도 소진 현황 (Phase 7).
+
+    **429 를 내는 한도 검사와 같은 숫자를 보여야 한다.** 그래서 사용량도 하루 경계도
+    여기서 다시 세지 않고 `app.analysis.service.daily_usage` 를 그대로 부른다
+    (`usage.integrations` 지연 import). 게이지가 "2 회 남음"이라고 적어 놓고 실행이
+    429 로 막히면, 화면은 그 뒤로 아무 말도 못 하게 된다.
+
+    `policies` 에는 **자체 `daily_analysis_limit` 를 가진 정책만** 싣는다. 한도 없는
+    정책은 전역 게이지에 이미 들어 있고, 여기 실으면 "정책마다 별도 상한이 있다"로
+    읽힌다. 비활성 정책은 **빼지 않는다** — 오늘 이미 쓴 이력은 정책을 끈다고 사라지지
+    않고, 그 사용량은 전역 한도를 그대로 깎았기 때문이다.
+    """
+    tz = analysis_timezone(db)
+    # 날짜는 지금 시각이 아니라 **한도가 쓰는 경계**에서 되돌려 만든다 — 자정 전후에
+    # "날짜는 오늘인데 사용량은 어제 것" 같은 조합이 나오지 않게 한다.
+    day_start = integrations.analysis_day_start(tz)
+
+    global_used, _unused = integrations.daily_usage(db, None)
+
+    limited = db.scalars(
+        select(AnalysisPolicy)
+        .where(AnalysisPolicy.daily_analysis_limit.is_not(None))
+        .order_by(AnalysisPolicy.id)
+    ).all()
+    policies = [
+        PolicyDailyUsage(
+            policy_id=policy.id,
+            name=policy.name,
+            # 음수는 API 로는 들어올 수 없다(ge=0). 직접 주입된 값은 한도 검사에서
+            # "항상 초과"로 동작하므로 게이지도 0 으로 보여 준다 (500 대신).
+            limit=max(0, policy.daily_analysis_limit or 0),
+            used=integrations.daily_usage(db, policy)[1],
+        )
+        for policy in limited
+    ]
+
+    return DailyLimitResponse(
+        date=day_start.astimezone(tz).strftime("%Y-%m-%d"),
+        timezone=analysis_timezone_name(db),
+        global_limit=global_daily_analysis_limit(db),
+        global_used=global_used,
+        policies=policies,
+    )
+
+
 __all__ = [
     "DEFAULT_RANGE_DAYS",
     "GROUP_BY_DAY",
     "GROUP_BY_POLICY",
     "GROUP_BY_VALUES",
     "UNKNOWN_POLICY_KEY",
+    "get_daily_limit",
     "get_usage",
     "resolve_range",
 ]

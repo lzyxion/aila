@@ -58,7 +58,7 @@ export function Layout() {
                 <NavLink
                   to={ADMIN_NAV.to}
                   className={({ isActive }) => navLinkClass(isActive)}
-                  title="LLM 연결·분석 이력·사용량·사용자 관리 — admin 전용입니다."
+                  title="LLM 연결·Loki 연결·분석 이력·사용량·사용자 관리 — admin 전용입니다."
                 >
                   {ADMIN_NAV.label}
                 </NavLink>

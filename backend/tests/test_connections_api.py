@@ -99,6 +99,58 @@ def test_create_encrypts_secret_and_never_returns_plaintext(
     assert decrypt(stored.encrypted_secret) == SECRET
 
 
+# --------------------------------------------- expected_services (Phase 7)
+
+
+def test_expected_services_are_normalised_on_create(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    """공백·빈 값·중복이 그대로 저장되면 부재 경고 메시지가 그것을 그대로 되뱉는다."""
+    body = client.post(
+        "/api/loki-connections",
+        json=create_payload(
+            expected_services=[" payment-api ", "", "auth-api", "payment-api", "   "]
+        ),
+    ).json()
+
+    # 순서는 운영자가 적은 그대로 유지한다 (정렬하면 매번 다르게 보인다).
+    assert body["expected_services"] == ["payment-api", "auth-api"]
+    with session_factory() as session:
+        stored = session.execute(select(LokiConnection)).scalar_one()
+    assert stored.expected_services == ["payment-api", "auth-api"]
+
+
+def test_expected_services_default_to_empty(client: TestClient) -> None:
+    """컬럼은 nullable 이다 — 응답에서는 "설정 안 함"이 빈 목록으로 보인다."""
+    body = client.post("/api/loki-connections", json=create_payload()).json()
+
+    assert body["expected_services"] == []
+
+
+def test_expected_services_patch_sets_and_clears(client: TestClient) -> None:
+    created = client.post(
+        "/api/loki-connections", json=create_payload(expected_services=["payment-api"])
+    ).json()
+
+    updated = client.patch(
+        f"/api/loki-connections/{created['id']}",
+        json={"expected_services": ["cart-api", " cart-api ", "auth-api"]},
+    ).json()
+    assert updated["expected_services"] == ["cart-api", "auth-api"]
+
+    # 키를 주지 않으면 그대로 둔다 (None = 변경 없음).
+    kept = client.patch(
+        f"/api/loki-connections/{created['id']}", json={"active": True}
+    ).json()
+    assert kept["expected_services"] == ["cart-api", "auth-api"]
+
+    # 빈 목록은 "수집 중단 확인 끄기" 라는 의사표시다.
+    cleared = client.patch(
+        f"/api/loki-connections/{created['id']}", json={"expected_services": []}
+    ).json()
+    assert cleared["expected_services"] == []
+
+
 def test_create_rejects_duplicate_name(client: TestClient) -> None:
     assert client.post("/api/loki-connections", json=create_payload()).status_code == 201
     duplicate = client.post("/api/loki-connections", json=create_payload(base_url="http://x:3100"))

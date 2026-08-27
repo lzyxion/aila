@@ -196,6 +196,22 @@ def test_logsource_provider_is_abstract_with_capability_flags() -> None:
         LogSourceProvider()  # type: ignore[abstract]
 
 
+def test_service_presence_is_an_optional_capability() -> None:
+    """Phase 7: 수집 중단 확인은 **선택** 능력이다.
+
+    기본값이 `False` 여야 못 하는 소스를 조용히 건너뛸 수 있다 — 추상 메서드로
+    올리면 기존 어댑터가 전부 깨지고, 기본값이 `True` 면 확인하지도 않은 소스에서
+    "부재 없음" 이라는 잘못된 안심을 준다.
+    """
+    assert LogSourceProvider.supports_presence is False
+    assert "service_presence" not in LogSourceProvider.__abstractmethods__
+    now = datetime.now(UTC)
+    with pytest.raises(NotImplementedError):
+        LogSourceProvider.service_presence(
+            None, ["payment-api"], TimeRange(start=now, end=now + timedelta(minutes=5))
+        )
+
+
 def test_llm_provider_contract() -> None:
     assert {"test_connection", "analyze"} <= LLMProvider.__abstractmethods__
     with pytest.raises(TypeError):
@@ -354,6 +370,13 @@ PHASE_5_ROUTES: set[tuple[str, str]] = {
 }
 
 
+#: Phase 7 (대시보드 지표 확장) 라우트. 한도 게이지가 이 위에 서 있다 —
+#: 게이지는 429 한도 검사와 같은 계산(`analysis.service.daily_usage`)을 보여 준다.
+PHASE_7_ROUTES: set[tuple[str, str]] = {
+    ("GET", "/api/usage/daily-limit"),
+}
+
+
 def test_app_boots_and_health_is_ok(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
@@ -368,7 +391,7 @@ def test_openapi_schema_generates(api: FastAPI) -> None:
 
 def test_all_design_doc_routes_exist(api: FastAPI) -> None:
     missing = (
-        DESIGN_DOC_ROUTES | ADDITIONAL_ROUTES | PHASE_4_ROUTES | PHASE_5_ROUTES
+        DESIGN_DOC_ROUTES | ADDITIONAL_ROUTES | PHASE_4_ROUTES | PHASE_5_ROUTES | PHASE_7_ROUTES
     ) - _routes(api)
     assert not missing, f"누락된 라우트: {sorted(missing)}"
 

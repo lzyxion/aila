@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.schemas.api import UsageResponse
+from app.schemas.api import DailyLimitResponse, UsageResponse
 from app.usage import service
 
 TRACK = "LLM 분석"
@@ -50,3 +50,14 @@ def get_usage(
         provider=provider,
         group_by=group_by,
     )
+
+
+@router.get("/daily-limit", response_model=DailyLimitResponse)
+def get_daily_limit(db: Session = Depends(get_db)) -> DailyLimitResponse:
+    """오늘의 분석 한도 소진 현황 (Phase 7).
+
+    사용량·하루 경계는 **429 를 내는 한도 검사와 같은 계산**을 쓴다
+    (`analysis.service.daily_usage`, `app_settings.timezone` 로컬 자정).
+    게이지가 한도 검사와 다른 숫자를 보이면 화면을 믿을 수 없다.
+    """
+    return service.get_daily_limit(db)

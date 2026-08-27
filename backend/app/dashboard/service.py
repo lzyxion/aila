@@ -11,11 +11,23 @@ Phase 1 담당 트랙: **정책 API**
 
 metric 쿼리가 실패해도 화면 전체를 죽이지 않는다 — 상위 그룹은 DB 에서 나오므로
 경고(`count_query_failed`)를 붙이고 나머지를 그대로 준다.
+
+Phase 7 에서 세 가지가 붙었다.
+
+- `series` 는 **시각별로 접어서** 싣는다 (`counting.fold_by_timestamp`). 접기 전
+  포인트에는 서비스 라벨이 남아 있으므로 `by_service` 를 **먼저** 계산한다.
+- `group_count`·`unanalyzed_group_count` 는 회차 전체의 DB COUNT 다 —
+  `top_groups`(상위 N) 길이를 지표 자리에 쓰면 그룹이 50 개여도 "10" 이 뜬다.
+- 정책에 `baseline_query` 가 있으면 **같은 기간·step 으로 한 번 더** metric 을 걸어
+  유입량(`ingest_total`)과 오류 비율(`error_ratio`)을 낸다. 미설정·실패는 `null` 이다
+  (0 은 "유입이 없었다"로 읽힌다). 홈 화면(`summary`)에는 넣지 않는다 — 정책마다
+  Loki 호출이 두 배가 되기 때문이다.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
@@ -23,11 +35,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.dashboard.counting import fold_by_timestamp, group_count, unanalyzed_group_count
 from app.enums import QueryRunStatus
 from app.error_groups import service as error_group_service
 from app.models import AnalysisPolicy, ErrorGroup, LokiConnection, QueryRun
 from app.policies import integrations
 from app.policies.service import HTTP_422, as_utc
+from app.providers.logsource import LogSourceProvider
 from app.schemas.api import DashboardOverviewResponse, ServiceErrorCount
 from app.schemas.logrecord import CountPoint, FetchWarning, TimeRange
 
@@ -45,6 +59,8 @@ WARN_RANGE_CLAMPED = "range_clamped"
 WARN_BY_SERVICE_FROM_LINES = "by_service_from_lines"
 #: 포인트 수가 너무 많아 step 을 자동으로 올렸다.
 WARN_STEP_RAISED = "step_raised"
+#: 정책의 `baseline_query`(분모) 실행이 실패했다 — 유입량·비율은 null 이 된다.
+WARN_BASELINE_FAILED = "baseline_query_failed"
 
 #: 기간 파라미터도 조회 이력도 없을 때의 기본 조회 구간(분).
 DEFAULT_RANGE_MINUTES = 60
@@ -177,6 +193,23 @@ def _resolve_range(
     return start, end, warnings
 
 
+@dataclass
+class _MetricResult:
+    """오류 metric 쿼리 1 회의 결과 묶음.
+
+    `points` 는 **접기 전** 포인트다 (서비스 라벨이 붙어 있다). `provider` 를 함께
+    들고 나오는 것은 분모 쿼리(`baseline_query`)를 같은 어댑터로 한 번 더 걸기
+    위해서다 — 두 번 만들면 같은 화면의 두 숫자가 서로 다른 연결 상태를 볼 수 있다.
+    """
+
+    points: list[CountPoint] = field(default_factory=list)
+    total: float = 0.0
+    step_seconds: int = 300
+    service_label: str = "service"
+    provider: LogSourceProvider | None = None
+    warnings: list[FetchWarning] = field(default_factory=list)
+
+
 def _count_series(
     db: Session,
     *,
@@ -184,14 +217,13 @@ def _count_series(
     range_start: datetime,
     range_end: datetime,
     step_seconds: int,
-) -> tuple[list[CountPoint], float, int, str, list[FetchWarning]]:
+) -> _MetricResult:
     """`count_over_time` metric 쿼리. 실패는 경고로 강등하고 화면을 살린다.
 
-    네 번째 반환값은 시리즈에서 **서비스를 가리키는 라벨 이름**이다 — 어댑터가
+    `service_label` 은 시리즈에서 **서비스를 가리키는 라벨 이름**이다 — 어댑터가
     `sum by (<라벨>)` 로 감싸므로, 소스 라벨 이름이 `service` 가 아닐 수 있다.
     """
     warnings: list[FetchWarning] = []
-    service_label = "service"
     if policy is None:
         warnings.append(
             FetchWarning(
@@ -199,7 +231,7 @@ def _count_series(
                 message="정책 또는 조회 이력이 없어 오류 추이를 계산할 수 없습니다.",
             )
         )
-        return [], 0.0, step_seconds, service_label, warnings
+        return _MetricResult(step_seconds=step_seconds, warnings=warnings)
 
     connection = db.get(LokiConnection, policy.loki_connection_id)
     if connection is None or not connection.active:
@@ -209,8 +241,10 @@ def _count_series(
                 message=f"정책 '{policy.name}' 의 로그 소스 연결을 쓸 수 없습니다.",
             )
         )
-        return [], 0.0, step_seconds, service_label, warnings
+        return _MetricResult(step_seconds=step_seconds, warnings=warnings)
 
+    provider: LogSourceProvider | None = None
+    service_label = "service"
     try:
         provider = integrations.build_provider(connection)
         service_label = str(getattr(provider, "service_label", None) or "service")
@@ -221,7 +255,12 @@ def _count_series(
                     message="이 로그 소스 어댑터는 건수·추이 metric 쿼리를 지원하지 않습니다.",
                 )
             )
-            return [], 0.0, step_seconds, service_label, warnings
+            return _MetricResult(
+                step_seconds=step_seconds,
+                service_label=service_label,
+                provider=provider,
+                warnings=warnings,
+            )
         series = provider.count_over_time(
             policy.logql, TimeRange(start=range_start, end=range_end), step_seconds
         )
@@ -229,16 +268,84 @@ def _count_series(
         warnings.append(
             FetchWarning(code=WARN_COUNT_FAILED, message=f"{type(exc).__name__}: {exc}")
         )
-        return [], 0.0, step_seconds, service_label, warnings
+        return _MetricResult(
+            step_seconds=step_seconds,
+            service_label=service_label,
+            provider=provider,
+            warnings=warnings,
+        )
 
     warnings.extend(series.warnings)
-    return (
-        list(series.points),
-        series.total,
-        series.step_seconds or step_seconds,
-        service_label,
-        warnings,
+    return _MetricResult(
+        points=list(series.points),
+        total=series.total,
+        step_seconds=series.step_seconds or step_seconds,
+        service_label=service_label,
+        provider=provider,
+        warnings=warnings,
     )
+
+
+@dataclass
+class _Baseline:
+    """분모 쿼리 결과. 세 값 모두 "계산하지 않았다" 를 `None`/빈 배열로 표현한다."""
+
+    total: float | None = None
+    series: list[CountPoint] = field(default_factory=list)
+    ratio: float | None = None
+    warnings: list[FetchWarning] = field(default_factory=list)
+
+
+def _baseline_metrics(
+    *,
+    policy: AnalysisPolicy | None,
+    provider: LogSourceProvider | None,
+    range_start: datetime,
+    range_end: datetime,
+    step_seconds: int,
+    total_errors: float,
+) -> _Baseline:
+    """정책의 `baseline_query` 로 유입량·오류 비율을 낸다 (metric 쿼리 1 회 추가).
+
+    분모 쿼리를 오류 쿼리에서 역산하지 않는 이유는 하나다 — 셀렉터를 기계적으로
+    벗겨 내면 대부분의 경우 조용히 다른 범위를 세게 되고, 틀린 비율은 없느니만
+    못하다. 그래서 운영자가 명시한 쿼리가 없으면 **계산하지 않는다**(`null`).
+
+    실패는 `baseline_query_failed` 경고로 강등하고 세 값을 비운다. 분모 하나 때문에
+    상위 그룹·추이까지 사라지면, 정확히 그 화면을 보러 온 사람이 아무것도 못 본다.
+    """
+    query = (policy.baseline_query or "").strip() if policy is not None else ""
+    if not query:
+        return _Baseline()
+
+    if provider is None or not getattr(provider, "supports_count", True):
+        return _Baseline(
+            warnings=[
+                FetchWarning(
+                    code=WARN_BASELINE_FAILED,
+                    message="분모 쿼리를 실행할 수 있는 metric 지원 어댑터가 없습니다.",
+                )
+            ]
+        )
+
+    try:
+        series = provider.count_over_time(
+            query, TimeRange(start=range_start, end=range_end), step_seconds
+        )
+    except Exception as exc:  # noqa: BLE001 - 분모 실패로 화면을 죽이지 않는다
+        return _Baseline(
+            warnings=[
+                FetchWarning(
+                    code=WARN_BASELINE_FAILED, message=f"{type(exc).__name__}: {exc}"
+                )
+            ]
+        )
+
+    # 분모 쿼리 자체의 경고(예: empty_result)는 올리지 않는다 — 오류 metric 의 같은
+    # 코드와 섞이면 화면에서 "무엇이 비었는지" 를 구분할 수 없다.
+    total = float(series.total)
+    ratio = (total_errors / total) if total > 0 else None
+    return _Baseline(total=total, series=fold_by_timestamp(series.points), ratio=ratio)
 
 
 def _by_service_from_points(
@@ -292,12 +399,13 @@ def get_overview(
     # step 경계로 올려야 마지막 버킷이 빠지지 않는다 (기간 미지정 시 특히).
     end = _ceil_to_step(end, step)
 
-    points, total, resolved_step, service_label, count_warnings = _count_series(
+    metric = _count_series(
         db, policy=policy, range_start=start, range_end=end, step_seconds=step
     )
-    warnings.extend(count_warnings)
+    warnings.extend(metric.warnings)
 
-    by_service = _by_service_from_points(points, service_label)
+    # 서비스별 분해는 **접기 전** 포인트로 먼저 계산한다 — 접으면 라벨이 사라진다.
+    by_service = _by_service_from_points(metric.points, metric.service_label)
     if not any(item.service for item in by_service) and run is not None:
         # metric 이 라벨을 주지 못했다 -> 저장된 그룹(=상한에 잘린 라인) 집계로 대체한다.
         # 조용히 넘어가면 화면의 숫자가 metric 기준인지 라인 기준인지 알 수 없다.
@@ -313,7 +421,21 @@ def get_overview(
                 )
             )
 
+    baseline = _baseline_metrics(
+        policy=policy,
+        provider=metric.provider,
+        range_start=start,
+        range_end=end,
+        step_seconds=step,
+        total_errors=metric.total,
+    )
+    warnings.extend(baseline.warnings)
+
     top_groups = []
+    # 회차가 없으면 두 COUNT 는 0 이 아니라 **null** 이다 — 0 은 "그룹이 없었다"로
+    # 읽히고, 그러면 "아직 한 번도 돌지 않았다" 와 구분되지 않는다.
+    total_groups: int | None = None
+    unanalyzed: int | None = None
     if run is not None:
         groups = db.scalars(
             select(ErrorGroup)
@@ -322,17 +444,25 @@ def get_overview(
             .limit(top)
         ).all()
         top_groups = error_group_service.summarize_groups(db, list(groups))
+        total_groups = group_count(db, run.id)
+        unanalyzed = unanalyzed_group_count(db, run.id)
 
     return DashboardOverviewResponse(
         policy_id=policy.id if policy is not None else None,
         query_run_id=run.id if run is not None else None,
         range_start=start,
         range_end=end,
-        step_seconds=resolved_step,
-        total_errors=total,
-        series=points,
+        step_seconds=metric.step_seconds,
+        total_errors=metric.total,
+        # 같은 시각의 서비스별 점을 하나로 접는다 (`by_service` 는 위에서 이미 계산했다).
+        series=fold_by_timestamp(metric.points),
         by_service=by_service,
         top_groups=top_groups,
+        group_count=total_groups,
+        unanalyzed_group_count=unanalyzed,
+        ingest_total=baseline.total,
+        ingest_series=baseline.series,
+        error_ratio=baseline.ratio,
         warnings=warnings,
     )
 
@@ -341,6 +471,7 @@ __all__ = [
     "MAX_SERIES_POINTS",
     "MAX_STEP_SECONDS",
     "MIN_STEP_SECONDS",
+    "WARN_BASELINE_FAILED",
     "WARN_BY_SERVICE_FROM_LINES",
     "WARN_CONNECTION_UNAVAILABLE",
     "WARN_COUNT_FAILED",

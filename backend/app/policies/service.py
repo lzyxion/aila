@@ -30,6 +30,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.connections.service import normalize_service_names
 from app.enums import QueryRunStatus, TriggeredBy
 from app.models import (
     SETTING_DAILY_ANALYSIS_LIMIT,
@@ -65,6 +66,11 @@ WARN_RANGE_CLAMPED = "range_clamped"
 WARN_LIMIT_CLAMPED = "limit_clamped"
 WARN_EXCLUDED = "excluded_by_policy"
 WARN_TRUNCATED = "limit_reached"
+#: 연결의 `expected_services` 중 이 기간에 로그를 한 줄도 내지 않은 서비스가 있다 (Phase 7).
+#: **기록만 한다** — 알림도 자동 실행도 붙이지 않는다 (계약: 자동 트리거는 auto_analyze_new 하나).
+WARN_INGEST_ABSENT = "ingest_absent"
+#: 수집 중단 확인 자체가 실패했다. 조회 결과는 그대로 살린다.
+WARN_PRESENCE_CHECK_FAILED = "presence_check_failed"
 
 #: 422. `status.HTTP_422_UNPROCESSABLE_ENTITY` 는 최신 starlette 에서 deprecated 이고
 #: `HTTP_422_UNPROCESSABLE_CONTENT` 는 구버전에 없어, 숫자를 직접 쓴다.
@@ -108,6 +114,18 @@ def _dump_warnings(warnings: Iterable[FetchWarning]) -> list[dict]:
 
 def _unprocessable(message: str) -> HTTPException:
     return HTTPException(status_code=HTTP_422, detail=message)
+
+
+def normalize_baseline_query(value: str | None) -> str | None:
+    """공백뿐인 분모 쿼리는 저장 전에 `None` 으로 만든다.
+
+    빈 문자열이 남으면 정책은 "분모 설정됨" 으로 보이는데 대시보드는 매번 빈 쿼리로
+    metric 을 걸어 실패한다 — 화면에는 `baseline_query_failed` 만 반복해서 뜬다.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _clip(value: str | None, limit: int) -> str | None:
@@ -372,7 +390,9 @@ def create_policy(db: Session, payload: PolicyCreate) -> PolicyRead:
     )
     _reject_duplicate_name(db, payload.name)
 
-    policy = AnalysisPolicy(**payload.model_dump())
+    values = payload.model_dump()
+    values["baseline_query"] = normalize_baseline_query(values.get("baseline_query"))
+    policy = AnalysisPolicy(**values)
     db.add(policy)
     db.commit()
     db.refresh(policy)
@@ -411,8 +431,17 @@ def update_policy(db: Session, policy_id: int, payload: PolicyUpdate) -> PolicyR
     if changes.get("name") is not None:
         _reject_duplicate_name(db, changes["name"], exclude_id=policy.id)
 
+    if "baseline_query" in changes:
+        # 공백만 남은 값은 "지움" 으로 읽는다 — 아래 nullable_fields 가 null 을 통과시킨다.
+        changes["baseline_query"] = normalize_baseline_query(changes["baseline_query"])
+
     #: 명시적 null 을 허용하는 필드 (나머지는 NOT NULL 이라 null 을 무시한다).
-    nullable_fields = {"description", "daily_analysis_limit", "schedule_interval_minutes"}
+    nullable_fields = {
+        "description",
+        "daily_analysis_limit",
+        "schedule_interval_minutes",
+        "baseline_query",
+    }
     for field, value in changes.items():
         if value is None and field not in nullable_fields:
             continue
@@ -728,6 +757,57 @@ def create_query_run(
     return _query_run_read(db, run, group_count=group_count)
 
 
+def check_service_presence(
+    connection: LokiConnection, provider: object, time_range: TimeRange
+) -> list[FetchWarning]:
+    """연결의 `expected_services` 중 이 기간에 로그가 없는 서비스를 경고로 만든다.
+
+    조회 실행 경로에 얹는 이유는 "언제 확인할 것인가" 를 새로 정하지 않기 위해서다 —
+    수동 실행도 스케줄 실행도 같은 함수를 타므로 확인 시점이 하나로 유지되고, 별도
+    감시 루프(=새 자동 실행)를 만들 필요가 없다.
+
+    결과는 **경고 기록뿐이다.** 알림도, 재실행도, 자동 분석도 붙이지 않는다 —
+    자동 트리거는 정책의 `auto_analyze_new` 하나라는 계약을 여기서 깨면 안 된다.
+
+    확인 실패는 `presence_check_failed` 로 강등한다. 부재 확인이 안 됐다고 조회
+    자체를 실패로 만들면, 실제로는 잘 읽어 온 로그와 그룹까지 통째로 버리게 된다.
+    어댑터가 `supports_presence=False` 면 **조용히 건너뛴다** — 소스가 못 하는 일은
+    정책 설정의 잘못이 아니라서 경고로 남길 것이 없다.
+    """
+    expected = normalize_service_names(connection.expected_services)
+    if not expected:
+        return []
+    if not getattr(provider, "supports_presence", False):
+        return []
+
+    try:
+        present = provider.service_presence(list(expected), time_range)
+    except Exception as exc:  # noqa: BLE001 - 확인 실패로 조회를 실패시키지 않는다
+        return [
+            FetchWarning(
+                code=WARN_PRESENCE_CHECK_FAILED,
+                message=integrations.mask(
+                    f"수집 중단 확인에 실패했습니다: {type(exc).__name__}: {exc}"
+                )[:2000],
+            )
+        ]
+
+    observed = {str(name) for name in (present or ())}
+    absent = [name for name in expected if name not in observed]
+    if not absent:
+        return []
+    return [
+        FetchWarning(
+            code=WARN_INGEST_ABSENT,
+            message=(
+                "이 기간에 로그를 한 줄도 내지 않은 서비스가 있습니다 "
+                f"(수집 중단 의심): {', '.join(absent)}"
+            ),
+            count=len(absent),
+        )
+    ]
+
+
 def _execute_query_run(
     db: Session,
     *,
@@ -761,6 +841,13 @@ def _execute_query_run(
                 message="결과가 한도에 걸려 잘렸습니다. 건수 집계에는 metric 쿼리를 쓰세요.",
             )
         )
+
+    # 수집 중단 확인 — 조회한 것과 **같은 기간**으로 본다 (기록만 하고 아무것도 트리거하지 않는다).
+    warnings.extend(
+        check_service_presence(
+            connection, provider, TimeRange(start=range_start, end=range_end)
+        )
+    )
 
     # 마스킹 → 정규화 → fingerprint 는 group_records 안에서 이 순서로 일어난다.
     # exclusions 는 위에서 이미 라인 제거로 소비했으므로 마스킹 패턴으로 넘기지 않는다.
@@ -848,13 +935,16 @@ __all__ = [
     "PURGE_INTERVAL",
     "SETTING_SAMPLE_PURGE_LAST_RUN",
     "WARN_EXCLUDED",
+    "WARN_INGEST_ABSENT",
     "WARN_LIMIT_CLAMPED",
+    "WARN_PRESENCE_CHECK_FAILED",
     "WARN_RANGE_CLAMPED",
     "WARN_TRUNCATED",
     "analysis_timezone",
     "analysis_timezone_name",
     "apply_exclusions",
     "as_utc",
+    "check_service_presence",
     "create_policy",
     "create_query_run",
     "deactivate_policy",
@@ -863,6 +953,7 @@ __all__ = [
     "global_daily_analysis_limit",
     "list_policies",
     "list_query_runs",
+    "normalize_baseline_query",
     "preview_policy",
     "purge_expired_samples",
     "purge_expired_samples_if_due",

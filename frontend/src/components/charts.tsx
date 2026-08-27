@@ -11,6 +11,9 @@
  *   비용은 단일 시리즈다. **새 색을 도입하지 않는다** (색이 늘어나는 순간 두 화면의
  *   같은 색이 서로 다른 뜻을 갖기 시작한다).
  * - 스파크라인은 축도 범례도 없는 소형 추이라 역시 slot 1 한 색이다.
+ * - **유입량(분모 쿼리) 추이는 오류 추이와 눈금이 다르다** — 한 축에 겹치면 오류 곡선이
+ *   바닥에 눌린다. 차트를 나누고 slot 2(orange) 를 써서 두 그림이 서로 무엇인지 알아볼 수
+ *   있게 한다 (여기서도 새 색은 도입하지 않는다).
  *
  * 표기 규칙: 여기 들어오는 건수는 `count_over_time` metric 쿼리 결과이며
  * **로그 라인 수가 아니다.** 호출부가 캡션으로 그 사실을 함께 적는다.
@@ -70,28 +73,43 @@ export function ErrorTrendChart({
   points,
   height = 260,
   label = '오류 건수',
+  tone = 'series1',
+  emptyLabel,
 }: {
   points: CountPoint[];
   height?: number;
   label?: string;
+  /**
+   * 색 슬롯. 오류는 slot 1(blue), **유입량(분모)** 은 slot 2(orange) 다.
+   *
+   * 두 값은 눈금이 다르므로(유입량이 오류보다 두 자릿수 크다) 한 축에 겹치지 않고 차트를
+   * 나눈다 — 겹치면 오류 곡선이 바닥에 눌려 모양이 사라진다. 대신 색을 고정해 두 차트가
+   * 서로 무엇인지 알아볼 수 있게 한다.
+   */
+  tone?: 'series1' | 'series2';
+  emptyLabel?: ReactNode;
 }) {
   if (points.length === 0) {
-    return <EmptyBlock>표시할 추이 데이터가 없습니다.</EmptyBlock>;
+    return <EmptyBlock>{emptyLabel ?? '표시할 추이 데이터가 없습니다.'}</EmptyBlock>;
   }
 
   const data = points.map((point) => ({
     timestamp: point.timestamp,
     value: point.value,
   }));
+  const stroke = tone === 'series2' ? COLOR.series2 : COLOR.series1;
+  // 그라디언트 id 는 문서 전역이다 — 같은 페이지에 두 차트가 있으면 id 가 겹쳐 뒤 차트가
+  // 앞 차트의 색으로 칠해진다. 슬롯별로 다른 id 를 쓴다.
+  const gradientId = `aila-trend-fill-${tone}`;
 
   return (
     <div style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: -8 }}>
           <defs>
-            <linearGradient id="aila-trend-fill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={COLOR.series1} stopOpacity={0.28} />
-              <stop offset="100%" stopColor={COLOR.series1} stopOpacity={0.02} />
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={stroke} stopOpacity={0.28} />
+              <stop offset="100%" stopColor={stroke} stopOpacity={0.02} />
             </linearGradient>
           </defs>
           <CartesianGrid stroke={COLOR.grid} strokeDasharray="0" vertical={false} />
@@ -127,9 +145,9 @@ export function ErrorTrendChart({
           <Area
             type="monotone"
             dataKey="value"
-            stroke={COLOR.series1}
+            stroke={stroke}
             strokeWidth={2}
-            fill="url(#aila-trend-fill)"
+            fill={`url(#${gradientId})`}
             activeDot={{ r: 4, strokeWidth: 2, stroke: COLOR.surface }}
             isAnimationActive={false}
           />
