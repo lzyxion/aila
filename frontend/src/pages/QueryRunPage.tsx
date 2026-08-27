@@ -7,11 +7,13 @@
  *
  * 표시 규칙(계약): 건수는 그룹화된 라인 수이고, 분석 상태는 그룹 id 가 아니라
  * **fingerprint 기준**이다 — 이전 회차에서 분석한 오류도 "분석 완료"로 보인다.
+ * (Phase 8: 이 문구들은 지우지 않고 ⓘ 로 옮겼다.)
  */
 
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
 
 import { useErrorGroups, useQueryRun } from '../api/queries';
+import { ErrorGroupIcon, GroupCountIcon, PolicyIcon } from '../components/icons';
 import {
   AnalysisStatusBadge,
   QueryRunStatusBadge,
@@ -20,17 +22,32 @@ import {
 } from '../components/StatusBadges';
 import {
   Badge,
+  ButtonLink,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   LoadingBlock,
   PageHeader,
+  PageStack,
+  SkeletonStats,
   Stat,
   TableWrap,
   Td,
+  TextLink,
   Th,
 } from '../components/ui';
 import { formatDateTime, formatNumber, formatRelative, truncate, warningCodeLabel } from '../lib/format';
+
+const FINGERPRINT_NOTE = (
+  <>
+    분석 상태는 그룹 id 가 아니라 <strong>fingerprint 기준</strong>입니다 — 이전 회차에서 분석한
+    오류도 "분석 완료"로 보입니다.
+    <span className="mt-1.5 block">
+      덕분에 같은 오류를 회차마다 다시 분석(= 중복 과금)하지 않습니다.
+    </span>
+  </>
+);
 
 export function QueryRunPage() {
   const params = useParams<{ runId: string }>();
@@ -50,36 +67,50 @@ export function QueryRunPage() {
       <PageHeader
         title={`조회 #${runId}`}
         description={
-          run ? (
-            <>
-              {formatDateTime(run.range_start)} ~ {formatDateTime(run.range_end)} 구간을{' '}
-              {formatDateTime(run.started_at)} 에 실행했습니다. 아래 그룹의 분석 상태는 그룹 id 가
-              아니라 <strong>fingerprint 기준</strong>입니다.
-            </>
-          ) : (
-            '이 회차가 묶은 오류 그룹입니다.'
-          )
+          run
+            ? `${formatDateTime(run.range_start)} ~ ${formatDateTime(run.range_end)} 구간을 ${formatRelative(run.started_at)} 실행했습니다.`
+            : '이 회차가 묶은 오류 그룹입니다.'
+        }
+        info={
+          <>
+            {FINGERPRINT_NOTE}
+            {run && (
+              <span className="mt-1.5 block">
+                실행 시각 {formatDateTime(run.started_at)}.
+              </span>
+            )}
+          </>
         }
         actions={
-          <Link
-            to="/policies"
-            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
-          >
-            정책 목록으로
-          </Link>
+          <ButtonLink to="/policies">
+            <PolicyIcon aria-hidden className="size-4" />
+            정책 목록
+          </ButtonLink>
         }
       />
 
-      {runQuery.isPending && <LoadingBlock />}
+      {/* 회차 요약은 네 칸으로 자리가 정해져 있다 — 스켈레톤이 거짓 신호를 주지 않는다. */}
+      {runQuery.isPending && <SkeletonStats count={4} label="조회 요약을 불러오는 중" />}
       {runQuery.isError && <ErrorBlock error={runQuery.error} />}
 
       {run && (
-        <div className="space-y-6">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <PageStack>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Stat
               label="조회 라인"
+              icon={ErrorGroupIcon}
               value={formatNumber(run.fetched_count)}
-              sub="metric 건수가 아니라 실제 조회 라인 수"
+              sub="실제 조회 라인 수"
+              info={
+                <>
+                  Loki 에서 <strong>실제로 읽어 온 로그 라인 수</strong>입니다 — 대시보드의{' '}
+                  <Code>count_over_time</Code> metric 건수와 다른 값입니다.
+                  <span className="mt-1.5 block">
+                    라인 수 상한은 <strong>서버가</strong> 강제하므로 이 값은 정책의{' '}
+                    <Code>max_lines</Code> 를 넘지 않습니다.
+                  </span>
+                </>
+              }
               tone="accent"
             />
             <Stat
@@ -87,7 +118,18 @@ export function QueryRunPage() {
               value={formatNumber(run.dropped_count)}
               sub="제외 정규식·파싱 실패"
             />
-            <Stat label="오류 그룹" value={formatNumber(run.group_count)} sub="fingerprint 단위" />
+            <Stat
+              label="오류 그룹"
+              icon={GroupCountIcon}
+              value={formatNumber(run.group_count)}
+              sub="fingerprint 단위"
+              info={
+                <>
+                  마스킹 → 정규화 → fingerprint 순으로 처리한 뒤 같은 fingerprint 를 하나로 묶은
+                  수입니다.
+                </>
+              }
+            />
             <Stat
               label="상태"
               value={
@@ -105,12 +147,24 @@ export function QueryRunPage() {
           )}
 
           {run.warnings.length > 0 && (
-            <Card title="조회 경고" description="조정·누락 사실은 경고 코드로 남습니다.">
-              <ul className="space-y-1.5 text-sm">
+            <Card
+              title="조회 경고"
+              description="조정·누락 사실은 경고 코드로 남습니다."
+              info={
+                <>
+                  경고는 <strong>기록</strong>입니다 — 무언가를 자동으로 실행하지 않습니다.
+                  <span className="mt-1.5 block">
+                    예: <Code>range_clamped</Code> 는 요청한 기간이 정책·서버 상한으로 줄었다는
+                    뜻이고, 조회 자체는 성공입니다.
+                  </span>
+                </>
+              }
+            >
+              <ul className="space-y-2 text-sm">
                 {run.warnings.map((warning, index) => (
                   <li key={`${warning.code}-${index}`} className="flex flex-wrap items-baseline gap-2">
                     <Badge tone="warning">{warningCodeLabel(warning.code)}</Badge>
-                    <span className="text-slate-700">
+                    <span className="text-ink-soft">
                       {warning.message}
                       {warning.count != null && ` (${formatNumber(warning.count)}건)`}
                     </span>
@@ -122,12 +176,21 @@ export function QueryRunPage() {
 
           <Card
             title="오류 그룹"
-            description="유사 오류를 fingerprint 로 묶은 결과입니다. 그룹을 누르면 마스킹된 대표 로그와 AI 분석으로 들어갑니다."
+            description="유사 오류를 fingerprint 로 묶은 결과입니다. 그룹을 누르면 대표 로그와 AI 분석으로 갑니다."
+            info={
+              <>
+                대표 로그는 <strong>마스킹된 값</strong>만 저장됩니다 — 마스킹 전 원본은 DB 에
+                남기지 않습니다.
+                <span className="mt-1.5 block">{FINGERPRINT_NOTE}</span>
+              </>
+            }
           >
-            {groupsQuery.isPending && <LoadingBlock />}
+            {groupsQuery.isPending && <LoadingBlock label="오류 그룹을 불러오는 중…" />}
             {groupsQuery.isError && <ErrorBlock error={groupsQuery.error} />}
             {groupsQuery.data && groupsQuery.data.items.length === 0 && (
-              <EmptyBlock>이 회차에서 묶인 오류 그룹이 없습니다.</EmptyBlock>
+              <EmptyBlock icon={ErrorGroupIcon}>
+                이 회차에서 묶인 오류 그룹이 없습니다.
+              </EmptyBlock>
             )}
             {groupsQuery.data && groupsQuery.data.items.length > 0 && (
               <TableWrap minWidth="44rem">
@@ -143,25 +206,24 @@ export function QueryRunPage() {
                 </thead>
                 <tbody>
                   {groupsQuery.data.items.map((group) => (
-                    <tr key={group.id} className="hover:bg-slate-50">
+                    <tr key={group.id} className="transition-colors hover:bg-surface-2">
                       <Td>
-                        <Link
+                        <TextLink
                           to={`/error-groups/${group.id}`}
-                          className="font-medium text-sky-800 hover:underline"
                           title={group.normalized_message}
                         >
                           {truncate(group.normalized_message, 90)}
-                        </Link>
-                        <p className="mt-0.5 text-xs text-slate-500">
+                        </TextLink>
+                        <p className="mt-0.5 text-xs text-muted">
                           {group.service ?? '(서비스 라벨 없음)'}
                           {group.environment ? ` · ${group.environment}` : ''}
                           {group.error_type ? ` · ${group.error_type}` : ''}
                         </p>
                       </Td>
-                      <Td align="right" className="font-semibold text-slate-900">
+                      <Td align="right" className="font-semibold text-ink">
                         {formatNumber(group.count)}
                       </Td>
-                      <Td className="whitespace-nowrap">
+                      <Td className="whitespace-nowrap text-muted">
                         <span title={formatDateTime(group.last_seen)}>
                           {formatRelative(group.last_seen)}
                         </span>
@@ -180,7 +242,7 @@ export function QueryRunPage() {
               </TableWrap>
             )}
           </Card>
-        </div>
+        </PageStack>
       )}
     </div>
   );

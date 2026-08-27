@@ -89,7 +89,12 @@ function RequireAuth({ children }: { children: ReactNode }) {
   const location = useLocation();
 
   if (status === 'loading') {
-    return <LoadingBlock label="세션을 확인하는 중…" />;
+    // 세션 확인은 앱 전체를 막는 단계다 — 카드 안이 아니라 화면 한가운데에 둔다.
+    return (
+      <div className="grid min-h-screen place-items-center bg-canvas">
+        <LoadingBlock label="세션을 확인하는 중…" />
+      </div>
+    );
   }
   if (status === 'anonymous') {
     return (

@@ -4,10 +4,17 @@
  * 정책 **전체**를 훑는 화면은 홈(`/`)의 카드 그리드다. 여기는 카드에서 하나를 골라
  * 들어오는 자리이고, 그래서 정책 선택은 상태가 아니라 **경로**다 — 링크를 붙여
  * 공유하거나 브라우저 뒤로가기로 되짚을 수 있어야 한다.
+ *
+ * Phase 8 밀도 정리에서 두 가지를 바꿨다.
+ * - 지표 6개를 한 줄에 늘어놓던 것을 **핵심 3개(크게) + 보조 3개(작게)** 로 나눴다.
+ *   여섯 칸이 같은 크기면 "지금 봐야 할 숫자"가 어느 것인지 화면이 말해 주지 않는다.
+ * - 계약 문구(`count_over_time` 기준·fingerprint 기준·`null ≠ 0`)는 지우지 않고
+ *   ⓘ(`InfoTip`) 로 옮겼다. 대신 **분모 미설정 안내처럼 사용자가 할 일이 있는 문장**은
+ *   본문 `Notice` 로 남긴다.
  */
 
-import { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { useMemo, useState, type ReactNode } from 'react';
+import { useNavigate, useParams } from 'react-router';
 
 import {
   useDashboardOverview,
@@ -19,6 +26,12 @@ import { policySchedule, type DashboardOverviewParams, type FetchWarning } from 
 import { useWriteAccess } from '../auth/AuthContext';
 import { ErrorTrendChart, ServiceBarChart } from '../components/chartsLazy';
 import {
+  BackIcon,
+  ChevronRightIcon,
+  ErrorGroupIcon,
+  GroupCountIcon,
+} from '../components/icons';
+import {
   AnalysisStatusBadge,
   IngestAbsentBadge,
   ScheduleBadge,
@@ -27,19 +40,26 @@ import {
 import {
   Badge,
   Button,
+  ButtonLink,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   Field,
-  LoadingBlock,
+  InfoTip,
+  LogLine,
   Notice,
   PageHeader,
+  PageStack,
   PlayIcon,
   Select,
+  SkeletonCard,
+  SkeletonStats,
   Spinner,
   Stat,
   TableWrap,
   Td,
+  TextLink,
   Th,
 } from '../components/ui';
 import {
@@ -59,6 +79,27 @@ const RANGES = [
   { minutes: 24 * 60, label: '최근 24시간', step: 3600 },
   { minutes: 3 * 24 * 60, label: '최근 3일', step: 3600 },
 ];
+
+const METRIC_NOTE = (
+  <>
+    건수와 추이는 <Code>count_over_time</Code> metric 쿼리 결과입니다 —{' '}
+    <strong>로그 라인을 센 값이 아닙니다</strong>.
+    <span className="mt-1.5 block">
+      metric 이 실패한 값은 0 이 아니라 <strong>없음</strong>이며 화면에는 <Code>-</Code> 로
+      나옵니다.
+    </span>
+  </>
+);
+
+const FINGERPRINT_NOTE = (
+  <>
+    분석 상태는 그룹 id 가 아니라 <strong>fingerprint 기준</strong>입니다 — 이전 조회에서 분석한
+    오류도 "분석 완료"로 보입니다.
+    <span className="mt-1.5 block">
+      덕분에 이미 분석한 오류를 중복 요청(= 중복 과금)하지 않습니다.
+    </span>
+  </>
+);
 
 export function DashboardPage() {
   const [rangeIndex, setRangeIndex] = useState(0);
@@ -141,37 +182,33 @@ export function DashboardPage() {
     selectedPolicy !== null && !(selectedPolicy.baseline_query ?? '').trim();
   const baselineHint =
     selectedPolicy === null
-      ? '정책을 선택해야 계산합니다'
+      ? '정책 미선택'
       : baselineMissing
         ? '분모 쿼리 미설정'
-        : '분모 쿼리 실패 — 0 이 아닙니다';
+        : '분모 쿼리 실패 · 0 아님';
   const showIngestChart = (data?.ingest_series?.length ?? 0) > 0;
 
   return (
     <div>
       <PageHeader
-        title={
-          selectedPolicy ? `대시보드 · ${selectedPolicy.name}` : '대시보드 · 전체'
-        }
-        description={
+        title={selectedPolicy ? `대시보드 · ${selectedPolicy.name}` : '대시보드 · 전체'}
+        description={`${range.label} 기준 지표와 상위 오류 그룹입니다.`}
+        info={
           <>
-            건수와 추이는 <code className="rounded bg-slate-200 px-1">count_over_time</code> metric
-            쿼리 결과입니다 — 로그 라인을 센 값이 아닙니다. 분석 상태는 그룹 id 가 아니라{' '}
-            <strong>fingerprint 기준</strong>이라 이전 조회에서 분석한 오류도 "분석 완료"로 보입니다.
+            {METRIC_NOTE}
+            <span className="mt-1.5 block">{FINGERPRINT_NOTE}</span>
           </>
         }
         actions={
-          <Link
-            to="/"
-            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
-          >
-            통합 대시보드로
-          </Link>
+          <ButtonLink to="/">
+            <BackIcon aria-hidden className="size-4" />
+            통합 대시보드
+          </ButtonLink>
         }
       />
 
       {selectedPolicy && (
-        <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="mb-4 flex flex-wrap items-center gap-1.5">
           <Badge tone={selectedPolicy.active ? 'success' : 'neutral'}>
             {selectedPolicy.active ? '활성' : '비활성'}
           </Badge>
@@ -182,18 +219,16 @@ export function DashboardPage() {
               autoAnalyze={schedule.autoAnalyze}
             />
           )}
-          <Link
-            to={`/policies?policy=${selectedPolicy.id}`}
-            className="text-xs font-medium text-sky-800 hover:underline"
-          >
+          <TextLink to={`/policies?policy=${selectedPolicy.id}`} className="ml-1 text-xs">
             정책 설정 →
-          </Link>
+          </TextLink>
         </div>
       )}
 
       {/*
         수집 중단 의심 — 오류가 0 건인 것과 로그 자체가 끊긴 것은 정반대의 사건인데
         화면에서는 똑같이 "조용한 정책"으로 보인다. 그래서 지표보다 위에 둔다.
+        위험 경고는 ⓘ 로 숨기지 않는다.
       */}
       {absentWarnings.length > 0 && (
         <div className="mb-4">
@@ -206,7 +241,7 @@ export function DashboardPage() {
                 </li>
               ))}
             </ul>
-            <p className="mt-2 text-xs">
+            <p className="mt-2 text-xs leading-relaxed">
               연결에 등록한 <strong>수집 확인 대상 서비스</strong>가 조회 기간에 로그를 한 줄도
               내지 않았습니다. 오류가 0 건인 것과 로그가 끊긴 것은 다릅니다 — 수집 파이프라인
               (Alloy·Loki)을 먼저 확인하십시오. 이 경고는 <strong>기록일 뿐</strong>이며 아무것도
@@ -216,89 +251,59 @@ export function DashboardPage() {
         </div>
       )}
 
-      <Card className="mb-6">
-        <div className="grid gap-4 lg:grid-cols-3">
-          {/*
-            정책 선택과 실행 버튼은 한 동작의 두 반쪽이다 — 떨어뜨려 놓으면 "고르기만 하고
-            실행을 못 찾는" 화면이 된다 (Phase 4 피드백 1번). 강조 배경으로 묶어 둔다.
-          */}
-          <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-4 lg:col-span-2">
-            <div className="flex flex-wrap items-end gap-3">
-              <Field
-                label="정책"
-                className="min-w-56 flex-1"
-                hint={
-                  selectedPolicy
-                    ? `상한 ${formatNumber(selectedPolicy.max_lines)} 라인 · 대표 로그 ${selectedPolicy.max_samples_per_group} 개`
-                    : '선택하지 않으면 전체 조회 결과를 보여줍니다.'
-                }
-              >
-                <Select
-                  value={policyId ?? ''}
-                  onChange={(event) =>
-                    navigate(
-                      event.target.value === '' ? '/dashboard' : `/dashboard/${event.target.value}`,
-                    )
-                  }
-                >
-                  <option value="">전체</option>
-                  {activePolicies.map((policy) => (
-                    <option key={policy.id} value={policy.id}>
-                      {policy.name}
-                    </option>
-                  ))}
-                  {/* 비활성 정책으로 직접 들어온 경우에도 선택 상태가 보여야 한다. */}
-                  {selectedPolicy && !selectedPolicy.active && (
-                    <option value={selectedPolicy.id}>{selectedPolicy.name} (비활성)</option>
-                  )}
-                </Select>
-              </Field>
-
-              <Button
-                variant="primary"
-                size="lg"
-                className="mb-6"
-                disabled={!write.allowed || !selectedPolicy || runPolicy.isPending}
-                title={
-                  write.reason ??
-                  (selectedPolicy
-                    ? `${selectedPolicy.name} 정책으로 Loki 를 조회합니다.`
-                    : '실행할 정책을 먼저 고르십시오.')
-                }
-                onClick={() => {
-                  if (!selectedPolicy) return;
-                  runPolicy.mutate({ id: selectedPolicy.id, payload: {} });
-                }}
-              >
-                {runPolicy.isPending ? (
-                  <>
-                    <Spinner className="size-4 border-sky-200 border-t-white" />
-                    조회 중…
-                  </>
-                ) : (
-                  <>
-                    <PlayIcon />
-                    정책 실행
-                  </>
-                )}
-              </Button>
-            </div>
-
-            <p className="mt-1 text-xs text-slate-600">
-              {!write.allowed ? (
-                <>{write.reason}</>
-              ) : selectedPolicy ? (
-                <>
-                  실행하면 이 정책의 LogQL 로 Loki 를 <strong>지금</strong> 조회하고 결과를
-                  그룹으로 묶습니다. 분석(LLM 호출)은 그룹 상세에서 따로 실행합니다.
-                </>
-              ) : (
-                <>정책을 골라야 실행할 수 있습니다.</>
+      {/*
+        실행 카드. 예전에는 카드 안에 하늘색 상자를 하나 더 두어 정책 선택과 실행 버튼을
+        묶었는데, 카드-in-카드가 되어 배경이 두 겹으로 쌓였다. 지금은 카드 하나 안에서
+        **행 배치**로 묶는다 — 정책·기간·실행이 한 줄에 있으면 상자가 없어도 한 동작으로 읽힌다.
+      */}
+      <Card
+        title="정책 실행"
+        description="선택한 정책의 LogQL 로 Loki 를 지금 조회하고 결과를 그룹으로 묶습니다."
+        info={
+          <>
+            분석(LLM 호출)은 여기서 실행되지 않습니다 — <strong>그룹 상세</strong>에서 따로
+            실행합니다.
+            <span className="mt-1.5 block">
+              기간·라인 수 상한은 <strong>서버가</strong> 강제합니다. 화면의 기간 선택은 편의일
+              뿐이고, 정책의 <Code>default_range_minutes</Code> 를 넘는 요청은 조용히 clamp 되어
+              경고로 남습니다.
+            </span>
+          </>
+        }
+        className="mb-6"
+      >
+        <div className="flex flex-wrap items-end gap-3">
+          <Field
+            label="정책"
+            className="min-w-56 flex-1"
+            hint={
+              selectedPolicy
+                ? `상한 ${formatNumber(selectedPolicy.max_lines)} 라인 · 대표 로그 ${selectedPolicy.max_samples_per_group} 개`
+                : '선택하지 않으면 전체 조회 결과를 보여줍니다.'
+            }
+          >
+            <Select
+              value={policyId ?? ''}
+              onChange={(event) =>
+                navigate(
+                  event.target.value === '' ? '/dashboard' : `/dashboard/${event.target.value}`,
+                )
+              }
+            >
+              <option value="">전체</option>
+              {activePolicies.map((policy) => (
+                <option key={policy.id} value={policy.id}>
+                  {policy.name}
+                </option>
+              ))}
+              {/* 비활성 정책으로 직접 들어온 경우에도 선택 상태가 보여야 한다. */}
+              {selectedPolicy && !selectedPolicy.active && (
+                <option value={selectedPolicy.id}>{selectedPolicy.name} (비활성)</option>
               )}
-            </p>
-          </div>
+            </Select>
+          </Field>
 
-          <Field label="기간">
+          <Field label="기간" className="w-48">
             <Select
               value={rangeIndex}
               onChange={(event) => setRangeIndex(Number(event.target.value))}
@@ -310,16 +315,59 @@ export function DashboardPage() {
               ))}
             </Select>
           </Field>
+
+          <Button
+            variant="primary"
+            size="lg"
+            className="mb-1"
+            disabled={!write.allowed || !selectedPolicy || runPolicy.isPending}
+            title={
+              write.reason ??
+              (selectedPolicy
+                ? `${selectedPolicy.name} 정책으로 Loki 를 조회합니다.`
+                : '실행할 정책을 먼저 고르십시오.')
+            }
+            onClick={() => {
+              if (!selectedPolicy) return;
+              runPolicy.mutate({ id: selectedPolicy.id, payload: {} });
+            }}
+          >
+            {runPolicy.isPending ? (
+              <>
+                <Spinner className="size-4 border-sky-200 border-t-white" />
+                조회 중…
+              </>
+            ) : (
+              <>
+                <PlayIcon />
+                정책 실행
+              </>
+            )}
+          </Button>
         </div>
 
+        {/* 권한·선택 없음은 버튼이 왜 눌리지 않는지에 대한 답이라 본문에 남긴다. */}
+        {(!write.allowed || !selectedPolicy) && (
+          <p className="mt-2 text-xs text-muted">
+            {!write.allowed ? write.reason : '정책을 골라야 실행할 수 있습니다.'}
+          </p>
+        )}
+
+        {/* LogQL 은 길고 늘 볼 필요는 없다 — 접어 두되 한 번의 클릭으로 펼쳐진다. */}
         {selectedPolicy && (
-          <div className="mt-4">
-            <Field label="LogQL">
-              <pre className="aila-scroll overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs whitespace-pre text-slate-100">
-                {selectedPolicy.logql}
-              </pre>
-            </Field>
-          </div>
+          <details className="group mt-3">
+            {/* `list-none` 만으로는 Safari 의 기본 삼각형이 남는다 — 웹킷 마커까지 지운다. */}
+            <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded text-xs font-medium text-muted hover:text-ink [&::-webkit-details-marker]:hidden">
+              <ChevronRightIcon
+                aria-hidden
+                className="size-3.5 transition-transform group-open:rotate-90"
+              />
+              LogQL 보기
+            </summary>
+            <div className="mt-2">
+              <LogLine>{selectedPolicy.logql}</LogLine>
+            </div>
+          </details>
         )}
 
         {runPolicy.isPending && (
@@ -343,15 +391,10 @@ export function DashboardPage() {
             <Notice tone="success" title={`조회 #${runPolicy.data.id} 완료`}>
               {formatNumber(runPolicy.data.fetched_count)} 라인 조회 ·{' '}
               {formatNumber(runPolicy.data.dropped_count)} 라인 제외 ·{' '}
-              {runPolicy.data.group_count} 개 그룹
-              <Link
-                to={`/query-runs/${runPolicy.data.id}`}
-                className="ml-2 font-medium text-emerald-900 underline"
-              >
-                이 조회의 오류 그룹 보기 →
-              </Link>
+              {runPolicy.data.group_count} 개 그룹{' '}
+              <TextLink to={`/query-runs/${runPolicy.data.id}`}>이 조회의 오류 그룹 보기 →</TextLink>
               {runPolicy.data.warnings.length > 0 && (
-                <ul className="mt-1 list-disc pl-4 text-xs">
+                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs">
                   {runPolicy.data.warnings.map((warning, index) => (
                     <li key={`${warning.code}-${index}`}>
                       {warningCodeLabel(warning.code)} — {warning.message}
@@ -364,11 +407,16 @@ export function DashboardPage() {
         )}
       </Card>
 
-      {overview.isPending && <LoadingBlock />}
+      {overview.isPending && (
+        <PageStack>
+          <SkeletonStats count={3} label="대시보드 지표를 불러오는 중" />
+          <SkeletonCard lines={4} label="차트를 불러오는 중" />
+        </PageStack>
+      )}
       {overview.isError && <ErrorBlock error={overview.error} />}
 
       {overview.data && (
-        <div className="space-y-6">
+        <PageStack>
           {/* 수집 중단은 위에서 이미 전용 블록으로 말했다 — 여기서 또 적지 않는다. */}
           <WarningList
             warnings={overview.data.warnings.filter(
@@ -377,58 +425,110 @@ export function DashboardPage() {
           />
 
           {/*
-            지표 타일. `group_count`·`unanalyzed_group_count` 는 **회차 전체 COUNT** 다 —
+            지표 위계. 핵심 셋(오류 건수·그룹 수·미분석)은 크게, 파생 지표 셋(유입량·비율·
+            영향 서비스)은 한 줄짜리 보조 타일로 내린다. 여섯 칸이 같은 크기면 화면이
+            "무엇을 먼저 보라"고 말하지 못한다.
+
+            `group_count`·`unanalyzed_group_count` 는 **회차 전체 COUNT** 다 —
             `top_groups.length`(상위 N)를 지표 자리에 쓰면 정책이 커질수록 항상 "10"이 되어
             숫자가 상한에 붙어 버린다. 필드가 없는 옛 백엔드에서만 옛 계산으로 폴백하고,
             그 경우 부제에 "상위 N 기준"이라고 적어 두 상태를 구분한다.
           */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+          <div className="grid gap-3 sm:grid-cols-3">
             <Stat
-              label="총 오류 건수 (metric)"
+              label="총 오류 건수"
+              icon={ErrorGroupIcon}
               value={formatNumber(overview.data.total_errors)}
               sub={range.label}
+              info={METRIC_NOTE}
               tone="accent"
             />
             <Stat
+              label="오류 그룹"
+              icon={GroupCountIcon}
+              value={formatNumber(groupCount)}
+              sub={groupCountIsExact ? '이 회차 전체' : `상위 ${overview.data.top_groups.length}개 기준`}
+              info={
+                groupCountIsExact ? (
+                  <>
+                    조회 회차 <strong>전체</strong>의 그룹 수(DB COUNT)입니다 — 아래 표의{' '}
+                    <strong>상위 오류 그룹</strong> 개수와 다릅니다.
+                  </>
+                ) : (
+                  <>
+                    백엔드가 회차 전체 COUNT 를 아직 내려주지 않아 <strong>상위 N 개</strong>로
+                    폴백한 값입니다 — 실제 그룹 수는 이보다 많을 수 있습니다.
+                  </>
+                )
+              }
+            />
+            <Stat
+              label="미분석 그룹"
+              icon={GroupCountIcon}
+              value={formatNumber(unanalyzedCount)}
+              sub={unanalyzedIsExact ? '이 회차 전체' : `상위 ${overview.data.top_groups.length}개 기준`}
+              info={
+                <>
+                  {FINGERPRINT_NOTE}
+                  {!unanalyzedIsExact && (
+                    <span className="mt-1.5 block">
+                      백엔드가 회차 전체 COUNT 를 아직 내려주지 않아 <strong>상위 N 개</strong>
+                      만으로 센 값입니다.
+                    </span>
+                  )}
+                </>
+              }
+            />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <SubStat
               label="유입량 (분모)"
               value={
                 overview.data.ingest_total == null ? (
-                  <span className="text-slate-400">-</span>
+                  <span className="text-faint">-</span>
                 ) : (
                   formatNumber(overview.data.ingest_total)
                 )
               }
-              sub={overview.data.ingest_total == null ? baselineHint : '같은 기간 전체 로그 (metric)'}
+              note={overview.data.ingest_total == null ? baselineHint : '같은 기간 전체 로그'}
+              info={
+                <>
+                  정책의 <strong>분모 쿼리</strong>(오류 셀렉터와 같은 라벨 범위의 전체 로그를 세는
+                  쿼리)가 있을 때만 계산합니다. 오류 쿼리에서 역산하지 않습니다.
+                  <span className="mt-1.5 block">
+                    미설정·실패면 값은 0 이 아니라 <strong>없음</strong>(<Code>-</Code>)입니다.
+                  </span>
+                </>
+              }
             />
-            <Stat
+            <SubStat
               label="오류 비율"
               value={
                 overview.data.error_ratio == null ? (
-                  <span className="text-slate-400">-</span>
+                  <span className="text-faint">-</span>
                 ) : (
                   formatRatio(overview.data.error_ratio)
                 )
               }
-              sub={overview.data.error_ratio == null ? baselineHint : '오류 ÷ 유입량'}
-            />
-            <Stat
-              label="오류 그룹"
-              value={formatNumber(groupCount)}
-              sub={groupCountIsExact ? '이 회차 전체' : `상위 ${overview.data.top_groups.length}개 기준`}
-            />
-            <Stat
-              label="미분석 그룹"
-              value={formatNumber(unanalyzedCount)}
-              sub={
-                unanalyzedIsExact
-                  ? '이 회차 전체 · fingerprint 기준'
-                  : `상위 ${overview.data.top_groups.length}개 기준 · fingerprint`
+              note={overview.data.error_ratio == null ? baselineHint : '오류 ÷ 유입량'}
+              info={
+                <>
+                  같은 기간·같은 step 의 <strong>오류 ÷ 유입량</strong>입니다. 분모가 없으면{' '}
+                  <Code>-</Code> 이며 <strong>0 이 아닙니다</strong>.
+                </>
               }
             />
-            <Stat
+            <SubStat
               label="영향 서비스"
               value={formatNumber(overview.data.by_service.length)}
-              sub="라벨 기준"
+              note="라벨 기준"
+              info={
+                <>
+                  표준 라벨 <Code>service</Code> 기준으로 이 기간에 오류가 하나라도 잡힌 서비스
+                  수입니다.
+                </>
+              }
             />
           </div>
 
@@ -436,15 +536,10 @@ export function DashboardPage() {
           {baselineMissing && selectedPolicy && (
             <Notice tone="neutral" title="분모 쿼리가 설정되지 않았습니다">
               유입량과 오류 비율은 <strong>분모 쿼리</strong>(오류 셀렉터와 같은 라벨 범위의 전체
-              로그를 세는 쿼리)가 있어야 계산합니다. 값이 <code>-</code> 인 것은{' '}
+              로그를 세는 쿼리)가 있어야 계산합니다. 값이 <Code>-</Code> 인 것은{' '}
               <strong>0 이라는 뜻이 아닙니다</strong>.{' '}
-              <Link
-                to={`/policies/${selectedPolicy.id}/edit`}
-                className="font-medium text-sky-800 underline"
-              >
-                정책 수정
-              </Link>{' '}
-              에서 <strong>분모 쿼리</strong>를 채우면 이 자리에 표시됩니다.
+              <TextLink to={`/policies/${selectedPolicy.id}/edit`}>정책 수정</TextLink> 에서{' '}
+              <strong>분모 쿼리</strong>를 채우면 이 자리에 표시됩니다.
             </Notice>
           )}
 
@@ -453,7 +548,8 @@ export function DashboardPage() {
               title="시간대별 오류 건수"
               description={`${formatDateTime(overview.data.range_start)} ~ ${formatDateTime(
                 overview.data.range_end,
-              )} · ${overview.data.step_seconds}초 간격 · metric 쿼리 기준`}
+              )} · ${overview.data.step_seconds}초 간격`}
+              info={METRIC_NOTE}
               className={showIngestChart ? 'lg:col-span-2' : 'lg:col-span-3'}
             >
               <ErrorTrendChart points={overview.data.series} />
@@ -466,7 +562,13 @@ export function DashboardPage() {
             {showIngestChart && (
               <Card
                 title="유입량 추이 (분모)"
-                description="오류와 눈금이 달라 축을 나눴습니다. 같은 기간·같은 간격입니다."
+                description="같은 기간·같은 간격입니다."
+                info={
+                  <>
+                    유입량은 오류와 <strong>눈금이 다릅니다</strong> (보통 두 자릿수 큽니다). 한
+                    축에 겹치면 오류 곡선이 바닥에 눌려 모양이 사라지므로 축을 나눴습니다.
+                  </>
+                }
               >
                 <ErrorTrendChart
                   points={overview.data.ingest_series}
@@ -481,7 +583,14 @@ export function DashboardPage() {
           <div className="grid gap-6 lg:grid-cols-5">
             <Card
               title="서비스별 오류 건수"
-              description="라인 수가 아니라 metric 집계입니다."
+              description="라벨 기준 분해입니다."
+              info={
+                <>
+                  라인 수가 아니라 <Code>count_over_time</Code> <strong>metric 집계</strong>입니다.
+                  같은 시각의 포인트는 시간대별 차트에서 합산되지만, 여기서는 서비스별로
+                  나뉩니다.
+                </>
+              }
               className="lg:col-span-2"
             >
               <ServiceBarChart data={overview.data.by_service} />
@@ -489,17 +598,20 @@ export function DashboardPage() {
 
             <Card
               title={`상위 오류 그룹 (${formatNumber(overview.data.top_groups.length)}개)`}
-              description={
+              description="발생 수 상위 그룹입니다. 누르면 대표 로그와 AI 분석으로 갑니다."
+              info={
                 <>
                   이 표는 <strong>상위 몇 개</strong>만 보여줍니다 — 회차 전체 그룹 수는 위의{' '}
-                  <strong>오류 그룹</strong> 지표입니다. 분석 상태는 fingerprint 기준이라 이미
-                  분석된 오류를 중복 요청(=중복 과금)하지 않습니다.
+                  <strong>오류 그룹</strong> 지표입니다.
+                  <span className="mt-1.5 block">{FINGERPRINT_NOTE}</span>
                 </>
               }
               className="lg:col-span-3"
             >
               {overview.data.top_groups.length === 0 ? (
-                <EmptyBlock>이 기간에 묶인 오류 그룹이 없습니다.</EmptyBlock>
+                <EmptyBlock icon={ErrorGroupIcon}>
+                  이 기간에 묶인 오류 그룹이 없습니다.
+                </EmptyBlock>
               ) : (
                 <TableWrap minWidth="36rem">
                   <thead>
@@ -514,25 +626,24 @@ export function DashboardPage() {
                   </thead>
                   <tbody>
                     {overview.data.top_groups.map((group) => (
-                      <tr key={group.id} className="hover:bg-slate-50">
+                      <tr key={group.id} className="transition-colors hover:bg-surface-2">
                         <Td>
-                          <Link
+                          <TextLink
                             to={`/error-groups/${group.id}`}
-                            className="font-medium text-sky-800 hover:underline"
                             title={group.normalized_message}
                           >
                             {truncate(group.normalized_message, 90)}
-                          </Link>
-                          <p className="mt-0.5 text-xs text-slate-500">
+                          </TextLink>
+                          <p className="mt-0.5 text-xs text-muted">
                             {group.service ?? '(서비스 라벨 없음)'}
                             {group.environment ? ` · ${group.environment}` : ''}
                             {group.error_type ? ` · ${group.error_type}` : ''}
                           </p>
                         </Td>
-                        <Td align="right" className="font-semibold text-slate-900">
+                        <Td align="right" className="font-semibold text-ink">
                           {formatNumber(group.count)}
                         </Td>
-                        <Td className="whitespace-nowrap">
+                        <Td className="whitespace-nowrap text-muted">
                           <span title={formatDateTime(group.last_seen)}>
                             {formatRelative(group.last_seen)}
                           </span>
@@ -552,8 +663,45 @@ export function DashboardPage() {
               )}
             </Card>
           </div>
-        </div>
+        </PageStack>
       )}
+    </div>
+  );
+}
+
+/**
+ * 보조 지표 타일.
+ *
+ * `Stat` 보다 한 단계 작다 — 파생 지표(유입량·비율·서비스 수)를 핵심 지표와 같은 크기로
+ * 두면 화면에 큰 숫자가 여섯이 되고, 그 순간 위계가 사라진다. 색·간격 토큰은 `Stat` 과
+ * 같은 것을 쓴다(새 슬롯을 만들지 않는다).
+ */
+function SubStat({
+  label,
+  value,
+  note,
+  info,
+}: {
+  label: string;
+  value: ReactNode;
+  /** 값의 출처를 알리는 **짧은** 한 줄. 긴 설명은 `info` 로 보낸다. */
+  note?: string;
+  info?: ReactNode;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-2.5">
+      <span className="flex min-w-0 items-center gap-1 text-xs font-medium text-muted">
+        <span className="min-w-0 truncate">{label}</span>
+        {info && (
+          <InfoTip label={`${label} 설명 보기`} title={label}>
+            {info}
+          </InfoTip>
+        )}
+      </span>
+      <span className="flex shrink-0 items-baseline gap-2">
+        {note && <span className="text-xs text-faint">{note}</span>}
+        <span className="text-lg font-semibold text-ink tabular-nums">{value}</span>
+      </span>
     </div>
   );
 }

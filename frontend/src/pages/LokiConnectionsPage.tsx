@@ -14,7 +14,6 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router';
 
 import {
   useCreateLokiConnection,
@@ -25,21 +24,27 @@ import {
 } from '../api/queries';
 import { AUTH_TYPES, type AuthType, type LokiConnectionRead } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
+import { AddIcon, ChevronRightIcon, LokiConnectionIcon, SaveIcon } from '../components/icons';
 import {
   Badge,
   Button,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   Field,
+  InfoTip,
   Input,
-  LoadingBlock,
   Notice,
   Select,
+  SkeletonText,
   Textarea,
+  TextLink,
   cx,
+  toneClass,
 } from '../components/ui';
 import { authTypeLabel, formatDateTime } from '../lib/format';
+import { ConfirmButton } from './adminConfirm';
 
 interface FormState {
   name: string;
@@ -213,7 +218,13 @@ export function LokiConnectionsPage() {
       <div className="xl:col-span-2">
         <Card
           title="Loki 연결"
-          description="하나를 눌러 오른쪽에서 상세를 보고 고칩니다. 비활성화는 실제 삭제가 아닙니다 — 정책과 조회 이력이 참조합니다."
+          description="하나를 눌러 오른쪽에서 상세를 보고 고칩니다."
+          info={
+            <>
+              비활성화는 <strong>실제 삭제가 아닙니다</strong> — 정책과 조회 이력이 이 연결을
+              참조합니다.
+            </>
+          }
           actions={
             write.allowed && (
               <Button
@@ -221,19 +232,24 @@ export function LokiConnectionsPage() {
                 variant={selected === null ? 'primary' : 'secondary'}
                 onClick={startCreate}
               >
+                <AddIcon aria-hidden className="size-4" />
                 새 연결
               </Button>
             )
           }
         >
-          {connectionsQuery.isPending && <LoadingBlock />}
+          {connectionsQuery.isPending && (
+            <SkeletonText lines={4} label="Loki 연결 목록을 불러오는 중" />
+          )}
           {connectionsQuery.isError && <ErrorBlock error={connectionsQuery.error} />}
           {connectionsQuery.data?.length === 0 && (
-            <EmptyBlock>등록된 Loki 연결이 없습니다. 먼저 하나를 만드십시오.</EmptyBlock>
+            <EmptyBlock icon={LokiConnectionIcon}>
+              등록된 Loki 연결이 없습니다. 먼저 하나를 만드십시오.
+            </EmptyBlock>
           )}
 
           {connections.length > 0 && (
-            <ul className="divide-y divide-slate-100">
+            <ul className="divide-y divide-line-soft">
               {connections.map((connection) => {
                 const active = selected === connection.id;
                 const expected = connection.expected_services ?? [];
@@ -245,22 +261,26 @@ export function LokiConnectionsPage() {
                       onClick={() => openConnection(connection)}
                       className={cx(
                         'w-full cursor-pointer rounded-lg px-2.5 py-2 text-left transition-colors',
-                        active ? 'bg-sky-50 ring-1 ring-sky-200 ring-inset' : 'hover:bg-slate-50',
+                        active
+                          ? 'bg-accent-soft ring-1 ring-line-strong ring-inset'
+                          : 'hover:bg-surface-2',
                         !connection.active && 'opacity-75',
                       )}
                     >
-                      <p className="flex flex-wrap items-center gap-2 font-medium text-slate-900">
+                      <p className="flex flex-wrap items-center gap-2 font-medium text-ink">
+                        {/* LLM 연결 목록과 같은 표시 — 선택은 색만이 아니라 모양으로도 알린다. */}
+                        {active && <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />}
                         {connection.name}
                         {!connection.active && <Badge tone="neutral">비활성</Badge>}
                         {connection.has_secret && <Badge tone="info">secret 있음</Badge>}
                       </p>
                       <p
-                        className="mt-0.5 truncate font-mono text-xs text-slate-400"
+                        className="mt-0.5 truncate font-mono text-xs text-faint"
                         title={connection.base_url}
                       >
                         {connection.base_url}
                       </p>
-                      <p className="mt-0.5 text-xs text-slate-500">
+                      <p className="mt-0.5 text-xs text-muted">
                         {expected.length === 0
                           ? '수집 확인 대상 없음'
                           : `수집 확인 ${expected.length}개 · ${expected.join(', ')}`}
@@ -283,17 +303,17 @@ export function LokiConnectionsPage() {
             </Notice>
             {editing && (
               <dl className="mt-4 grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
-                <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-                  <dt className="text-slate-500">base URL</dt>
-                  <dd className="font-mono text-slate-800">{editing.base_url}</dd>
+                <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+                  <dt className="text-muted">base URL</dt>
+                  <dd className="font-mono text-ink-soft">{editing.base_url}</dd>
                 </div>
-                <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-                  <dt className="text-slate-500">인증</dt>
-                  <dd className="text-slate-800">{authTypeLabel(editing.auth_type)}</dd>
+                <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+                  <dt className="text-muted">인증</dt>
+                  <dd className="text-ink-soft">{authTypeLabel(editing.auth_type)}</dd>
                 </div>
-                <div className="flex justify-between gap-3 border-b border-slate-100 py-1 sm:col-span-2">
-                  <dt className="text-slate-500">수집 확인 대상</dt>
-                  <dd className="text-right font-mono text-slate-800">
+                <div className="flex justify-between gap-3 border-b border-line-soft py-1 sm:col-span-2">
+                  <dt className="text-muted">수집 확인 대상</dt>
+                  <dd className="text-right font-mono text-ink-soft">
                     {(editing.expected_services ?? []).join(', ') || '없음'}
                   </dd>
                 </div>
@@ -310,7 +330,7 @@ export function LokiConnectionsPage() {
             }
             actions={
               isEditing && (
-                <span className="text-xs text-slate-400">
+                <span className="text-xs text-faint tabular-nums">
                   #{editing.id} · 수정 {formatDateTime(editing.updated_at)}
                 </span>
               )
@@ -377,10 +397,10 @@ export function LokiConnectionsPage() {
                 className="sm:col-span-2"
                 hint={
                   <>
-                    소스 라벨을 표준 필드로 옮깁니다. 한 줄에 하나씩{' '}
-                    <code>소스라벨=표준필드</code> (예: <code>app=service</code>).
+                    한 줄에 하나씩 <Code>소스라벨=표준필드</Code> (예: <Code>app=service</Code>).
                   </>
                 }
+                info="Loki 의 소스 라벨을 AILA 의 표준 필드(service·environment)로 옮깁니다. 매핑이 없으면 그룹화가 서비스를 알아보지 못합니다."
               >
                 <Textarea
                   rows={3}
@@ -393,15 +413,24 @@ export function LokiConnectionsPage() {
                 수집 중단 확인 대상. 비용도 자동 실행도 없는 값이지만 오해를 부르기 쉬워
                 문구를 정확히 적는다 — "경고가 남는다"까지가 전부다.
               */}
-              <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3.5 py-3">
+              <div
+                className={cx(
+                  'rounded-lg px-3.5 py-3 ring-1 ring-inset sm:col-span-2',
+                  toneClass('warning'),
+                )}
+              >
                 <Field
                   label="수집 확인 대상 서비스"
                   hint={
                     <>
+                      쉼표로 구분합니다. 비워 두면 확인을 <strong>하지 않습니다</strong>.
+                    </>
+                  }
+                  info={
+                    <>
                       여기 적힌 서비스가 조회 기간에 로그를 <strong>한 줄도 안 내면</strong>{' '}
-                      <strong>수집 중단 경고</strong>가 회차에 남습니다. 표준 필드{' '}
-                      <code>service</code> 기준이고 쉼표로 구분합니다. 비워 두면 확인을 하지
-                      않습니다.
+                      회차에 <strong>수집 중단 경고</strong>가 남습니다. 표준 필드{' '}
+                      <Code>service</Code> 기준입니다.
                     </>
                   }
                 >
@@ -413,13 +442,20 @@ export function LokiConnectionsPage() {
                     }
                   />
                 </Field>
-                <p className="mt-2 text-xs text-amber-900">
-                  경고는 <strong>기록일 뿐</strong>입니다 — 알림을 보내거나 조회·분석을 자동으로
-                  실행하지 않습니다. 경고는{' '}
-                  <Link to="/" className="font-medium underline">
-                    통합 대시보드
-                  </Link>{' '}
-                  카드와 정책 상세에 배지로 표시됩니다.
+                {/*
+                  이 문장은 ⓘ 로 접지 않는다 — "적어 두면 알림이 온다"는 오해가 그대로 남으면
+                  사람이 이 화면을 알림 설정으로 쓰게 된다. 자동 트리거는 정책의
+                  `auto_analyze_new` 하나뿐이라는 계약을 본문에 남긴다.
+                */}
+                <p className="mt-2 flex flex-wrap items-center gap-1 text-xs">
+                  <span>
+                    경고는 <strong>기록일 뿐</strong>입니다 — 알림을 보내거나 조회·분석을 자동으로
+                    실행하지 않습니다.
+                  </span>
+                  <InfoTip label="수집 중단 경고가 어디에 보이는지" title="경고는 어디에 보이나">
+                    <TextLink to="/">통합 대시보드</TextLink> 카드와 정책 상세에{' '}
+                    <strong>배지</strong>로 표시됩니다.
+                  </InfoTip>
                 </p>
               </div>
             </div>
@@ -449,8 +485,9 @@ export function LokiConnectionsPage() {
               </div>
             )}
 
-            <div className="mt-5 flex flex-wrap gap-2">
+            <div className="mt-5 flex flex-wrap items-center gap-2">
               <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+                <SaveIcon aria-hidden className="size-4" />
                 {saving ? '저장 중…' : isEditing ? '연결 수정' : '연결 저장'}
               </Button>
               <Button
@@ -466,15 +503,17 @@ export function LokiConnectionsPage() {
               >
                 {testConnection.isPending ? '테스트 중…' : '연결 테스트'}
               </Button>
+              {/* LLM 연결 화면과 같은 2단 확인 — 위험 동작의 모양이 화면마다 다르면 안 된다. */}
               {isEditing && editing.active && (
-                <Button
+                <ConfirmButton
                   variant="danger"
-                  disabled={deactivateConnection.isPending}
-                  title="실제 삭제가 아닙니다 — 정책과 조회 이력이 이 연결을 참조합니다."
-                  onClick={() => deactivateConnection.mutate(editing.id)}
+                  size="md"
+                  pending={deactivateConnection.isPending}
+                  question="삭제가 아니라 비활성입니다 — 정책과 조회 이력은 그대로 참조합니다."
+                  onConfirm={() => deactivateConnection.mutate(editing.id)}
                 >
                   비활성화
-                </Button>
+                </ConfirmButton>
               )}
               {isEditing && !editing.active && (
                 <Button

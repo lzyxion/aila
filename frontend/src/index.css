@@ -1,5 +1,29 @@
 @import 'tailwindcss';
 
+/*
+ * 다크 모드는 **클래스 기반**이다 (`html.dark`). 미디어 쿼리만 쓰면 "OS 는 밝은데 이 앱만
+ * 어둡게" 같은 선택을 표현할 수 없고, 3상태(light/dark/system) 토글도 만들 수 없다.
+ * `system` 은 JS 가 prefers-color-scheme 을 읽어 같은 클래스를 붙였다 뗐다 한다
+ * (`src/lib/theme.ts`). 첫 페인트 깜빡임은 `index.html` 의 인라인 스니펫이 막는다.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * -------------------------------------------------------------- 의미 토큰
+ *
+ * 화면 코드는 `bg-white`·`text-slate-500` 같은 **원색**이 아니라 여기 정의한 **역할**을
+ * 부른다 (`bg-surface`·`text-muted`). 이유는 하나다 — 원색을 쓰면 다크 모드가 클래스마다
+ * `dark:` 를 하나씩 더 다는 일이 되고, 한 군데를 빠뜨리면 흰 카드가 검은 화면에 남는다.
+ * 토큰을 쓰면 아래 `html.dark` 블록 하나가 전부를 뒤집는다.
+ *
+ * 규칙:
+ * - 이름은 **역할**이지 색이 아니다. `surface`(카드) / `canvas`(페이지 바닥) /
+ *   `line`(경계) / `ink`(본문 글자) / `muted`(부차 글자) / `accent`(주 동작).
+ * - 값은 리터럴이다. Tailwind 기본 팔레트 변수를 `var()` 로 참조하면 사용 감지가 안 돼
+ *   해당 변수가 빌드에서 빠질 수 있다.
+ * - 색조(tone: info/warning/danger…) 는 여기 넣지 않는다 — 배지·알림 상자 한 곳
+ *   (`components/ui.tsx` 의 `toneStyles`)에서만 쓰이므로 거기서 `dark:` 로 짝을 맞춘다.
+ */
 @theme {
   --font-sans:
     'Pretendard', 'Pretendard Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
@@ -7,6 +31,89 @@
   --font-mono:
     'JetBrains Mono', 'Cascadia Code', ui-monospace, SFMono-Regular, 'D2Coding', Consolas,
     monospace;
+
+  /* 면 */
+  --color-canvas: #f1f5f9; /* 페이지 바닥 */
+  --color-surface: #ffffff; /* 카드·사이드바 */
+  --color-surface-2: #f8fafc; /* 행 hover·입력 비활성 */
+  --color-surface-3: #eef2f7; /* 인라인 코드·스켈레톤·구분 블록 */
+
+  /* 경계 */
+  --color-line: #e2e8f0; /* 기본 테두리 */
+  --color-line-soft: #f1f5f9; /* 표의 행 구분처럼 더 옅은 선 */
+  --color-line-strong: #cbd5e1; /* 입력·버튼처럼 만질 수 있는 것의 테두리 */
+
+  /* 글자 */
+  --color-ink: #0f172a; /* 제목·값 */
+  --color-ink-soft: #334155; /* 본문 */
+  --color-muted: #64748b; /* 라벨·부제 */
+  --color-faint: #7c8ba1; /* id·타임스탬프처럼 있는 줄만 알면 되는 것 */
+
+  /* 강조 (주 동작·링크) */
+  --color-accent: #0369a1;
+  --color-accent-hover: #075985;
+  --color-accent-fg: #ffffff; /* accent 위에 얹는 글자 */
+  --color-accent-soft: #eaf5fe; /* 강조 배경(선택된 행 등) */
+  --color-accent-ink: #075985; /* 링크 글자 */
+  --color-focus: #0284c7; /* focus-visible 링 */
+
+  /* 특수 면 */
+  --color-log-bg: #0f172a; /* 로그 라인 블록 — 두 테마 모두 어둡다 */
+  --color-log-ink: #e2e8f0;
+  --color-nav-active: #0f172a; /* 사이드바 활성 항목 */
+  --color-nav-active-fg: #ffffff;
+  --color-overlay: rgb(15 23 42 / 0.45); /* 모바일 드로어 뒷배경 */
+
+  /*
+   * 차트 색. SVG 는 클래스가 아니라 JS 값으로 칠하므로 `charts.tsx` 가 이 변수를
+   * getComputedStyle 로 읽어 간다 — 색의 출처는 여기 한 곳이다.
+   * series1/series2 슬롯 자체는 유지한다 (두 화면의 같은 색이 같은 뜻이어야 한다).
+   */
+  --color-chart-series1: #2a78d6;
+  --color-chart-series2: #eb6834;
+  --color-chart-grid: #e2e8f0;
+  --color-chart-tick: #64748b;
+  --color-chart-surface: #ffffff;
+}
+
+/*
+ * 다크 값. **여기 있는 이름만** 위와 짝이 맞으면 화면 전체가 따라온다.
+ * 대비는 카드 면(#111a27) 기준으로 확인했다 — ink 16:1, ink-soft 11:1, muted 6.7:1,
+ * faint 5.0:1, accent 위의 흰 글자 5.4:1.
+ */
+html.dark {
+  --color-canvas: #080d16;
+  --color-surface: #111a27;
+  --color-surface-2: #18222f;
+  --color-surface-3: #22303f;
+
+  --color-line: #2b3a4d;
+  --color-line-soft: #1d2836;
+  --color-line-strong: #3d5069;
+
+  --color-ink: #e9eff7;
+  --color-ink-soft: #c5d0de;
+  --color-muted: #93a3b8;
+  --color-faint: #7b8ca3;
+
+  --color-accent: #0b74ad;
+  --color-accent-hover: #0e88c9;
+  --color-accent-fg: #ffffff;
+  --color-accent-soft: #0b2436;
+  --color-accent-ink: #7dd3fc;
+  --color-focus: #38bdf8;
+
+  --color-log-bg: #05090f;
+  --color-log-ink: #dbe4f0;
+  --color-nav-active: #1d4d72;
+  --color-nav-active-fg: #eaf6ff;
+  --color-overlay: rgb(2 6 12 / 0.6);
+
+  --color-chart-series1: #5aa7f5;
+  --color-chart-series2: #f6935f;
+  --color-chart-grid: #2b3a4d;
+  --color-chart-tick: #93a3b8;
+  --color-chart-surface: #111a27;
 }
 
 @layer base {
@@ -14,8 +121,16 @@
     color-scheme: light;
   }
 
+  /*
+   * 인라인 스니펫이 이미 `style.colorScheme` 을 세팅하지만, JS 가 꺼져 있거나 스니펫이
+   * 실패해도 스크롤바·기본 폼 컨트롤이 테마를 따라오게 여기에도 적어 둔다.
+   */
+  html.dark {
+    color-scheme: dark;
+  }
+
   body {
-    @apply bg-slate-100 text-slate-900 antialiased;
+    @apply bg-canvas text-ink antialiased;
     font-family: var(--font-sans);
   }
 
@@ -25,13 +140,28 @@
   }
 
   *:focus-visible {
-    @apply outline-2 outline-offset-2 outline-sky-600;
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /*
+   * 애니메이션을 줄여 달라는 설정은 존중한다. 스켈레톤의 맥박·스피너 회전은 장식이고,
+   * "불러오는 중"이라는 사실은 `role="status"` 의 글자가 이미 전달한다.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
 @layer components {
   .aila-scroll {
     scrollbar-width: thin;
-    scrollbar-color: var(--color-slate-400) transparent;
+    scrollbar-color: var(--color-line-strong) transparent;
   }
 }

@@ -21,24 +21,28 @@ import {
 } from '../api/queries';
 import type { UserRead, UserRole } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { AddIcon, SaveIcon, UsersIcon } from '../components/icons';
 import { RoleBadge } from '../components/StatusBadges';
 import {
   Badge,
   Button,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   Field,
   Input,
-  LoadingBlock,
   Notice,
+  PageStack,
   Select,
+  SkeletonTable,
   TableWrap,
   Td,
   Th,
   cx,
 } from '../components/ui';
 import { formatDateTime } from '../lib/format';
+import { ConfirmButton } from './adminConfirm';
 
 /** 비밀번호·역할 변경이 세션에 미치는 영향 — 화면 여러 곳에서 같은 문구를 쓴다. */
 const SESSION_NOTE =
@@ -71,20 +75,22 @@ export function UsersPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <PageStack>
       <CreateUserCard onConflict={setConflict} />
 
       <Card
         title="계정 목록"
-        description={
+        description="비활성화는 삭제가 아닙니다 — 계정 행은 남고 로그인만 막힙니다."
+        info={
           <>
-            비활성화는 <strong>삭제가 아닙니다</strong> — 계정 행은 남고 로그인만 막힙니다(분석
-            이력이 계정을 참조합니다). {SESSION_NOTE}
+            계정 행을 지우지 않는 이유는 <strong>분석 이력이 계정을 참조</strong>하기
+            때문입니다.
+            <span className="mt-1.5 block">{SESSION_NOTE}</span>
           </>
         }
         actions={
           rows.length > 0 && (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-muted tabular-nums">
               전체 {usersQuery.data?.total ?? rows.length}개 · 활성 admin {activeAdmins}명
             </span>
           )
@@ -98,15 +104,16 @@ export function UsersPage() {
           </div>
         )}
 
-        {usersQuery.isPending && <LoadingBlock label="계정 목록을 불러오는 중…" />}
+        {usersQuery.isPending && (
+          <SkeletonTable rows={4} cols={5} label="계정 목록을 불러오는 중" />
+        )}
 
         {usersQuery.isError &&
           (isEndpointMissing(usersQuery.error) ? (
             <Notice tone="warning" title="계정 관리 API 를 아직 쓸 수 없습니다">
-              <code className="rounded bg-white/60 px-1">GET /api/auth/users</code> 가 응답하지
-              않습니다. 백엔드에 이 경로가 올라오면 계정 목록·역할 변경·비밀번호 재설정이 여기에
-              표시됩니다. 그 전에는 <code className="rounded bg-white/60 px-1">POST /api/auth/users</code>{' '}
-              로 계정을 만드는 것까지만 가능합니다.
+              <Code>GET /api/auth/users</Code> 가 응답하지 않습니다. 백엔드에 이 경로가 올라오면
+              계정 목록·역할 변경·비밀번호 재설정이 여기에 표시됩니다. 그 전에는{' '}
+              <Code>POST /api/auth/users</Code> 로 계정을 만드는 것까지만 가능합니다.
             </Notice>
           ) : isForbidden(usersQuery.error) ? (
             <Notice tone="neutral" title="admin 계정만 볼 수 있습니다">
@@ -116,7 +123,9 @@ export function UsersPage() {
             <ErrorBlock error={usersQuery.error} />
           ))}
 
-        {usersQuery.data && rows.length === 0 && <EmptyBlock>계정이 없습니다.</EmptyBlock>}
+        {usersQuery.data && rows.length === 0 && (
+          <EmptyBlock icon={UsersIcon}>계정이 없습니다.</EmptyBlock>
+        )}
 
         {rows.length > 0 && (
           <TableWrap minWidth="52rem">
@@ -138,26 +147,25 @@ export function UsersPage() {
                 return [
                   <tr
                     key={row.id}
-                    className={cx('hover:bg-slate-50', !row.active && 'opacity-70')}
+                    className={cx('hover:bg-surface-2', !row.active && 'opacity-70')}
                   >
                     <Td>
-                      <p className="font-medium text-slate-900">
+                      <p className="font-medium text-ink">
                         {row.username}
                         {isMe && (
-                          <span className="ml-2 text-xs font-normal text-slate-500">
+                          <span className="ml-2 text-xs font-normal text-muted">
                             (지금 로그인한 계정)
                           </span>
                         )}
                       </p>
-                      <p className="mt-0.5 text-xs text-slate-400">#{row.id}</p>
+                      <p className="mt-0.5 text-xs text-faint tabular-nums">#{row.id}</p>
                     </Td>
                     <Td>
                       <div className="flex flex-col items-start gap-1">
                         <RoleBadge role={row.role} />
+                        {/* 색이 아니라 글자로 알린다 — 서버가 왜 거절할지를 미리 적는다. */}
                         {lastAdmin && (
-                          <span className="text-xs text-amber-700">
-                            마지막 활성 admin — 강등·비활성 불가
-                          </span>
+                          <Badge tone="warning">마지막 활성 admin · 강등·비활성 불가</Badge>
                         )}
                       </div>
                     </Td>
@@ -166,7 +174,7 @@ export function UsersPage() {
                         {row.active ? '활성' : '비활성'}
                       </Badge>
                     </Td>
-                    <Td className="whitespace-nowrap text-xs text-slate-500">
+                    <Td className="whitespace-nowrap text-xs text-muted tabular-nums">
                       {formatDateTime(row.created_at)}
                     </Td>
                     <Td align="right">
@@ -192,18 +200,22 @@ export function UsersPage() {
                           {open ? '닫기' : '비밀번호 재설정'}
                         </Button>
                         {row.active ? (
-                          <Button
-                            size="sm"
+                          /*
+                            비활성화는 그 계정의 세션을 전부 끊는다 — 되돌릴 수는 있지만 누른
+                            순간 상대가 로그아웃되므로 한 번 더 묻는다. 자기 자신·마지막
+                            admin 은 서버가 409 로 막지만, 그 사유는 확인 문구에 미리 적는다.
+                          */
+                          <ConfirmButton
                             variant="danger"
-                            disabled={deactivateUser.isPending}
-                            title={
+                            pending={deactivateUser.isPending}
+                            question={
                               isMe
-                                ? '자기 자신은 비활성화할 수 없습니다 (서버가 409 로 거절합니다).'
+                                ? '자기 자신은 비활성화할 수 없습니다 (서버가 409).'
                                 : lastAdmin
-                                  ? '마지막 활성 admin 은 비활성화할 수 없습니다 (서버가 409 로 거절합니다).'
-                                  : SESSION_NOTE
+                                  ? '마지막 활성 admin 입니다 (서버가 409 로 거절합니다).'
+                                  : `${row.username} 의 세션이 전부 끊깁니다.`
                             }
-                            onClick={() => {
+                            onConfirm={() => {
                               setConflict(null);
                               deactivateUser.mutate(row.id, {
                                 onError: (error) => {
@@ -215,7 +227,7 @@ export function UsersPage() {
                             }}
                           >
                             비활성화
-                          </Button>
+                          </ConfirmButton>
                         ) : (
                           <Button
                             size="sm"
@@ -231,7 +243,7 @@ export function UsersPage() {
                   </tr>,
                   open ? (
                     <tr key={`${row.id}-password`}>
-                      <Td colSpan={5} className="bg-slate-50">
+                      <Td colSpan={5} className="bg-surface-2">
                         <PasswordForm
                           user={row}
                           isMe={isMe}
@@ -253,7 +265,7 @@ export function UsersPage() {
           </div>
         )}
       </Card>
-    </div>
+    </PageStack>
   );
 }
 
@@ -340,21 +352,22 @@ function PasswordForm({
   }
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
-      <p className="text-sm font-semibold text-slate-900">
+    <div className="rounded-lg border border-line bg-surface px-4 py-3">
+      <p className="text-sm font-semibold text-ink">
         <span className="font-mono">{user.username}</span> 비밀번호 재설정
       </p>
-      <p className="mt-1 text-xs text-slate-500">
-        {SESSION_NOTE}
-        {isMe && (
-          <>
-            {' '}
-            <strong className="text-amber-700">
-              지금 로그인한 계정입니다 — 저장하면 이 화면도 로그인 화면으로 돌아갑니다.
-            </strong>
-          </>
-        )}
-      </p>
+      {/*
+        세션이 끊긴다는 사실은 **위험 고지**라 ⓘ 로 접지 않는다 — 누르기 전에 보여야 한다.
+      */}
+      <p className="mt-1 text-xs text-muted">{SESSION_NOTE}</p>
+      {isMe && (
+        <div className="mt-2">
+          <Notice tone="warning">
+            <strong>지금 로그인한 계정입니다</strong> — 저장하면 이 화면도 로그인 화면으로
+            돌아갑니다.
+          </Notice>
+        </div>
+      )}
 
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         <Field label="새 비밀번호">
@@ -375,6 +388,7 @@ function PasswordForm({
         </Field>
         <div className="flex items-end gap-2">
           <Button variant="primary" disabled={updateUser.isPending} onClick={submit}>
+            <SaveIcon aria-hidden className="size-4" />
             {updateUser.isPending ? '저장 중…' : '비밀번호 저장'}
           </Button>
           <Button variant="ghost" onClick={onDone}>
@@ -436,11 +450,11 @@ function CreateUserCard({ onConflict }: { onConflict: (message: string) => void 
   return (
     <Card
       title="계정 만들기"
-      description={
+      description="기본은 viewer 입니다 — 조회만 필요한 사람에게 admin 을 주지 마십시오."
+      info={
         <>
-          기본은 <strong>viewer</strong> 입니다 — 조회만 필요한 사람에게 admin 을 주지 마십시오.
           admin 은 정책 실행·AI 분석·설정 변경처럼 <strong>비용이 나가는 동작</strong>을 할 수
-          있습니다.
+          있습니다. viewer 는 GET 만 가능합니다.
         </>
       }
     >
@@ -469,6 +483,7 @@ function CreateUserCard({ onConflict }: { onConflict: (message: string) => void 
         </Field>
         <div className="flex items-end">
           <Button variant="primary" disabled={createUser.isPending} onClick={submit}>
+            <AddIcon aria-hidden className="size-4" />
             {createUser.isPending ? '만드는 중…' : '계정 만들기'}
           </Button>
         </div>

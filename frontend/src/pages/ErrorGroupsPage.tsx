@@ -13,13 +13,15 @@
  *
  * 같은 목록을 통합 대시보드 하단(`AllErrorGroupsPanel`)이 재사용한다 — 두 곳에서 정렬이나
  * 색 규칙이 갈리면 같은 오류가 화면마다 다른 등급으로 보인다.
+ *
+ * Phase 8: 표 아래에 있던 색 규칙 설명은 **지운 것이 아니라** 카드 제목의 ⓘ 로 옮겼다.
  */
 
 import { useState } from 'react';
-import { Link } from 'react-router';
 
 import { isEndpointMissing } from '../api/client';
 import { useDashboardErrorGroups } from '../api/queries';
+import { ErrorGroupIcon } from '../components/icons';
 import {
   AnalysisStatusBadge,
   SeverityBadge,
@@ -27,7 +29,9 @@ import {
 } from '../components/StatusBadges';
 import {
   Button,
+  ButtonLink,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   LoadingBlock,
@@ -35,23 +39,46 @@ import {
   PageHeader,
   TableWrap,
   Td,
+  TextLink,
   Th,
   cx,
 } from '../components/ui';
 import { formatDateTime, formatNumber, formatRelative, truncate } from '../lib/format';
+
+/** 두 화면(전용 페이지·홈 하단)이 같은 문구를 쓰도록 한 곳에서 만든다. */
+const SCOPE_NOTE = (
+  <>
+    대상은 전 <strong>활성</strong> 정책의 <strong>최신 성공</strong> 조회 회차입니다 — 비활성
+    정책을 섞으면 이미 끄기로 한 오류가 상위를 차지하고, 회차를 좁히지 않으면 같은 오류가 회차
+    수만큼 중복됩니다.
+    <span className="mt-1.5 block">
+      분석 상태는 그룹 id 가 아니라 <strong>fingerprint 기준</strong>이라 이전 회차에서 분석한
+      오류도 "분석 완료"로 보입니다.
+    </span>
+    <span className="mt-1.5 block">
+      서로 겹치는 정책이 같은 오류를 잡으면 같은 fingerprint 가 정책 수만큼 나옵니다 — 중복이
+      아니라 "두 정책이 같은 오류를 보고 있다"는 사실이며 <strong>정책</strong> 열로 구분됩니다.
+    </span>
+  </>
+);
+
+const SEVERITY_COLOR_NOTE = (
+  <>
+    행 배경은 <strong>LLM 추정 심각도</strong>이며 발생 수와 무관합니다.
+    <span className="mt-1.5 block">
+      색이 보이지 않는 환경(색각 이상·흑백 출력·강제 대비)을 위해 각 행에 배지를 함께 표시합니다
+      — 색은 보조 신호일 뿐입니다. 미분석 그룹은 아예 칠하지 않습니다.
+    </span>
+  </>
+);
 
 export function ErrorGroupsPage() {
   return (
     <div>
       <PageHeader
         title="오류 그룹"
-        description={
-          <>
-            전 활성 정책의 <strong>최신 성공 조회</strong>에서 묶인 그룹을 발생 수 순으로 모은
-            목록입니다. 분석 상태는 그룹 id 가 아니라 <strong>fingerprint 기준</strong>이라 이전
-            회차에서 분석한 오류도 "분석 완료"로 보입니다.
-          </>
-        }
+        description="전 활성 정책의 최신 성공 조회에서 묶인 그룹을 발생 수 순으로 모은 목록입니다."
+        info={SCOPE_NOTE}
       />
       <AllErrorGroupsPanel pageSize={25} />
     </div>
@@ -85,41 +112,49 @@ export function AllErrorGroupsPanel({
           ? '전 활성 정책의 최신 성공 조회 기준 · 발생 수 순'
           : '행을 누르면 마스킹된 대표 로그와 AI 분석으로 들어갑니다.'
       }
+      info={
+        <>
+          {SEVERITY_COLOR_NOTE}
+          {/* 전용 페이지에서는 범위 설명이 이미 페이지 머리말의 ⓘ 에 있다. */}
+          {compact && <span className="mt-1.5 block">{SCOPE_NOTE}</span>}
+        </>
+      }
       actions={
         <div className="flex items-center gap-2">
           {total > 0 && (
-            <span className="text-xs text-slate-500">
-              전체 <strong className="text-slate-800">{formatNumber(total)}</strong>개
+            <span className="text-xs text-muted tabular-nums">
+              전체 <strong className="text-ink-soft">{formatNumber(total)}</strong>개
               {!compact && total > pageSize && ` 중 ${offset + 1}–${Math.min(offset + pageSize, total)}`}
             </span>
           )}
           {compact && (
-            <Link
-              to="/error-groups"
-              className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50"
-            >
+            <ButtonLink to="/error-groups" size="sm">
               전체 보기 →
-            </Link>
+            </ButtonLink>
           )}
         </div>
       }
     >
+      {/*
+        결과 개수를 모르는 목록이라 스켈레톤 행을 그리지 않는다 — "N건 있다"는 거짓 신호가
+        되기 때문이다. 여기서는 스피너가 정직하다.
+      */}
       {query.isPending && <LoadingBlock label="오류 그룹을 불러오는 중…" />}
 
       {/* 백엔드에 아직 경로가 없으면 실패가 아니라 안내다 — 정책 카드는 그대로 남는다. */}
       {query.isError &&
         (isEndpointMissing(query.error) ? (
           <Notice tone="warning" title="전체 오류 그룹 API 를 아직 쓸 수 없습니다">
-            <code className="rounded bg-white/60 px-1">GET /api/dashboard/error-groups</code> 가
-            응답하지 않습니다. 백엔드에 이 경로가 올라오면 전 정책의 오류 그룹이 여기에 한 목록으로
-            모입니다. 그 전에는 정책 카드의 <strong>그룹 보기</strong>로 회차별 목록을 여십시오.
+            <Code>GET /api/dashboard/error-groups</Code> 가 응답하지 않습니다. 백엔드에 이 경로가
+            올라오면 전 정책의 오류 그룹이 여기에 한 목록으로 모입니다. 그 전에는 정책 카드의{' '}
+            <strong>그룹 보기</strong>로 회차별 목록을 여십시오.
           </Notice>
         ) : (
           <ErrorBlock error={query.error} />
         ))}
 
       {query.data && items.length === 0 && (
-        <EmptyBlock>
+        <EmptyBlock icon={ErrorGroupIcon}>
           성공한 조회에서 묶인 오류 그룹이 없습니다. 정책을 한 번 실행하십시오.
         </EmptyBlock>
       )}
@@ -151,35 +186,28 @@ export function AllErrorGroupsPanel({
                   )}
                 >
                   <Td className="whitespace-nowrap">
-                    <Link
-                      to={`/dashboard/${group.policy_id}`}
-                      className="text-xs font-medium text-sky-800 hover:underline"
-                    >
+                    <TextLink to={`/dashboard/${group.policy_id}`} className="text-xs">
                       {truncate(group.policy_name, 28)}
-                    </Link>
-                    <p className="mt-0.5 text-xs text-slate-400">#{group.policy_id}</p>
+                    </TextLink>
+                    <p className="mt-0.5 text-xs text-faint tabular-nums">#{group.policy_id}</p>
                   </Td>
                   <Td className="whitespace-nowrap">
-                    <p className="text-sm text-slate-800">{group.service ?? '(라벨 없음)'}</p>
-                    <p className="mt-0.5 text-xs text-slate-500">
+                    <p className="text-sm text-ink-soft">{group.service ?? '(라벨 없음)'}</p>
+                    <p className="mt-0.5 text-xs text-muted">
                       {group.environment ?? '-'}
                       {group.error_type ? ` · ${group.error_type}` : ''}
                     </p>
                   </Td>
                   <Td>
-                    <Link
-                      to={`/error-groups/${group.id}`}
-                      className="font-medium text-sky-800 hover:underline"
-                      title={group.normalized_message}
-                    >
+                    <TextLink to={`/error-groups/${group.id}`} title={group.normalized_message}>
                       {truncate(group.normalized_message, 84)}
-                    </Link>
-                    <p className="mt-0.5 font-mono text-xs text-slate-500">{group.fingerprint}</p>
+                    </TextLink>
+                    <p className="mt-0.5 font-mono text-xs text-faint">{group.fingerprint}</p>
                   </Td>
-                  <Td align="right" className="font-semibold text-slate-900">
+                  <Td align="right" className="font-semibold text-ink">
                     {formatNumber(group.count)}
                   </Td>
-                  <Td className="whitespace-nowrap text-sm">
+                  <Td className="whitespace-nowrap text-sm text-muted">
                     <span title={formatDateTime(group.last_seen)}>
                       {formatRelative(group.last_seen)}
                     </span>
@@ -196,13 +224,8 @@ export function AllErrorGroupsPanel({
             </tbody>
           </TableWrap>
 
-          <p className="mt-3 text-xs text-slate-500">
-            행 배경은 <strong>LLM 추정 심각도</strong>이며 발생 수와 무관합니다. 색이 보이지 않는
-            환경을 위해 각 행에 배지를 함께 표시합니다.
-          </p>
-
           {!compact && total > pageSize && (
-            <div className="mt-3 flex items-center justify-end gap-2">
+            <div className="mt-4 flex items-center justify-end gap-2">
               <Button
                 size="sm"
                 disabled={offset === 0}
@@ -210,7 +233,7 @@ export function AllErrorGroupsPanel({
               >
                 ← 이전
               </Button>
-              <span className="text-xs text-slate-500 tabular-nums">
+              <span className="text-xs text-muted tabular-nums">
                 {Math.floor(offset / pageSize) + 1} / {Math.max(1, Math.ceil(total / pageSize))}
               </span>
               <Button

@@ -10,11 +10,15 @@
  * 미리보기는 여기 있다 — **저장 전에** 쿼리가 실제로 무엇을 가져오는지 보는 장치이므로
  * 조회 전용 화면에 둘 이유가 없다. 잘못 쓴 LogQL 이 정책으로 굳으면 이후 모든 조회가
  * 조용히 빈 결과를 낸다.
+ *
+ * 폼은 네 덩어리다 (Phase 8): **기본 정보**(무엇을 어디서 잡나) · **조회 한도**(한 번에
+ * 얼마나 가져오나) · **분모 쿼리**(비율의 분모) · **분석·스케줄**(비용이 나가는 설정).
+ * 비용·상한처럼 잘못 두면 돈이 나가는 항목만 마지막 덩어리에 모아 두었다 — 긴 폼에서
+ * 위험한 스위치가 이름 입력란 옆에 섞여 있으면 실수로 켜진다.
  */
 
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { Link } from 'react-router';
 
 import {
   useCreatePolicy,
@@ -27,11 +31,14 @@ import {
 } from '../api/queries';
 import { policySchedule, type PolicyPreviewResponse, type PolicyRead } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
+import { BackIcon, RunIcon, SaveIcon } from '../components/icons';
 import {
   Badge,
   Button,
+  ButtonLink,
   Card,
   Checkbox,
+  Code,
   EmptyBlock,
   ErrorBlock,
   Field,
@@ -39,10 +46,13 @@ import {
   LoadingBlock,
   Notice,
   PageHeader,
+  PageStack,
   Select,
+  SkeletonCard,
   TableWrap,
   Td,
   Textarea,
+  TextLink,
   Th,
 } from '../components/ui';
 import { formatIntervalMinutes, formatNumber, warningCodeLabel } from '../lib/format';
@@ -262,10 +272,7 @@ export function PolicyEditPage() {
         <PageHeader title={isEditing ? '정책 수정' : '새 정책'} />
         <Card title="권한 없음">
           <Notice tone="neutral" title="읽기 전용 계정입니다">
-            {write.reason} 정책의 LogQL·한도·스케줄은{' '}
-            <Link to="/policies" className="font-medium text-sky-800 underline">
-              분석 정책
-            </Link>{' '}
+            {write.reason} 정책의 LogQL·한도·스케줄은 <TextLink to="/policies">분석 정책</TextLink>{' '}
             목록에서 볼 수 있습니다.
           </Notice>
         </Card>
@@ -274,7 +281,13 @@ export function PolicyEditPage() {
   }
 
   if (isEditing && policiesQuery.isPending) {
-    return <LoadingBlock label="정책을 불러오는 중…" />;
+    // 폼 카드는 뼈대가 정해진 자리라 스켈레톤이 맞는다 (몇 건인지 세는 목록이 아니다).
+    return (
+      <div>
+        <PageHeader title="정책 수정" />
+        <SkeletonCard lines={6} label="정책을 불러오는 중" />
+      </div>
+    );
   }
   if (isEditing && policiesQuery.data && !target) {
     return (
@@ -285,132 +298,253 @@ export function PolicyEditPage() {
     );
   }
 
+  const scheduleSummary =
+    form.schedule_enabled && form.schedule_interval_minutes.trim() !== ''
+      ? `${formatIntervalMinutes(Number(form.schedule_interval_minutes))}마다 실행`
+      : null;
+
   return (
     <div>
       <PageHeader
         title={isEditing ? `정책 수정 · ${target?.name ?? `#${editingId}`}` : '새 정책'}
-        description={
+        description="저장 전 미리보기로 이 쿼리가 실제로 무엇을 가져오는지 확인하십시오."
+        info={
           <>
-            기간·라인 수 상한은 서버가 다시 강제합니다 — 여기 값은 정책의 기본값이자{' '}
-            <strong>실행 상한</strong>입니다. 저장 전 <strong>미리보기</strong>로 쿼리가 실제로
-            무엇을 가져오는지 확인하십시오.
+            잘못 쓴 LogQL 이 정책으로 굳으면 이후 모든 조회가 <strong>조용히 빈 결과</strong>를
+            냅니다 — 미리보기는 그걸 저장 전에 잡는 장치입니다.
+            <span className="mt-1.5 block">
+              미리보기에 나오는 로그도 <strong>마스킹된 값</strong>이며, 마스킹 전 원본은
+              저장하지 않습니다.
+            </span>
           </>
         }
         actions={
-          <Link
-            to="/policies"
-            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
-          >
+          <ButtonLink to="/policies">
+            <BackIcon aria-hidden className="size-4" />
             목록으로
-          </Link>
+          </ButtonLink>
         }
       />
 
-      <div className="grid gap-6 xl:grid-cols-2">
-        <Card title="정책 설정">
-          {connectionsQuery.isError && (
-            <div className="mb-4">
-              <ErrorBlock
-                error={connectionsQuery.error}
-                hint="Loki 연결 목록을 불러오지 못했습니다."
-              />
-            </div>
-          )}
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Loki 연결" required>
-              <div className="flex gap-2">
-                <Select
-                  value={form.loki_connection_id}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      loki_connection_id:
-                        event.target.value === '' ? '' : Number(event.target.value),
-                    })
-                  }
-                >
-                  <option value="">선택하십시오</option>
-                  {connections.map((connection) => (
-                    <option key={connection.id} value={connection.id}>
-                      {connection.name}
-                      {connection.active ? '' : ' (비활성)'}
-                    </option>
-                  ))}
-                </Select>
-                <Button
-                  className="shrink-0"
-                  disabled={connectionId === null || testConnection.isPending}
-                  onClick={() => testConnection.mutate({ connection_id: connectionId })}
-                >
-                  {testConnection.isPending ? '테스트 중…' : '연결 테스트'}
-                </Button>
-              </div>
-            </Field>
-
-            <Field label="정책 이름" required>
-              <Input
-                value={form.name}
-                placeholder="payment-api 오류 (staging)"
-                onChange={(event) => setForm({ ...form, name: event.target.value })}
-              />
-            </Field>
-
-            <Field label="설명" className="sm:col-span-2">
-              <Input
-                value={form.description}
-                placeholder="이 정책이 무엇을 잡으려는지"
-                onChange={(event) => setForm({ ...form, description: event.target.value })}
-              />
-            </Field>
-
-            <Field
-              label="LogQL"
-              required
-              className="sm:col-span-2"
-              hint={
-                <>
-                  소스 고유 문법 그대로 저장됩니다. <code>| json</code> 은 파싱 실패 라인을 조용히
-                  흘려보내므로 <code>| __error__=&quot;&quot;</code> 처리를 검토하십시오.
-                </>
-              }
-            >
-              <Textarea
-                rows={3}
-                value={form.logql}
-                onChange={(event) => setForm({ ...form, logql: event.target.value })}
-              />
-            </Field>
-
-            {labelsQuery.data && labelsQuery.data.supports_label_discovery && (
-              <div className="sm:col-span-2 -mt-2">
-                <p className="text-xs text-slate-500">
-                  사용 가능한 라벨:{' '}
-                  {labelsQuery.data.labels.map((label) => (
-                    <code key={label} className="mr-1 rounded bg-slate-100 px-1">
-                      {label}
-                    </code>
-                  ))}
-                </p>
+      {/* items-start 가 있어야 오른쪽 미리보기의 sticky 가 늘어난 칸에 갇히지 않는다. */}
+      <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
+        <PageStack>
+          {/* ------------------------------------------------------ 기본 정보 */}
+          <Card title="기본 정보" description="무엇을, 어느 연결에서 잡을지 정합니다.">
+            {connectionsQuery.isError && (
+              <div className="mb-4">
+                <ErrorBlock
+                  error={connectionsQuery.error}
+                  hint="Loki 연결 목록을 불러오지 못했습니다."
+                />
               </div>
             )}
 
-            {/*
-              분모 쿼리 — **선택 항목**이다. 없으면 대시보드가 유입량·오류 비율을 그리지
-              않을 뿐 조회·그룹화·분석은 그대로 동작한다. 그래서 필수 표시를 붙이지 않고,
-              "무엇을 세는 쿼리인가"를 힌트에 정확히 적는다 (오류 쿼리를 그대로 붙여 넣으면
-              비율이 항상 100% 가 된다).
-            */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Loki 연결" required>
+                <div className="flex gap-2">
+                  <Select
+                    value={form.loki_connection_id}
+                    onChange={(event) =>
+                      setForm({
+                        ...form,
+                        loki_connection_id:
+                          event.target.value === '' ? '' : Number(event.target.value),
+                      })
+                    }
+                  >
+                    <option value="">선택하십시오</option>
+                    {connections.map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name}
+                        {connection.active ? '' : ' (비활성)'}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    className="shrink-0"
+                    disabled={connectionId === null || testConnection.isPending}
+                    onClick={() => testConnection.mutate({ connection_id: connectionId })}
+                  >
+                    {testConnection.isPending ? '테스트 중…' : '연결 테스트'}
+                  </Button>
+                </div>
+              </Field>
+
+              <Field label="정책 이름" required>
+                <Input
+                  value={form.name}
+                  placeholder="payment-api 오류 (staging)"
+                  onChange={(event) => setForm({ ...form, name: event.target.value })}
+                />
+              </Field>
+
+              <Field label="설명" className="sm:col-span-2">
+                <Input
+                  value={form.description}
+                  placeholder="이 정책이 무엇을 잡으려는지"
+                  onChange={(event) => setForm({ ...form, description: event.target.value })}
+                />
+              </Field>
+
+              <Field
+                label="LogQL"
+                required
+                className="sm:col-span-2"
+                hint="소스 고유 문법 그대로 저장됩니다."
+                info={
+                  <>
+                    <Code>| json</Code> 은 파싱에 실패한 라인을 <strong>조용히 흘려보냅니다</strong>{' '}
+                    — 빠진 줄이 있는지 확인하려면 <Code>| __error__=&quot;&quot;</Code> 처리를
+                    검토하십시오.
+                    <span className="mt-1.5 block">
+                      셀렉터 라벨이 하나만 틀려도 결과가 <strong>0 건</strong>이 되고, 화면에서는
+                      "오류가 없는 상태"와 구분되지 않습니다.
+                    </span>
+                  </>
+                }
+              >
+                <Textarea
+                  rows={3}
+                  value={form.logql}
+                  onChange={(event) => setForm({ ...form, logql: event.target.value })}
+                />
+              </Field>
+
+              {labelsQuery.data && labelsQuery.data.supports_label_discovery && (
+                <div className="-mt-2 sm:col-span-2">
+                  <p className="flex flex-wrap items-center gap-1 text-xs text-muted">
+                    사용 가능한 라벨:{' '}
+                    {labelsQuery.data.labels.map((label) => (
+                      <Code key={label}>{label}</Code>
+                    ))}
+                  </p>
+                </div>
+              )}
+
+              <Field
+                label="제외 정규식"
+                className="sm:col-span-2"
+                hint="한 줄에 하나씩. 매칭되는 라인은 그룹화 전에 제외됩니다."
+              >
+                <Textarea
+                  rows={3}
+                  placeholder={'healthcheck\nGET /metrics'}
+                  value={form.exclusionsText}
+                  onChange={(event) => setForm({ ...form, exclusionsText: event.target.value })}
+                />
+              </Field>
+
+              {/*
+                비활성화는 삭제가 아니다 — 되돌릴 수 있어야 한다. 여기가 재활성 경로다.
+                생성 API 에는 active 필드가 없어 수정할 때만 보인다.
+              */}
+              {isEditing && (
+                <div className="rounded-lg border border-line bg-surface-2 px-3.5 py-3 sm:col-span-2">
+                  <Checkbox
+                    label="정책 활성"
+                    hint={
+                      form.active
+                        ? '대시보드 정책 선택과 실행에 나옵니다.'
+                        : '비활성 정책은 대시보드 선택 목록에서 빠지지만 목록·실행 이력에는 그대로 남습니다. 체크하면 다시 활성화됩니다.'
+                    }
+                    checked={form.active}
+                    onChange={(event) => setForm({ ...form, active: event.target.checked })}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* 연결 테스트 결과는 누른 자리 옆에 둔다 — 페이지 맨 아래로 밀지 않는다. */}
+            {testConnection.data && (
+              <div className="mt-4">
+                <Notice tone={testConnection.data.ok ? 'success' : 'danger'}>
+                  {testConnection.data.message}
+                  {testConnection.data.latency_ms != null &&
+                    ` (${testConnection.data.latency_ms} ms)`}
+                </Notice>
+              </div>
+            )}
+            {testConnection.isError && (
+              <div className="mt-4">
+                <ErrorBlock error={testConnection.error} />
+              </div>
+            )}
+          </Card>
+
+          {/* ------------------------------------------------------ 조회 한도 */}
+          <Card
+            title="조회 한도"
+            description="한 번의 조회가 얼마나 가져올지 — 기본값이자 실행 상한입니다."
+            info={
+              <>
+                상한은 <strong>서버가 다시 강제합니다</strong> — 대시보드에서 더 넓은 기간을
+                골라도 이 값으로 잘리고, 잘렸다는 사실은 조회 회차의 경고로 남습니다.
+                <span className="mt-1.5 block">
+                  대표 로그 수는 LLM 프롬프트에 들어가는 로그 수를 직접 좌우합니다 — 비용이
+                  여기서 갈립니다.
+                </span>
+              </>
+            }
+          >
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Field label="기본 기간 (분)" required>
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.default_range_minutes}
+                  onChange={(event) =>
+                    setForm({ ...form, default_range_minutes: Number(event.target.value) })
+                  }
+                />
+              </Field>
+
+              <Field label="최대 조회 수 (라인)" required>
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.max_lines}
+                  onChange={(event) => setForm({ ...form, max_lines: Number(event.target.value) })}
+                />
+              </Field>
+
+              <Field label="그룹당 대표 로그 수" required>
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.max_samples_per_group}
+                  onChange={(event) =>
+                    setForm({ ...form, max_samples_per_group: Number(event.target.value) })
+                  }
+                />
+              </Field>
+            </div>
+          </Card>
+
+          {/* ------------------------------------------------------ 분모 쿼리 */}
+          {/*
+            분모 쿼리 — **선택 항목**이다. 없으면 대시보드가 유입량·오류 비율을 그리지
+            않을 뿐 조회·그룹화·분석은 그대로 동작한다. 그래서 필수 표시를 붙이지 않고,
+            "무엇을 세는 쿼리인가"를 정확히 적는다 (오류 쿼리를 그대로 붙여 넣으면
+            비율이 항상 100% 가 된다).
+          */}
+          <Card
+            title="분모 쿼리 (유입량 기준)"
+            description="선택 항목 — 유입량·오류 비율의 분모를 세는 쿼리입니다."
+            info={
+              <>
+                오류 셀렉터와 <strong>같은 라벨 범위</strong>의 전체 로그를 세야 합니다. 오류
+                쿼리를 그대로 붙여 넣으면 비율이 항상 100% 가 됩니다.
+                <span className="mt-1.5 block">
+                  비워 두면 대시보드의 유입량·비율은 <strong>0 이 아니라</strong> <Code>-</Code> 로
+                  표시됩니다 — "유입이 없었다"가 아니라 "계산하지 않았다"는 뜻입니다.
+                </span>
+              </>
+            }
+          >
             <Field
-              label="분모 쿼리 (유입량 기준)"
-              className="sm:col-span-2"
-              hint={
-                <>
-                  오류 셀렉터와 <strong>같은 라벨 범위</strong>의 전체 로그를 세는 쿼리 —
-                  유입량·오류 비율의 <strong>분모</strong>입니다. 비워 두면 대시보드가 유입량과
-                  비율을 계산하지 않습니다(0 이 아니라 <code>-</code> 로 표시됩니다).
-                </>
-              }
+              label="분모 LogQL"
+              hint="비워 두면 대시보드가 유입량과 비율을 계산하지 않습니다."
             >
               <Textarea
                 rows={2}
@@ -419,203 +553,160 @@ export function PolicyEditPage() {
                 onChange={(event) => setForm({ ...form, baseline_query: event.target.value })}
               />
             </Field>
+          </Card>
 
-            <Field label="기본 기간 (분)" required hint="기본값이자 실행 상한입니다.">
-              <Input
-                type="number"
-                min={1}
-                value={form.default_range_minutes}
-                onChange={(event) =>
-                  setForm({ ...form, default_range_minutes: Number(event.target.value) })
-                }
-              />
-            </Field>
-
-            <Field label="최대 조회 수 (라인)" required hint="서버 상한을 넘으면 서버가 자릅니다.">
-              <Input
-                type="number"
-                min={1}
-                value={form.max_lines}
-                onChange={(event) => setForm({ ...form, max_lines: Number(event.target.value) })}
-              />
-            </Field>
-
-            <Field
-              label="그룹당 대표 로그 수"
-              required
-              hint="LLM 프롬프트에 들어가는 로그 수를 직접 좌우합니다."
-            >
-              <Input
-                type="number"
-                min={1}
-                value={form.max_samples_per_group}
-                onChange={(event) =>
-                  setForm({ ...form, max_samples_per_group: Number(event.target.value) })
-                }
-              />
-            </Field>
-
-            <Field label="정책별 일일 분석 한도" hint="비우면 전역 한도만 적용됩니다.">
-              <Input
-                type="number"
-                min={0}
-                placeholder="전역 한도 사용"
-                value={form.daily_analysis_limit}
-                onChange={(event) => setForm({ ...form, daily_analysis_limit: event.target.value })}
-              />
-            </Field>
-
-            <Field
-              label="제외 정규식"
-              className="sm:col-span-2"
-              hint="한 줄에 하나씩. 매칭되는 라인은 그룹화 전에 제외됩니다."
-            >
-              <Textarea
-                rows={3}
-                placeholder={'healthcheck\nGET /metrics'}
-                value={form.exclusionsText}
-                onChange={(event) => setForm({ ...form, exclusionsText: event.target.value })}
-              />
-            </Field>
-
-            <div className="sm:col-span-2">
+          {/* -------------------------------------------------- 분석 · 스케줄 */}
+          {/*
+            비용이 나가는 설정만 모은 덩어리다. 자동 분석은 이 앱에서 **사람이 누르지 않아도
+            LLM 을 호출하는 유일한 경로**라, 켜져 있는 동안에는 경고를 툴팁이 아니라 본문에
+            남긴다 (계약: 위험·비용 경고는 접지 않는다).
+          */}
+          <Card
+            title="분석 · 스케줄"
+            description="비용이 나가는 설정은 여기 모여 있습니다."
+            info={
+              <>
+                조회 자체는 LLM 비용이 들지 않습니다 — 돈이 나가는 것은{' '}
+                <strong>LLM 분석</strong>뿐입니다.
+                <span className="mt-1.5 block">
+                  일일 한도는 <strong>로컬 자정</strong>을 경계로 리셋되고, 한도를 넘긴 요청은
+                  429 로 거절됩니다.
+                </span>
+              </>
+            }
+          >
+            <div className="space-y-4">
               <Checkbox
                 label="AI 분석 허용"
                 hint="끄면 이 정책의 오류 그룹에서 LLM 분석을 실행할 수 없습니다. 비용이 나가는 경로입니다."
                 checked={form.allow_ai_analysis}
                 onChange={(event) => setForm({ ...form, allow_ai_analysis: event.target.checked })}
               />
-            </div>
 
-            {/* ------------------------------------------------------ 스케줄 */}
-            <div className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-3">
-              <Checkbox
-                label="스케줄 조회"
-                hint="켜면 사람이 누르지 않아도 주기마다 이 정책으로 Loki 를 조회합니다. 조회 자체는 LLM 비용이 들지 않습니다."
-                checked={form.schedule_enabled}
-                onChange={(event) => setForm({ ...form, schedule_enabled: event.target.checked })}
-              />
+              <Field
+                label="정책별 일일 분석 한도"
+                className="max-w-56"
+                hint="비우면 전역 한도만 적용됩니다."
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  placeholder="전역 한도 사용"
+                  value={form.daily_analysis_limit}
+                  onChange={(event) =>
+                    setForm({ ...form, daily_analysis_limit: event.target.value })
+                  }
+                />
+              </Field>
 
-              {form.schedule_enabled && (
-                <div className="mt-3 space-y-3 border-t border-slate-200 pt-3">
-                  <Field
-                    label="실행 주기 (분)"
-                    required
-                    className="max-w-48"
-                    hint={
-                      form.schedule_interval_minutes.trim() === ''
-                        ? '비워 두면 저장할 수 없습니다.'
-                        : `${formatIntervalMinutes(Number(form.schedule_interval_minutes))}마다 실행`
-                    }
-                  >
-                    <Input
-                      type="number"
-                      min={1}
-                      value={form.schedule_interval_minutes}
-                      onChange={(event) =>
-                        setForm({ ...form, schedule_interval_minutes: event.target.value })
-                      }
-                    />
-                  </Field>
-
+              <div className="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
                   <Checkbox
-                    label="신규 그룹 자동 분석"
-                    hint={
-                      <>
-                        <strong>{AUTO_ANALYZE_COST_NOTE}</strong> 이미 분석 이력이 있는 fingerprint
-                        는 다시 돌지 않으며, 전역·정책별 일일 분석 한도를 그대로 받습니다.
-                      </>
-                    }
-                    checked={form.auto_analyze_new}
-                    disabled={!form.allow_ai_analysis}
+                    label="스케줄 조회"
+                    hint="켜면 사람이 누르지 않아도 주기마다 이 정책으로 Loki 를 조회합니다. 조회 자체는 LLM 비용이 들지 않습니다."
+                    checked={form.schedule_enabled}
                     onChange={(event) =>
-                      setForm({ ...form, auto_analyze_new: event.target.checked })
+                      setForm({ ...form, schedule_enabled: event.target.checked })
                     }
                   />
-
-                  {form.auto_analyze_new && form.allow_ai_analysis && (
-                    <Notice tone="warning" title="비용이 나가는 자동 경로입니다">
-                      {AUTO_ANALYZE_COST_NOTE} 한도는{' '}
-                      {form.daily_analysis_limit.trim() === ''
-                        ? '전역 일일 한도'
-                        : `이 정책의 일 ${form.daily_analysis_limit}회`}
-                      가 적용됩니다. 실행된 분석은 <strong>관리 → 분석 이력</strong> 화면에서{' '}
-                      <strong>자동</strong> 배지로 구분됩니다.
-                    </Notice>
-                  )}
-                  {!form.allow_ai_analysis && (
-                    <p className="text-xs text-slate-500">
-                      이 정책은 <strong>AI 분석 허용</strong>이 꺼져 있어 자동 분석을 켤 수 없습니다.
-                    </p>
+                  {scheduleSummary && (
+                    <Badge tone="info" className="mt-0.5">
+                      {scheduleSummary}
+                    </Badge>
                   )}
                 </div>
-              )}
-            </div>
 
-            {/*
-              비활성화는 삭제가 아니다 — 되돌릴 수 있어야 한다. 여기가 재활성 경로다.
-              생성 API 에는 active 필드가 없어 수정할 때만 보인다.
-            */}
-            {isEditing && (
-              <div className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-3">
-                <Checkbox
-                  label="정책 활성"
-                  hint={
-                    form.active
-                      ? '대시보드 정책 선택과 실행에 나옵니다.'
-                      : '비활성 정책은 대시보드 선택 목록에서 빠지지만 목록·실행 이력에는 그대로 남습니다. 체크하면 다시 활성화됩니다.'
-                  }
-                  checked={form.active}
-                  onChange={(event) => setForm({ ...form, active: event.target.checked })}
-                />
+                {form.schedule_enabled && (
+                  <div className="mt-3 space-y-3 border-t border-line pt-3">
+                    <Field
+                      label="실행 주기 (분)"
+                      required
+                      className="max-w-48"
+                      hint={
+                        form.schedule_interval_minutes.trim() === ''
+                          ? '비워 두면 저장할 수 없습니다.'
+                          : (scheduleSummary ?? undefined)
+                      }
+                    >
+                      <Input
+                        type="number"
+                        min={1}
+                        value={form.schedule_interval_minutes}
+                        onChange={(event) =>
+                          setForm({ ...form, schedule_interval_minutes: event.target.value })
+                        }
+                      />
+                    </Field>
+
+                    <Checkbox
+                      label="신규 그룹 자동 분석"
+                      hint={
+                        <>
+                          <strong>{AUTO_ANALYZE_COST_NOTE}</strong> 이미 분석 이력이 있는
+                          fingerprint 는 다시 돌지 않으며, 전역·정책별 일일 분석 한도를 그대로
+                          받습니다.
+                        </>
+                      }
+                      checked={form.auto_analyze_new}
+                      disabled={!form.allow_ai_analysis}
+                      onChange={(event) =>
+                        setForm({ ...form, auto_analyze_new: event.target.checked })
+                      }
+                    />
+
+                    {form.auto_analyze_new && form.allow_ai_analysis && (
+                      <Notice tone="warning" title="비용이 나가는 자동 경로입니다">
+                        {AUTO_ANALYZE_COST_NOTE} 한도는{' '}
+                        {form.daily_analysis_limit.trim() === ''
+                          ? '전역 일일 한도'
+                          : `이 정책의 일 ${form.daily_analysis_limit}회`}
+                        가 적용됩니다. 실행된 분석은 <strong>관리 → 분석 이력</strong> 화면에서{' '}
+                        <strong>자동</strong> 배지로 구분됩니다.
+                      </Notice>
+                    )}
+                    {!form.allow_ai_analysis && (
+                      <p className="text-xs text-muted">
+                        이 정책은 <strong>AI 분석 허용</strong>이 꺼져 있어 자동 분석을 켤 수
+                        없습니다.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          </Card>
 
-          {testConnection.data && (
-            <div className="mt-4">
-              <Notice tone={testConnection.data.ok ? 'success' : 'danger'}>
-                {testConnection.data.message}
-                {testConnection.data.latency_ms != null &&
-                  ` (${testConnection.data.latency_ms} ms)`}
-              </Notice>
-            </div>
-          )}
-          {testConnection.isError && (
-            <div className="mt-4">
-              <ErrorBlock error={testConnection.error} />
-            </div>
-          )}
-
-          {formError && (
-            <div className="mt-4">
-              <Notice tone="danger">{formError}</Notice>
-            </div>
-          )}
-          {(createPolicy.isError || updatePolicy.isError) && (
-            <div className="mt-4">
+          {/* ------------------------------------------------------ 저장 동작 */}
+          <div className="space-y-4">
+            {formError && <Notice tone="danger">{formError}</Notice>}
+            {(createPolicy.isError || updatePolicy.isError) && (
               <ErrorBlock error={createPolicy.error ?? updatePolicy.error} />
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={handlePreview} disabled={preview.isPending}>
+                <RunIcon aria-hidden className="size-4" />
+                {preview.isPending ? '미리보기 실행 중…' : '저장 전 미리보기'}
+              </Button>
+              <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+                <SaveIcon aria-hidden className="size-4" />
+                {saving ? '저장 중…' : isEditing ? '정책 수정' : '정책 저장'}
+              </Button>
+              <Button variant="ghost" onClick={() => navigate('/policies')}>
+                취소
+              </Button>
             </div>
-          )}
-
-          <div className="mt-5 flex flex-wrap gap-2">
-            <Button onClick={handlePreview} disabled={preview.isPending}>
-              {preview.isPending ? '미리보기 실행 중…' : '저장 전 미리보기'}
-            </Button>
-            <Button variant="primary" onClick={handleSubmit} disabled={saving}>
-              {saving ? '저장 중…' : isEditing ? '정책 수정' : '정책 저장'}
-            </Button>
-            <Button variant="ghost" onClick={() => navigate('/policies')}>
-              취소
-            </Button>
           </div>
-        </Card>
+        </PageStack>
 
-        <PreviewPanel
-          data={preview.data}
-          error={preview.isError ? preview.error : null}
-          pending={preview.isPending}
-        />
+        {/* 폼이 길다 — 미리보기가 스크롤을 따라와야 "고친 값 → 결과"를 나란히 볼 수 있다. */}
+        <div className="xl:sticky xl:top-6">
+          <PreviewPanel
+            data={preview.data}
+            error={preview.isError ? preview.error : null}
+            pending={preview.isPending}
+          />
+        </div>
       </div>
     </div>
   );
@@ -633,6 +724,7 @@ function PreviewPanel({
   if (pending) {
     return (
       <Card title="미리보기">
+        {/* 결과가 몇 줄일지 모르는 자리다 — 스켈레톤은 "몇 건 있다"는 거짓 신호가 된다. */}
         <LoadingBlock label="쿼리를 실행하는 중…" />
       </Card>
     );
@@ -647,7 +739,7 @@ function PreviewPanel({
   if (!data) {
     return (
       <Card title="미리보기">
-        <EmptyBlock>
+        <EmptyBlock icon={RunIcon}>
           저장하기 전에 <strong>미리보기</strong>로 쿼리가 실제로 무엇을 가져오는지 확인하십시오.
         </EmptyBlock>
       </Card>
@@ -657,9 +749,17 @@ function PreviewPanel({
   return (
     <Card
       title="미리보기 결과"
-      description="표시되는 로그는 마스킹을 거친 값입니다. 마스킹 전 원본은 저장하지 않습니다."
+      description="표시되는 로그는 마스킹을 거친 값입니다."
+      info={
+        <>
+          마스킹 전 원본은 <strong>저장하지 않습니다</strong> — 미리보기도 예외가 아닙니다.
+          <span className="mt-1.5 block">
+            여기 수는 <strong>최대 50 라인</strong>까지만 가져온 표본이라, 실제 조회량이 아닙니다.
+          </span>
+        </>
+      }
     >
-      <div className="mb-4 flex flex-wrap gap-2 text-xs">
+      <div className="mb-4 flex flex-wrap items-center gap-1.5">
         <Badge tone="info">조회 {formatNumber(data.fetched)} 라인</Badge>
         <Badge tone={data.dropped > 0 ? 'warning' : 'neutral'}>
           제외 {formatNumber(data.dropped)} 라인
@@ -684,7 +784,7 @@ function PreviewPanel({
 
       {data.sample_lines.length === 0 ? (
         <EmptyBlock>
-          결과가 비어 있습니다. 셀렉터 라벨이 실제로 존재하는지, <code>| json</code> 파싱이
+          결과가 비어 있습니다. 셀렉터 라벨이 실제로 존재하는지, <Code>| json</Code> 파싱이
           실패하고 있지는 않은지 확인하십시오.
         </EmptyBlock>
       ) : (
@@ -698,9 +798,9 @@ function PreviewPanel({
           <tbody>
             {data.sample_lines.map((line, index) => (
               <tr key={index}>
-                <Td className="text-xs text-slate-400 tabular-nums">{index + 1}</Td>
+                <Td className="text-xs text-faint tabular-nums">{index + 1}</Td>
                 <Td>
-                  <pre className="aila-scroll max-w-full overflow-x-auto font-mono text-xs whitespace-pre text-slate-700">
+                  <pre className="aila-scroll max-w-full overflow-x-auto font-mono text-xs whitespace-pre text-ink-soft">
                     {line}
                   </pre>
                 </Td>

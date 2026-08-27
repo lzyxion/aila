@@ -8,11 +8,15 @@
  * 정책 하나의 상세(추이·서비스별·상위 그룹)는 여기 있지 않다. 카드에서 `/dashboard/:policyId`
  * 로 들어간다.
  *
- * 표시 규칙(계약):
+ * 표시 규칙(계약) — 문구는 지우지 않고 ⓘ(`InfoTip`) 로 옮겼다:
  * - `total_errors_24h` 는 `count_over_time` metric 기준이고 로그 라인 수가 아니다.
  *   metric 쿼리에 실패하면 **null** 이며 0 이 아니다 — 화면은 `-` 로 쓴다.
  * - `unanalyzed_group_count` 는 그룹 id 가 아니라 **fingerprint 기준**이다.
  * - 실행은 쓰기 동작이라 `admin` 만 누를 수 있다. 판정은 서버가 한다.
+ *
+ * 카드 안의 **정보 무게 순서**는 수집 중단 > 미분석 > 오류 수다. 수집 중단은 "오류가
+ * 0 건"과 정반대의 사건인데 카드에서는 둘 다 조용해 보이므로, 축약 대상에서 제외하고
+ * 배지 + 문장을 머리에 그대로 둔다.
  */
 
 import { useMemo, useState } from 'react';
@@ -22,27 +26,39 @@ import { isEndpointMissing } from '../api/client';
 import { useDashboardSummary, usePolicies, useRunPolicy } from '../api/queries';
 import type { DashboardSummaryPolicy, PolicyRead } from '../api/types';
 import { policySchedule } from '../api/types';
-import { useWriteAccess } from '../auth/AuthContext';
 import { Sparkline } from '../components/chartsLazy';
 import { DailyLimitGauge } from '../components/DailyLimitGauge';
+import {
+  DashboardIcon,
+  ErrorGroupIcon,
+  GroupCountIcon,
+  PolicyIcon,
+  ScheduleIcon,
+} from '../components/icons';
 import { IngestAbsentBadge, QueryRunStatusBadge, ScheduleBadge } from '../components/StatusBadges';
 import {
   Badge,
   Button,
+  ButtonLink,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   Field,
   Input,
+  InfoTip,
   LoadingBlock,
   Notice,
   PageHeader,
   PlayIcon,
   Select,
+  SkeletonStats,
   Spinner,
   Stat,
+  TextLink,
   cx,
 } from '../components/ui';
+import { useWriteAccess } from '../auth/AuthContext';
 import {
   formatDateTime,
   formatNumber,
@@ -60,6 +76,29 @@ const SORTS: Array<{ key: SortKey; label: string }> = [
   { key: 'recent', label: '최근 실행순' },
   { key: 'name', label: '정책명순' },
 ];
+
+/** 화면 곳곳에서 같은 뜻으로 반복되는 계약 문구 — 한 곳에서 만들어 InfoTip 으로 나른다. */
+const METRIC_NOTE = (
+  <>
+    24시간 오류 건수는 <Code>count_over_time</Code> metric 쿼리 결과라{' '}
+    <strong>로그 라인 수가 아닙니다</strong>.
+    <span className="mt-1.5 block">
+      metric 쿼리가 실패하면 값은 0 이 아니라 <strong>없음</strong>이며 화면에는 <Code>-</Code> 로
+      나옵니다.
+    </span>
+  </>
+);
+
+const UNANALYZED_NOTE = (
+  <>
+    최근 <strong>성공한</strong> 조회의 그룹 중 <strong>fingerprint 기준</strong>으로 분석 이력이
+    전혀 없는 수입니다.
+    <span className="mt-1.5 block">
+      그룹 id 기준이 아니므로 이전 회차에서 분석한 오류는 여기 세지 않습니다. 실패한 분석도
+      "이력 있음"입니다.
+    </span>
+  </>
+);
 
 export function HomePage() {
   const summaryQuery = useDashboardSummary();
@@ -80,17 +119,16 @@ export function HomePage() {
     <div>
       <PageHeader
         title="통합 대시보드"
-        description={
+        description="정책별 최근 상태 요약입니다."
+        info={
           <>
-            정책별 최근 상태 요약입니다. <strong>미분석 신규 그룹</strong>은 최근 성공한 조회의
-            그룹 중 <strong>fingerprint 기준</strong>으로 분석 이력이 전혀 없는 수이고, 24시간
-            오류 건수는 <code className="rounded bg-slate-200 px-1">count_over_time</code> metric
-            기준이라 로그 라인 수가 아닙니다.
+            {UNANALYZED_NOTE}
+            <span className="mt-1.5 block">{METRIC_NOTE}</span>
           </>
         }
         actions={
           summaryQuery.data && (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-faint tabular-nums">
               생성 {formatDateTime(summaryQuery.data.generated_at)}
             </span>
           )
@@ -106,7 +144,8 @@ export function HomePage() {
         <DailyLimitGauge />
       </div>
 
-      {summaryQuery.isPending && <LoadingBlock />}
+      {/* 요약 타일은 4칸으로 자리가 정해져 있다 — 스켈레톤이 거짓 신호를 주지 않는다. */}
+      {summaryQuery.isPending && <SkeletonStats count={4} label="정책 요약을 불러오는 중" />}
 
       {/* 백엔드에 아직 이 경로가 없으면 실패로 표시하지 않고 축소 카드로 물러난다. */}
       {summaryQuery.isError &&
@@ -122,9 +161,10 @@ export function HomePage() {
             요약 카드 줄 — 카드 그리드를 훑기 전에 "전체가 어떤 상태인가"를 네 숫자로 먼저
             답한다. 정책이 스무 개가 되면 카드만으로는 합계를 사람이 암산해야 한다.
           */}
-          <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Stat
               label="전체 정책"
+              icon={PolicyIcon}
               value={formatNumber(totals.policyCount)}
               sub={`활성 ${formatNumber(totals.activeCount)} · 비활성 ${formatNumber(
                 totals.policyCount - totals.activeCount,
@@ -132,30 +172,50 @@ export function HomePage() {
             />
             <Stat
               label="활성 스케줄"
+              icon={ScheduleIcon}
               value={formatNumber(totals.scheduledCount)}
               sub="주기 조회가 켜진 정책"
             />
             <Stat
-              label="24h 총 오류 (metric)"
+              label="24h 총 오류"
+              icon={ErrorGroupIcon}
               value={
                 totals.errors24h === null ? (
-                  <span className="text-slate-400">-</span>
+                  <span className="text-faint">-</span>
                 ) : (
                   formatNumber(totals.errors24h)
                 )
               }
               sub={
                 totals.errors24h === null
-                  ? '전 정책의 metric 쿼리가 실패했습니다 — 0 건이라는 뜻이 아닙니다.'
+                  ? 'metric 실패 · 0 건 아님'
                   : totals.metricFailedCount > 0
-                    ? `${totals.metricFailedCount}개 정책은 metric 실패로 합계에서 제외 (0 아님)`
-                    : 'count_over_time 기준 — 로그 라인 수가 아닙니다.'
+                    ? `${totals.metricFailedCount}개 정책 제외 (0 아님)`
+                    : 'metric 기준'
+              }
+              info={
+                <>
+                  {METRIC_NOTE}
+                  {totals.errors24h === null ? (
+                    <span className="mt-1.5 block">
+                      <strong>전 정책의 metric 쿼리가 실패했습니다</strong> — 0 건이라는 뜻이
+                      아닙니다.
+                    </span>
+                  ) : totals.metricFailedCount > 0 ? (
+                    <span className="mt-1.5 block">
+                      {totals.metricFailedCount}개 정책은 metric 실패로 <strong>합계에서
+                      제외</strong>했습니다 (0 으로 더하지 않습니다).
+                    </span>
+                  ) : null}
+                </>
               }
             />
             <Stat
               label="미분석 신규 그룹"
+              icon={GroupCountIcon}
               value={formatNumber(totals.unanalyzed)}
-              sub="fingerprint 기준 · 아무도 보지 않은 오류"
+              sub="아무도 보지 않은 오류"
+              info={UNANALYZED_NOTE}
               tone="accent"
             />
           </div>
@@ -178,7 +238,7 @@ export function HomePage() {
                   ))}
                 </Select>
               </Field>
-              <p className="mb-2 text-xs text-slate-500">
+              <p className="mb-2 text-xs text-muted tabular-nums">
                 {cards.length === totals.policyCount
                   ? `정책 ${formatNumber(totals.policyCount)}개`
                   : `정책 ${formatNumber(cards.length)} / ${formatNumber(totals.policyCount)}개`}
@@ -187,12 +247,12 @@ export function HomePage() {
           </Card>
 
           {summaryQuery.data.policies.length === 0 ? (
-            <EmptyBlock>
-              저장된 정책이 없습니다. <Link to="/policies" className="text-sky-800 underline">분석 정책</Link>{' '}
-              화면에서 하나를 만드십시오.
+            <EmptyBlock icon={PolicyIcon}>
+              저장된 정책이 없습니다. <TextLink to="/policies">분석 정책</TextLink> 화면에서 하나를
+              만드십시오.
             </EmptyBlock>
           ) : cards.length === 0 ? (
-            <EmptyBlock>&quot;{search}&quot; 에 해당하는 정책이 없습니다.</EmptyBlock>
+            <EmptyBlock icon={PolicyIcon}>&quot;{search}&quot; 에 해당하는 정책이 없습니다.</EmptyBlock>
           ) : (
             <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
               {cards.map((policy) => (
@@ -285,6 +345,13 @@ function sortCards(
 
 // ------------------------------------------------------------------- 카드
 
+/**
+ * 정책 카드.
+ *
+ * Phase 8 밀도 정리에서 카드가 말하는 것을 네 가지로 줄였다 — **수집 중단 경고 · 미분석
+ * 신규 그룹 · 24h 추이 · 최근 실행 한 줄**, 그리고 실행 버튼. 지운 것은 없고, 사라진
+ * 문장은 전부 ⓘ 안에 있다. 예외는 수집 중단 경고 하나로, 이건 축약하지 않는다.
+ */
 function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
   const write = useWriteAccess();
   const runPolicy = useRunPolicy();
@@ -304,30 +371,32 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
   const otherPolicyWarnings = policy.warnings.filter(
     (warning) => warning.code !== 'ingest_absent',
   );
+  const otherWarnings = [...otherRunWarnings, ...otherPolicyWarnings];
+  const running = runPolicy.isPending && runPolicy.variables?.id === policy.policy_id;
 
   return (
     <section
       className={cx(
-        'flex flex-col rounded-xl border bg-white shadow-sm shadow-slate-200/50',
+        'flex flex-col rounded-xl border bg-surface shadow-sm shadow-slate-900/5',
         // 색은 보조 신호다 — 같은 사실이 배지와 문장으로도 카드 안에 적혀 있다.
         absentWarnings.length > 0
-          ? 'border-rose-300'
+          ? 'border-rose-300 dark:border-rose-800'
           : unanalyzed > 0
-            ? 'border-amber-300'
-            : 'border-slate-200',
+            ? 'border-amber-300 dark:border-amber-800'
+            : 'border-line',
         !policy.active && 'opacity-75',
       )}
     >
-      <header className="border-b border-slate-100 px-5 py-4">
+      <header className="border-b border-line-soft px-5 py-4">
         <div className="flex flex-wrap items-start justify-between gap-2">
-          <h2 className="min-w-0 text-base font-semibold text-slate-900">
+          <h2 className="min-w-0 text-base font-semibold text-ink">
             <Link to={`/dashboard/${policy.policy_id}`} className="hover:underline">
               {policy.name}
             </Link>
           </h2>
-          <span className="text-xs text-slate-400">#{policy.policy_id}</span>
+          <span className="text-xs text-faint tabular-nums">#{policy.policy_id}</span>
         </div>
-        <div className="mt-2 flex flex-wrap gap-1.5">
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <Badge tone={policy.active ? 'success' : 'neutral'}>
             {policy.active ? '활성' : '비활성'}
           </Badge>
@@ -339,8 +408,11 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
             <IngestAbsentBadge key={`${warning.code}-${index}`} warning={warning} compact />
           ))}
         </div>
+        {/*
+          수집 중단은 축약 대상이 아니다 — 카드에서 가장 무거운 사실이라 문장을 그대로 둔다.
+        */}
         {absentWarnings.length > 0 && (
-          <ul className="mt-2 space-y-0.5 text-xs text-rose-800">
+          <ul className="mt-2 space-y-0.5 text-xs text-rose-800 dark:text-rose-300">
             {absentWarnings.map((warning, index) => (
               <li key={`msg-${warning.code}-${index}`}>{warning.message}</li>
             ))}
@@ -348,116 +420,113 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
         )}
       </header>
 
-      <div className="grid grid-cols-2 gap-px bg-slate-100">
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-px bg-line-soft">
         {/* 이 화면에서 가장 중요한 숫자 — 카드에서 가장 크게 둔다. */}
-        <div className="bg-white px-5 py-3">
-          <p className="text-xs font-medium text-slate-500">미분석 신규 그룹</p>
+        <div className="bg-surface px-5 py-3">
+          <p className="flex items-center gap-1 text-xs font-medium text-muted">
+            <span className="min-w-0 truncate">미분석 신규 그룹</span>
+            <InfoTip label="미분석 신규 그룹 설명 보기" title="미분석 신규 그룹">
+              {UNANALYZED_NOTE}
+            </InfoTip>
+          </p>
           <p
             className={cx(
               'mt-1 text-3xl font-bold tabular-nums',
-              unanalyzed > 0 ? 'text-amber-700' : 'text-slate-400',
+              unanalyzed > 0 ? 'text-amber-700 dark:text-amber-300' : 'text-faint',
             )}
-            title="최근 성공한 조회의 그룹 중 fingerprint 기준으로 분석 이력이 전혀 없는 수입니다."
           >
             {formatNumber(unanalyzed)}
           </p>
         </div>
-        <div className="bg-white px-5 py-3">
-          <p className="text-xs font-medium text-slate-500">24h 오류 건수</p>
-          <p
-            className="mt-1 text-3xl font-bold text-slate-900 tabular-nums"
-            title={
-              policy.total_errors_24h === null
-                ? 'metric 쿼리에 실패해 계산하지 못했습니다. 0 건이라는 뜻이 아닙니다.'
-                : 'count_over_time metric 기준 — 로그 라인 수가 아닙니다.'
-            }
-          >
-            {policy.total_errors_24h === null ? (
-              <span className="text-slate-400">-</span>
-            ) : (
-              formatNumber(policy.total_errors_24h)
-            )}
-          </p>
-          {policy.total_errors_24h === null && (
-            <p className="mt-0.5 text-xs text-amber-700">metric 쿼리 실패</p>
-          )}
-        </div>
-      </div>
 
-      {/*
-        24h 스파크라인. 합계와 **같은 count_over_time 결과**에서 온 포인트라 카드 하나가
-        Loki 를 한 번 더 두드리지 않는다. 포인트가 없으면 선을 그리지 않는다 — 평평한
-        선을 그리면 "오류가 없었다"로 읽힌다.
-      */}
-      <div className="border-t border-slate-100 px-5 pt-3 pb-2">
-        <div className="flex items-baseline justify-between">
-          <p className="text-xs font-medium text-slate-500">최근 24시간 추이</p>
-          {series.length > 0 && (
-            <p className="text-xs text-slate-400">시간당 · 축 없음</p>
-          )}
-        </div>
-        {series.length > 0 ? (
-          <div className="mt-1">
-            <Sparkline points={series} height={44} />
+        {/*
+          24h 오류 수와 추이를 한 칸에 합쳤다 — 같은 `count_over_time` 응답에서 온 값이라
+          따로 두면 카드에 큰 숫자가 둘이 되고, 정작 "늘고 있는가"가 묻힌다. 포인트가 없으면
+          선을 그리지 않는다 (평평한 선은 "오류가 없었다"로 읽힌다).
+        */}
+        <div className="bg-surface px-5 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="flex items-center gap-1 text-xs font-medium text-muted">
+              <span className="min-w-0 truncate">24h 오류 · 추이</span>
+              <InfoTip label="24h 오류 건수 설명 보기" title="24h 오류 건수" align="end">
+                {METRIC_NOTE}
+                <span className="mt-1.5 block">
+                  추이는 합계와 <strong>같은 응답</strong>의 시간당 포인트입니다. 축은 그리지
+                  않습니다 — 모양만 보는 자리입니다.
+                </span>
+              </InfoTip>
+            </p>
+            <p className="text-xl font-bold text-ink tabular-nums">
+              {policy.total_errors_24h === null ? (
+                <span className="text-faint">-</span>
+              ) : (
+                formatNumber(policy.total_errors_24h)
+              )}
+            </p>
           </div>
-        ) : (
-          <p className="mt-1 text-xs text-slate-400">
-            {policy.total_errors_24h === null
-              ? 'metric 쿼리에 실패해 추이를 그리지 못했습니다 — 0 건이라는 뜻이 아닙니다.'
-              : '추이 데이터가 없습니다.'}
-          </p>
-        )}
+          {series.length > 0 ? (
+            <div className="mt-1">
+              <Sparkline points={series} height={36} />
+            </div>
+          ) : (
+            <p
+              className={cx(
+                'mt-1.5 text-xs',
+                policy.total_errors_24h === null
+                  ? 'text-amber-700 dark:text-amber-300'
+                  : 'text-faint',
+              )}
+            >
+              {policy.total_errors_24h === null
+                ? 'metric 쿼리 실패 · 0 건 아님'
+                : '추이 데이터 없음'}
+            </p>
+          )}
+        </div>
       </div>
 
-      <div className="flex-1 border-t border-slate-100 px-5 py-4">
-        <p className="text-xs font-medium text-slate-500">최근 실행</p>
+      <div className="flex-1 border-t border-line-soft px-5 py-3">
         {lastRun ? (
-          <div className="mt-1.5 space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="space-y-1.5">
+            {/* 최근 실행은 한 줄이다 — 상태·시각·규모가 한 눈에 읽히면 그걸로 충분하다. */}
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
               <QueryRunStatusBadge status={lastRun.status} />
-              <span className="text-sm text-slate-700" title={formatDateTime(lastRun.started_at)}>
+              <span className="text-ink-soft" title={formatDateTime(lastRun.started_at)}>
                 {formatRelative(lastRun.started_at)}
               </span>
-              <span className="text-xs text-slate-400">#{lastRun.id}</span>
+              <span className="tabular-nums">
+                {formatNumber(lastRun.fetched_count)} 라인 ·{' '}
+                <strong className="text-ink-soft">{formatNumber(lastRun.group_count)}</strong> 그룹
+              </span>
+              <span className="text-faint tabular-nums">#{lastRun.id}</span>
             </div>
-            <p className="text-xs text-slate-600">
-              {formatNumber(lastRun.fetched_count)} 라인 조회 ·{' '}
-              <strong className="text-slate-800">{formatNumber(lastRun.group_count)}</strong> 개 그룹
-            </p>
-            {otherRunWarnings.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {otherRunWarnings.map((warning, index) => (
+            {otherWarnings.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {otherWarnings.map((warning, index) => (
                   <Badge key={`${warning.code}-${index}`} tone="warning" title={warning.message}>
                     {warningCodeLabel(warning.code)}
                   </Badge>
                 ))}
+                {/* 경고 문장은 지우지 않고 여기로 옮긴다 (배지는 코드만 말한다). */}
+                <InfoTip label="조회 경고 상세 보기" title="조회 경고" align="end">
+                  {otherWarnings.map((warning, index) => (
+                    <span key={`tip-${warning.code}-${index}`} className={index ? 'mt-1.5 block' : 'block'}>
+                      <strong>{warningCodeLabel(warning.code)}</strong> — {warning.message}
+                    </span>
+                  ))}
+                </InfoTip>
               </div>
             )}
           </div>
         ) : (
-          <p className="mt-1.5 text-sm text-slate-500">아직 실행 이력이 없습니다.</p>
-        )}
-
-        {otherPolicyWarnings.length > 0 && (
-          <ul className="mt-3 space-y-1 text-xs text-amber-800">
-            {otherPolicyWarnings.map((warning, index) => (
-              <li key={`${warning.code}-${index}`}>
-                <strong>{warningCodeLabel(warning.code)}</strong> — {warning.message}
-              </li>
-            ))}
-          </ul>
+          <p className="text-xs text-muted">아직 실행 이력이 없습니다.</p>
         )}
 
         {runPolicy.isSuccess && runPolicy.variables?.id === policy.policy_id && (
           <div className="mt-3">
             <Notice tone="success" title={`조회 #${runPolicy.data.id} 완료`}>
               {formatNumber(runPolicy.data.fetched_count)} 라인 · {runPolicy.data.group_count} 개 그룹{' '}
-              <Link
-                to={`/query-runs/${runPolicy.data.id}`}
-                className="font-medium text-emerald-900 underline"
-              >
-                그룹 보기 →
-              </Link>
+              <TextLink to={`/query-runs/${runPolicy.data.id}`}>그룹 보기 →</TextLink>
             </Notice>
           </div>
         )}
@@ -468,7 +537,7 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
         )}
       </div>
 
-      <footer className="flex flex-wrap gap-2 border-t border-slate-100 px-5 py-3">
+      <footer className="flex flex-wrap gap-2 border-t border-line-soft px-5 py-3">
         <Button
           variant="primary"
           size="sm"
@@ -481,7 +550,7 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
           }
           onClick={() => runPolicy.mutate({ id: policy.policy_id, payload: {} })}
         >
-          {runPolicy.isPending && runPolicy.variables?.id === policy.policy_id ? (
+          {running ? (
             <>
               <Spinner className="size-4 border-sky-200 border-t-white" />
               조회 중…
@@ -494,31 +563,24 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
           )}
         </Button>
 
-        <CardLink to={`/dashboard/${policy.policy_id}`}>대시보드</CardLink>
+        <ButtonLink to={`/dashboard/${policy.policy_id}`} size="sm">
+          <DashboardIcon aria-hidden className="size-3.5" />
+          대시보드
+        </ButtonLink>
         {lastRun ? (
-          <CardLink to={`/query-runs/${lastRun.id}`}>그룹 보기</CardLink>
+          <ButtonLink to={`/query-runs/${lastRun.id}`} size="sm" variant="ghost">
+            그룹 보기
+          </ButtonLink>
         ) : (
           <span
-            className="inline-flex cursor-not-allowed items-center rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-300"
+            className="inline-flex cursor-not-allowed items-center rounded-lg px-2.5 py-1.5 text-xs font-medium text-faint"
             title="실행 이력이 없어 볼 그룹이 없습니다."
           >
             그룹 보기
           </span>
         )}
-        <CardLink to={`/policies?policy=${policy.policy_id}`}>정책 설정</CardLink>
       </footer>
     </section>
-  );
-}
-
-function CardLink({ to, children }: { to: string; children: React.ReactNode }) {
-  return (
-    <Link
-      to={to}
-      className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50"
-    >
-      {children}
-    </Link>
   );
 }
 
@@ -536,15 +598,15 @@ function SummaryFallback() {
   return (
     <div className="space-y-6">
       <Notice tone="warning" title="통합 대시보드 API 를 아직 쓸 수 없습니다">
-        <code className="rounded bg-white/60 px-1">GET /api/dashboard/summary</code> 가 응답하지
-        않습니다. 백엔드에 이 경로가 올라오면 정책별 미분석 신규 그룹 수·24시간 오류 건수·최근
-        실행 요약이 여기에 표시됩니다. 그 전에는 아래 목록에서 정책별 대시보드로 들어가십시오.
+        <Code>GET /api/dashboard/summary</Code> 가 응답하지 않습니다. 백엔드에 이 경로가 올라오면
+        정책별 미분석 신규 그룹 수·24시간 오류 건수·최근 실행 요약이 여기에 표시됩니다. 그 전에는
+        아래 목록에서 정책별 대시보드로 들어가십시오.
       </Notice>
 
       {policiesQuery.isPending && <LoadingBlock />}
       {policiesQuery.isError && <ErrorBlock error={policiesQuery.error} />}
       {policiesQuery.data && policiesQuery.data.length === 0 && (
-        <EmptyBlock>저장된 정책이 없습니다.</EmptyBlock>
+        <EmptyBlock icon={PolicyIcon}>저장된 정책이 없습니다.</EmptyBlock>
       )}
       {policiesQuery.data && policiesQuery.data.length > 0 && (
         <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
@@ -576,10 +638,15 @@ function FallbackCard({ policy }: { policy: PolicyRead }) {
       }
       description={policy.description ?? '설명이 없습니다.'}
     >
-      <p className="font-mono text-xs break-all text-slate-500">{policy.logql}</p>
+      <p className="font-mono text-xs break-all text-muted">{policy.logql}</p>
       <div className="mt-3 flex flex-wrap gap-2">
-        <CardLink to={`/dashboard/${policy.id}`}>대시보드</CardLink>
-        <CardLink to={`/policies?policy=${policy.id}`}>정책 설정</CardLink>
+        <ButtonLink to={`/dashboard/${policy.id}`} size="sm">
+          <DashboardIcon aria-hidden className="size-3.5" />
+          대시보드
+        </ButtonLink>
+        <ButtonLink to={`/policies?policy=${policy.id}`} size="sm" variant="ghost">
+          정책 설정
+        </ButtonLink>
       </div>
     </Card>
   );

@@ -1,5 +1,15 @@
+/**
+ * 오류 그룹 상세 — 마스킹된 대표 로그와 AI 분석.
+ *
+ * 이 화면에는 두 종류의 글이 섞여 있다. 하나는 **계약 문구**(마스킹 규칙 버전, metric 기준,
+ * fingerprint 기준)이고 다른 하나는 **LLM 이 생성한 가설**이다. Phase 8 밀도 정리에서
+ * 앞쪽은 ⓘ(`InfoTip`) 로 옮겼지만, 뒤쪽 — 가설·근거·한계와 "확정이 아니다"라는 경고 — 는
+ * 문구도 자리도 그대로 두고 **타이포·간격만** 손봤다. 환각 경고를 툴팁에 숨기면 그건 밀도
+ * 정리가 아니라 위험을 감추는 일이다.
+ */
+
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
 
 import { analysisJobs as analysisJobsApi } from '../api/endpoints';
 import {
@@ -12,6 +22,16 @@ import type { AnalysisJobRead, ErrorGroupDetail, ErrorSampleRead } from '../api/
 import { useWriteAccess } from '../auth/AuthContext';
 import { ErrorTrendChart } from '../components/chartsLazy';
 import {
+  CopyIcon,
+  DashboardIcon,
+  EmptyIcon,
+  ExportIcon,
+  GroupCountIcon,
+  ReportIcon,
+  RunIcon,
+  TimeIcon,
+} from '../components/icons';
+import {
   AnalysisStatusBadge,
   SeverityBadge,
   TriggeredByBadge,
@@ -19,7 +39,9 @@ import {
 import {
   Badge,
   Button,
+  ButtonLink,
   Card,
+  Code,
   EmptyBlock,
   ErrorBlock,
   Field,
@@ -27,12 +49,17 @@ import {
   LogLine,
   Notice,
   PageHeader,
+  PageStack,
   Select,
+  SkeletonCard,
+  SkeletonStats,
   Spinner,
   Stat,
   TableWrap,
   Td,
   Th,
+  cx,
+  toneClass,
 } from '../components/ui';
 import {
   formatDateTime,
@@ -79,9 +106,17 @@ export function ErrorGroupDetailPage() {
   const defaultConnection = connections.find((connection) => connection.is_default) ?? null;
 
   if (groupId === null) return <ErrorBlock error="잘못된 그룹 id 입니다." />;
-  if (groupQuery.isPending) return <LoadingBlock />;
+  if (groupQuery.isPending) {
+    // 이 화면의 뼈대(요약 4칸 + 카드)는 정해져 있다 — 스켈레톤이 거짓 개수를 말하지 않는다.
+    return (
+      <PageStack>
+        <SkeletonStats count={4} label="오류 그룹을 불러오는 중" />
+        <SkeletonCard lines={4} label="대표 로그를 불러오는 중" />
+      </PageStack>
+    );
+  }
   if (groupQuery.isError) return <ErrorBlock error={groupQuery.error} />;
-  if (!group) return <EmptyBlock>오류 그룹을 찾을 수 없습니다.</EmptyBlock>;
+  if (!group) return <EmptyBlock icon={EmptyIcon}>오류 그룹을 찾을 수 없습니다.</EmptyBlock>;
 
   const trendTotal = group.trend.reduce((acc, point) => acc + point.value, 0);
 
@@ -91,38 +126,71 @@ export function ErrorGroupDetailPage() {
         title={group.error_type ?? '오류 그룹'}
         description={
           <>
-            <span className="font-mono text-slate-800">{group.normalized_message}</span>
-            <span className="mt-1 block text-xs text-slate-500">
+            <span className="font-mono text-ink-soft">{group.normalized_message}</span>
+            <span className="mt-1 block text-xs text-muted">
               {group.service ?? '(서비스 라벨 없음)'}
               {group.environment ? ` · ${group.environment}` : ''} · fingerprint{' '}
-              <code className="rounded bg-slate-200 px-1">{group.fingerprint}</code>
+              <Code>{group.fingerprint}</Code>
+            </span>
+          </>
+        }
+        info={
+          <>
+            같은 오류의 판정 기준은 그룹 id 가 아니라 <strong>fingerprint</strong> 입니다 — 조회
+            회차가 달라도 같은 fingerprint 면 같은 오류로 봅니다.
+            <span className="mt-1.5 block">
+              마스킹 전 원본 로그는 <strong>저장하지 않습니다</strong>. 이 화면에 보이는 로그도,
+              LLM 으로 나가는 로그도 모두 마스킹된 값입니다.
             </span>
           </>
         }
         actions={
-          <Link
-            to="/"
-            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
-          >
-            대시보드로
-          </Link>
+          <ButtonLink to="/">
+            <DashboardIcon aria-hidden className="size-4" />
+            대시보드
+          </ButtonLink>
         }
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat label="발생 수" value={formatNumber(group.count)} sub="이번 조회 기준" tone="accent" />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat
-          label="추이 합계 (metric)"
+          label="발생 수"
+          icon={GroupCountIcon}
+          value={formatNumber(group.count)}
+          sub="이번 조회 기준"
+          info={
+            <>
+              이 그룹으로 묶인 <strong>로그 라인 수</strong>입니다 (조회 회차 기준). 옆의 추이
+              합계와 출처가 달라 값이 다를 수 있습니다.
+            </>
+          }
+          tone="accent"
+        />
+        <Stat
+          label="추이 합계"
+          icon={ReportIcon}
           value={formatNumber(trendTotal)}
-          sub="count_over_time 기준"
+          sub="metric 기준"
+          info={
+            <>
+              <Code>count_over_time</Code> metric 쿼리 결과의 합이라{' '}
+              <strong>로그 라인 수가 아닙니다</strong>.
+              <span className="mt-1.5 block">
+                metric 이 실패한 구간은 0 이 아니라 <strong>없음</strong>이며, 그 경우 아래 차트
+                자리에 사유가 대신 나옵니다.
+              </span>
+            </>
+          }
         />
         <Stat
           label="최초 발생"
+          icon={TimeIcon}
           value={<span className="text-lg">{formatRelative(group.first_seen)}</span>}
           sub={formatDateTime(group.first_seen)}
         />
         <Stat
           label="마지막 발생"
+          icon={TimeIcon}
           value={<span className="text-lg">{formatRelative(group.last_seen)}</span>}
           sub={formatDateTime(group.last_seen)}
         />
@@ -130,7 +198,17 @@ export function ErrorGroupDetailPage() {
 
       <div className="mt-6 grid gap-6 xl:grid-cols-5">
         <div className="space-y-6 xl:col-span-3">
-          <Card title="발생 추이" description="metric 쿼리 기준 — 로그 라인 수가 아닙니다.">
+          <Card
+            title="발생 추이"
+            description="이 fingerprint 의 시간대별 건수입니다."
+            info={
+              <>
+                <Code>count_over_time</Code> metric 쿼리 기준이라{' '}
+                <strong>로그 라인 수가 아닙니다</strong>. 실패한 구간은 0 이 아니라{' '}
+                <strong>없음</strong>입니다.
+              </>
+            }
+          >
             {/* 빈 차트만 보여주면 "발생이 없었다"와 "조회하지 못했다"가 구분되지 않는다. */}
             {group.trend.length === 0 && (group.trend_warnings?.length ?? 0) > 0 ? (
               <EmptyBlock>
@@ -144,16 +222,20 @@ export function ErrorGroupDetailPage() {
 
           <Card
             title="마스킹된 대표 로그"
-            description={
+            description="화면 표시 전에 마스킹이 적용된 값입니다."
+            info={
               <>
-                마스킹 규칙 <code>{group.samples[0]?.masking_rule_version ?? 'v1'}</code> 적용 ·
-                정규화 규칙 <code>{group.normalization_rule_version}</code>. 마스킹 전 원본은
-                저장하지 않습니다.
+                마스킹 규칙 <Code>{group.samples[0]?.masking_rule_version ?? 'v1'}</Code> · 정규화
+                규칙 <Code>{group.normalization_rule_version}</Code> 을 적용했습니다.
+                <span className="mt-1.5 block">
+                  마스킹 전 원본은 <strong>저장하지 않습니다</strong> — 원본이 필요하면 아래{' '}
+                  <strong>원본 로그로 돌아가기</strong> 의 셀렉터로 Loki 에서 직접 재조회합니다.
+                </span>
               </>
             }
           >
             {group.samples.length === 0 ? (
-              <EmptyBlock>저장된 대표 로그가 없습니다.</EmptyBlock>
+              <EmptyBlock icon={EmptyIcon}>저장된 대표 로그가 없습니다.</EmptyBlock>
             ) : (
               <div className="space-y-4">
                 {group.samples.map((sample) => (
@@ -169,21 +251,21 @@ export function ErrorGroupDetailPage() {
         <div className="space-y-6 xl:col-span-2">
           <Card title="라벨">
             {Object.keys(group.labels).length === 0 ? (
-              <EmptyBlock>라벨이 없습니다.</EmptyBlock>
+              <EmptyBlock icon={EmptyIcon}>라벨이 없습니다.</EmptyBlock>
             ) : (
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
                 {Object.entries(group.labels).map(([key, value]) => (
                   <div key={key} className="contents">
-                    <dt className="font-mono text-xs text-slate-500">{key}</dt>
-                    <dd className="font-mono text-xs break-all text-slate-800">{value}</dd>
+                    <dt className="font-mono text-xs text-muted">{key}</dt>
+                    <dd className="font-mono text-xs break-all text-ink-soft">{value}</dd>
                   </div>
                 ))}
               </dl>
             )}
             {group.top_stack_frame && (
-              <div className="mt-4 border-t border-slate-100 pt-4">
-                <p className="text-xs font-medium text-slate-500">상위 스택 프레임 (fingerprint 재료)</p>
-                <p className="mt-1 font-mono text-xs break-all text-slate-800">
+              <div className="mt-4 border-t border-line-soft pt-4">
+                <p className="text-xs font-medium text-muted">상위 스택 프레임 (fingerprint 재료)</p>
+                <p className="mt-1 font-mono text-xs break-all text-ink-soft">
                   {group.top_stack_frame}
                 </p>
               </div>
@@ -192,7 +274,17 @@ export function ErrorGroupDetailPage() {
 
           <Card
             title="AI 분석"
-            description="수동 트리거만 존재합니다. 실행하면 마스킹된 대표 로그·추이·정책 정보만 LLM 으로 나갑니다."
+            description="수동 트리거만 존재합니다. 비용이 발생하는 요청입니다."
+            info={
+              <>
+                실행하면 <strong>마스킹된 대표 로그·추이·정책 정보만</strong> LLM 으로 나갑니다 —
+                마스킹 전 원본이 나가는 경로는 없습니다.
+                <span className="mt-1.5 block">
+                  같은 fingerprint 로 이미 진행 중인 분석이 있으면 새 작업을 만들지 않고 그 작업을
+                  이어서 봅니다. 일일 한도를 넘기면 서버가 <Code>429</Code> 로 거절합니다.
+                </span>
+              </>
+            }
           >
             <div className="space-y-4">
               {!write.allowed && (
@@ -247,11 +339,19 @@ export function ErrorGroupDetailPage() {
                   )
                 }
               >
-                {startAnalysis.isPending
-                  ? '요청 중…'
-                  : isJobActive(jobQuery.data)
-                    ? jobStatusLabel(jobQuery.data?.status)
-                    : 'AI 분석 실행'}
+                {startAnalysis.isPending ? (
+                  <>
+                    <Spinner className="size-4 border-sky-200 border-t-white" />
+                    요청 중…
+                  </>
+                ) : isJobActive(jobQuery.data) ? (
+                  jobStatusLabel(jobQuery.data?.status)
+                ) : (
+                  <>
+                    <RunIcon aria-hidden className="size-4" />
+                    AI 분석 실행
+                  </>
+                )}
               </Button>
 
               {startAnalysis.data?.reused && (
@@ -290,7 +390,7 @@ export function ErrorGroupDetailPage() {
         )}
         {!jobQuery.data && !jobQuery.isError && (activeJobId === null || !jobQuery.isLoading) && (
           <Card title="LLM 분석 결과">
-            <EmptyBlock>
+            <EmptyBlock icon={ReportIcon}>
               {write.allowed ? (
                 <>
                   아직 이 오류 그룹에 대한 분석 결과가 없습니다. 오른쪽에서{' '}
@@ -321,7 +421,7 @@ function SampleBlock({ sample }: { sample: ErrorSampleRead }) {
   return (
     <div>
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs text-slate-500">{formatDateTime(sample.occurred_at)}</span>
+        <span className="text-xs text-muted tabular-nums">{formatDateTime(sample.occurred_at)}</span>
         <div className="flex items-center gap-2">
           <Badge tone="success" title="화면 표시 전에 마스킹이 적용되었습니다.">
             마스킹됨 · {sample.masking_rule_version}
@@ -335,7 +435,7 @@ function SampleBlock({ sample }: { sample: ErrorSampleRead }) {
       </div>
       <LogLine>{sample.masked_log}</LogLine>
       {showStack && sample.stacktrace && (
-        <pre className="aila-scroll mt-2 overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-3 text-xs leading-relaxed whitespace-pre text-slate-700">
+        <pre className="aila-scroll mt-2 overflow-x-auto rounded-lg border border-line bg-surface-2 px-3.5 py-3 text-xs leading-relaxed whitespace-pre text-ink-soft">
           {sample.stacktrace}
         </pre>
       )}
@@ -352,7 +452,13 @@ function OriginalLogCard({ group }: { group: ErrorGroupDetail }) {
   return (
     <Card
       title="원본 로그로 돌아가기"
-      description="마스킹 전 원본은 저장하지 않습니다. 아래 셀렉터와 시간 범위로 Loki 에서 직접 재조회하십시오."
+      description="아래 셀렉터와 시간 범위로 Loki 에서 직접 재조회하십시오."
+      info={
+        <>
+          마스킹 전 원본은 <strong>저장하지 않습니다</strong> — 이 도구는 Loki 를 읽기만 하므로,
+          원본이 필요하면 Loki(또는 Grafana)에서 같은 조건으로 다시 조회하는 것이 유일한 방법입니다.
+        </>
+      }
       actions={
         <Button
           size="sm"
@@ -363,12 +469,13 @@ function OriginalLogCard({ group }: { group: ErrorGroupDetail }) {
             });
           }}
         >
+          <CopyIcon aria-hidden className="size-3.5" />
           {copied ? '복사됨' : 'LogQL 복사'}
         </Button>
       }
     >
       <LogLine>{selector}</LogLine>
-      <p className="mt-2 text-xs text-slate-500">
+      <p className="mt-2 text-xs text-muted tabular-nums">
         조회 구간 {formatDateTime(group.first_seen)} ~ {formatDateTime(group.last_seen)}
       </p>
     </Card>
@@ -380,32 +487,32 @@ function OriginalLogCard({ group }: { group: ErrorGroupDetail }) {
 function JobProgress({ job }: { job: AnalysisJobRead }) {
   const active = isJobActive(job);
   return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-3">
+    <div className="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
       <div className="flex items-center justify-between gap-2">
         <AnalysisStatusBadge status={job.status} />
-        <span className="text-xs text-slate-500">작업 #{job.id}</span>
+        <span className="text-xs text-faint tabular-nums">작업 #{job.id}</span>
       </div>
-      <dl className="mt-2 space-y-1 text-xs text-slate-600">
+      <dl className="mt-2 space-y-1 text-xs text-muted">
         <div className="flex justify-between gap-2">
           <dt>모델</dt>
-          <dd className="font-mono">{job.model}</dd>
+          <dd className="font-mono text-ink-soft">{job.model}</dd>
         </div>
         <div className="flex justify-between gap-2">
           <dt>프롬프트 버전</dt>
-          <dd className="font-mono">{job.prompt_version}</dd>
+          <dd className="font-mono text-ink-soft">{job.prompt_version}</dd>
         </div>
         <div className="flex justify-between gap-2">
           <dt>요청</dt>
-          <dd>{formatDateTime(job.requested_at)}</dd>
+          <dd className="tabular-nums">{formatDateTime(job.requested_at)}</dd>
         </div>
       </dl>
       {active && (
-        <p className="mt-2 text-xs text-slate-500">
+        <p className="mt-2 text-xs text-muted">
           2 초 간격으로 상태를 확인하고 있습니다. LLM 호출은 수 초에서 수십 초가 걸립니다.
         </p>
       )}
       {job.status === 'failed' && job.error_message && (
-        <p className="mt-2 text-xs text-rose-700">{job.error_message}</p>
+        <p className="mt-2 text-xs text-rose-700 dark:text-rose-300">{job.error_message}</p>
       )}
     </div>
   );
@@ -438,11 +545,20 @@ function PastAnalysesCard({
         </span>
       }
       description="조회 회차를 넘어 fingerprint 로 조인된 이력입니다."
+      info={
+        <>
+          다른 조회 회차에서 실행한 분석도 같은 fingerprint 면 여기 나옵니다. 항목을 누르면 아래
+          결과 카드가 그 작업으로 바뀝니다.
+          <span className="mt-1.5 block">
+            <strong>실패한 분석도 "이력 있음"</strong>입니다 — 그래서 미분석 지표에서는 빠집니다.
+          </span>
+        </>
+      }
     >
       {group.analyses.length === 0 ? (
-        <EmptyBlock>이 fingerprint 로 실행된 분석이 아직 없습니다.</EmptyBlock>
+        <EmptyBlock icon={ReportIcon}>이 fingerprint 로 실행된 분석이 아직 없습니다.</EmptyBlock>
       ) : (
-        <ul className="divide-y divide-slate-100">
+        <ul className="divide-y divide-line-soft">
           {group.analyses.map((analysis) => {
             // 그룹 상세는 작업보다 늦게 갱신될 수 있다. 같은 작업이면 폴링으로 받은
             // 최신 상태를 쓴다 — 완료된 작업이 이력에서 "분석 중"으로 남지 않게.
@@ -450,27 +566,33 @@ function PastAnalysesCard({
             const status = live?.status ?? analysis.status;
             const severity = live?.result?.severity ?? analysis.severity;
             const summary = live?.result?.summary ?? analysis.summary;
+            const selected = activeJobId === analysis.id;
             return (
               <li key={analysis.id} className="py-2.5 first:pt-0 last:pb-0">
                 <button
                   type="button"
+                  aria-current={selected ? 'true' : undefined}
                   onClick={() => onSelect(analysis.id)}
-                  className={
-                    'w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-slate-50 ' +
-                    (activeJobId === analysis.id ? 'bg-sky-50 ring-1 ring-sky-200 ring-inset' : '')
-                  }
+                  className={cx(
+                    'w-full rounded-lg px-2 py-1.5 text-left transition-colors',
+                    selected
+                      ? 'bg-accent-soft ring-1 ring-inset ring-line-strong'
+                      : 'hover:bg-surface-2',
+                  )}
                 >
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <AnalysisStatusBadge status={status} />
                     <SeverityBadge severity={severity} />
                     {/* 스케줄의 자동 분석과 사람이 누른 분석을 이력에서 구분한다. */}
                     <TriggeredByBadge value={live?.triggered_by ?? analysis.triggered_by} />
                   </div>
-                  <p className="mt-1 text-xs text-slate-600">
+                  <p className="mt-1.5 text-xs text-muted">
                     {analysis.provider} · <span className="font-mono">{analysis.model}</span> ·{' '}
-                    {formatDateTime(analysis.requested_at)}
+                    <span className="tabular-nums">{formatDateTime(analysis.requested_at)}</span>
                   </p>
-                  {summary && <p className="mt-1 text-xs text-slate-500">{summary}</p>}
+                  {summary && (
+                    <p className="mt-1 text-xs leading-relaxed text-ink-soft">{summary}</p>
+                  )}
                 </button>
               </li>
             );
@@ -483,6 +605,13 @@ function PastAnalysesCard({
 
 // ------------------------------------------------------------------ 분석 결과
 
+/**
+ * LLM 분석 결과.
+ *
+ * **여기 있는 문구는 Phase 8 에서 한 글자도 바꾸지 않았다.** 가설이 여럿이라는 사실,
+ * confidence 가 확률이 아니라는 사실, 한계 목록 — 전부 단정을 막으려고 있는 글이라
+ * 요약하거나 툴팁으로 접으면 그 목적이 사라진다. 바꾼 것은 위계(제목·간격·행간)뿐이다.
+ */
 function AnalysisResultCard({ job, group }: { job: AnalysisJobRead; group: ErrorGroupDetail }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [exportError, setExportError] = useState<string | null>(null);
@@ -522,7 +651,7 @@ function AnalysisResultCard({ job, group }: { job: AnalysisJobRead; group: Error
   if (!result) {
     return (
       <Card title="LLM 분석 결과">
-        <EmptyBlock>결과가 비어 있습니다.</EmptyBlock>
+        <EmptyBlock icon={EmptyIcon}>결과가 비어 있습니다.</EmptyBlock>
       </Card>
     );
   }
@@ -546,6 +675,7 @@ function AnalysisResultCard({ job, group }: { job: AnalysisJobRead; group: Error
                 );
             }}
           >
+            <ExportIcon aria-hidden className="size-3.5" />
             Markdown 다운로드
           </Button>
           <Button
@@ -561,6 +691,7 @@ function AnalysisResultCard({ job, group }: { job: AnalysisJobRead; group: Error
                 .catch(() => setCopyState('failed'));
             }}
           >
+            <CopyIcon aria-hidden className="size-3.5" />
             {copyState === 'copied'
               ? '복사됨'
               : copyState === 'failed'
@@ -576,47 +707,43 @@ function AnalysisResultCard({ job, group }: { job: AnalysisJobRead; group: Error
         </div>
       )}
 
-      <div className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
+      {/* 요약 블록 — 색조는 `toneClass` 를 통해서만 칠한다(다크 짝이 한 곳에 있다). */}
+      <div className={cx('rounded-lg px-4 py-3 ring-1 ring-inset', toneClass('accent'))}>
+        <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone="accent">LLM 생성</Badge>
           <SeverityBadge severity={result.severity} />
         </div>
-        <p className="mt-2 text-sm leading-relaxed font-medium text-slate-900">{result.summary}</p>
-        <p className="mt-1 text-xs text-slate-600">
+        <p className="mt-2.5 text-sm leading-relaxed font-medium">{result.summary}</p>
+        <p className="mt-2 text-xs leading-relaxed opacity-90">
           심각도는 대표 로그 몇 건으로 추정한 값이며, 발생 수({formatNumber(group.count)}건) 같은
           발생량 기반 지표와는 다릅니다.
         </p>
       </div>
 
       <section className="mt-6">
-        <h3 className="text-sm font-semibold text-slate-900">원인 가설</h3>
-        <p className="mt-1 text-xs text-slate-500">
+        <h3 className="text-sm font-semibold text-ink">원인 가설</h3>
+        <p className="mt-1 text-xs leading-relaxed text-muted">
           여러 가설이 나오는 것이 정상입니다 — 스키마가 단정을 막습니다. 아래 숫자는 정렬용
           힌트이며 확률이 아닙니다.
         </p>
         <ol className="mt-3 space-y-3">
           {result.hypotheses.map((hypothesis, index) => (
-            <li
-              key={index}
-              className="rounded-lg border border-slate-200 bg-white px-4 py-3"
-            >
+            <li key={index} className="rounded-lg border border-line bg-surface-2 px-4 py-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
-                <p className="font-medium text-slate-900">
-                  {index + 1}. {hypothesis.cause}
+                <p className="text-sm leading-relaxed font-medium text-ink">
+                  <span className="mr-1.5 text-muted tabular-nums">{index + 1}.</span>
+                  {hypothesis.cause}
                 </p>
                 <Badge tone="neutral" title="정렬용 힌트입니다. 확률로 읽지 마십시오.">
                   가설 순위 힌트 {hypothesis.confidence.toFixed(2)}
                 </Badge>
               </div>
+              {/* 칩 크기는 컨테이너가 정한다 — `Code` 는 부모의 0.9em 이라 칩마다 글자
+                  크기를 또 주면 두 지정이 싸운다. */}
               {hypothesis.evidence.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
+                <div className="mt-2.5 flex flex-wrap gap-1.5 text-sm">
                   {hypothesis.evidence.map((evidence, evidenceIndex) => (
-                    <code
-                      key={evidenceIndex}
-                      className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-700"
-                    >
-                      {evidence}
-                    </code>
+                    <Code key={evidenceIndex}>{evidence}</Code>
                   ))}
                 </div>
               )}
@@ -631,9 +758,9 @@ function AnalysisResultCard({ job, group }: { job: AnalysisJobRead; group: Error
       </div>
 
       <section className="mt-6">
-        <h3 className="text-sm font-semibold text-slate-900">한계</h3>
+        <h3 className="text-sm font-semibold text-ink">한계</h3>
         <Notice tone="warning" className="mt-2">
-          <ul className="list-disc space-y-1 pl-4">
+          <ul className="list-disc space-y-1.5 pl-4 leading-relaxed">
             {result.limitations.map((limitation, index) => (
               <li key={index}>{limitation}</li>
             ))}
@@ -659,12 +786,12 @@ function ListSection({
   const ListTag = ordered ? 'ol' : 'ul';
   return (
     <section>
-      <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
+      <h3 className="text-sm font-semibold text-ink">{title}</h3>
       <ListTag
-        className={
-          'mt-2 space-y-1.5 pl-5 text-sm text-slate-700 ' +
-          (ordered ? 'list-decimal' : 'list-disc')
-        }
+        className={cx(
+          'mt-2 space-y-2 pl-5 text-sm leading-relaxed text-ink-soft',
+          ordered ? 'list-decimal' : 'list-disc',
+        )}
       >
         {items.map((item, index) => (
           <li key={index}>{item}</li>
@@ -677,8 +804,9 @@ function ListSection({
 function UsageRow({ job }: { job: AnalysisJobRead }) {
   if (!job.usage) return null;
   return (
-    <div className="mt-6 border-t border-slate-100 pt-4">
-      <p className="mb-2 text-xs text-slate-500">
+    <div className="mt-6 border-t border-line-soft pt-4">
+      {/* 비용 관련 고지는 툴팁에 숨기지 않는다 — 본문에 그대로 둔다. */}
+      <p className="mb-2 text-xs text-muted">
         비용은 계산 시점 단가표 기준 <strong>추정</strong>값입니다. 정산 근거가 아닙니다.
       </p>
       <TableWrap>

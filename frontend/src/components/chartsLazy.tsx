@@ -36,7 +36,7 @@ const LazySparkline = lazy(() =>
 function ChartFallback({ height = 220 }: { height?: number }) {
   return (
     <div
-      className="flex items-center justify-center rounded-lg bg-slate-50 text-sm text-slate-400"
+      className="flex items-center justify-center rounded-lg bg-surface-2 text-sm text-faint"
       style={{ height }}
     >
       <Spinner />

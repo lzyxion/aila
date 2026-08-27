@@ -10,7 +10,8 @@ import { useLocation, useNavigate } from 'react-router';
 
 import { ApiError, USE_MOCK } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { Button, Field, Input, Notice, Spinner } from '../components/ui';
+import { ThemeToggle } from '../components/ThemeToggle';
+import { Button, Code, Field, InfoTip, Input, Notice, Spinner } from '../components/ui';
 
 interface LocationState {
   from?: string;
@@ -53,24 +54,29 @@ export function LoginPage() {
   const errorMessage = formError ?? describeLoginError(loginError);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-100 px-6 py-12">
+    <div className="flex min-h-screen items-center justify-center bg-canvas px-6 py-12">
       <div className="w-full max-w-sm">
-        <div className="mb-6 text-center">
-          <p className="text-2xl font-bold tracking-tight text-slate-900">AILA</p>
-          <p className="mt-1 text-sm text-slate-500">Loki 기반 AI 로그 분석기</p>
+        {/*
+          로그인 화면은 `Layout` 바깥이라 사이드바의 테마 토글이 없다. 어두운 방에서
+          앱을 처음 여는 순간이 정확히 여기라 토글을 한 번 더 둔다.
+        */}
+        <div className="mb-6 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-2xl font-bold tracking-tight text-ink">AILA</p>
+            <p className="mt-0.5 text-sm text-muted">Loki 기반 AI 로그 분석기</p>
+          </div>
+          <ThemeToggle />
         </div>
 
         <form
-          className="rounded-xl border border-slate-200 bg-white px-6 py-6 shadow-sm shadow-slate-200/50"
+          className="rounded-xl border border-line bg-surface px-6 py-6 shadow-sm shadow-slate-900/5"
           onSubmit={(event) => {
             event.preventDefault();
             submit();
           }}
         >
-          <h1 className="text-base font-semibold text-slate-900">로그인</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            분석 실행은 비용이 나가는 경로입니다. 계정에 따라 실행 권한이 갈립니다.
-          </p>
+          <h1 className="text-base font-semibold text-ink">로그인</h1>
+          <p className="mt-1 text-sm text-muted">계정에 따라 실행 권한이 갈립니다.</p>
 
           <div className="mt-5 space-y-4">
             <Field label="사용자명" required>
@@ -117,26 +123,34 @@ export function LoginPage() {
           </Button>
 
           {user && (
-            <p className="mt-3 text-center text-xs text-slate-500">
+            <p className="mt-3 text-center text-xs text-muted">
               {user.username} 으로 로그인되어 있습니다.
             </p>
           )}
 
           {USE_MOCK && (
-            <div className="mt-5 border-t border-slate-100 pt-4 text-xs text-slate-500">
-              <p className="font-medium text-slate-600">MOCK 데이터 계정</p>
+            <div className="mt-5 border-t border-line-soft pt-4 text-xs text-muted">
+              <p className="font-medium text-ink-soft">MOCK 데이터 계정</p>
               <p className="mt-1">
-                <code className="rounded bg-slate-100 px-1">admin / admin</code> — 전체 권한
+                <Code>admin / admin</Code> — 전체 권한
               </p>
               <p className="mt-0.5">
-                <code className="rounded bg-slate-100 px-1">viewer / viewer</code> — 조회만
+                <Code>viewer / viewer</Code> — 조회만
               </p>
             </div>
           )}
         </form>
 
-        <p className="mt-4 text-center text-xs leading-relaxed text-slate-500">
-          세션은 httpOnly 쿠키로만 유지됩니다. 화면에 나오는 로그는 전부 마스킹된 값입니다.
+        {/* 고지는 한 줄 + ⓘ — 지우지 않고 접는다. */}
+        <p className="mt-4 flex items-center justify-center gap-1 text-center text-xs text-muted">
+          세션은 httpOnly 쿠키로만 유지됩니다.
+          <InfoTip label="세션·로그 취급 방식 보기" title="이 앱이 다루는 값" align="center">
+            비밀번호·세션 토큰은 화면 코드가 읽을 수 없습니다(httpOnly 쿠키).
+            <span className="mt-1.5 block">
+              로그인 후 보게 되는 로그는 전부 <strong>마스킹된 값</strong>이며, 마스킹 전 원본은
+              저장하지 않습니다.
+            </span>
+          </InfoTip>
         </p>
       </div>
     </div>

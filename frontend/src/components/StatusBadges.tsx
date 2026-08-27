@@ -21,6 +21,7 @@ import {
   severityLabel,
   usageStatusLabel,
 } from '../lib/format';
+import { WarningIcon } from './icons';
 import { Badge, Spinner } from './ui';
 
 export function AnalysisStatusBadge({
@@ -40,7 +41,7 @@ export function AnalysisStatusBadge({
     case 'pending':
       return (
         <Badge tone="info">
-          <Spinner className="size-3 border-sky-300 border-t-sky-700" />
+          <Spinner className="size-3 border-sky-300 border-t-sky-700 dark:border-sky-800 dark:border-t-sky-300" />
           {label}
         </Badge>
       );
@@ -71,13 +72,17 @@ const severityTone: Record<Severity, 'danger' | 'warning' | 'info' | 'neutral'> 
  *    가장 옅은 톤이고, 왼쪽 테두리(200~400)가 색 차이를 배경보다 크게 벌려 준다.
  *
  * 심각도가 없으면(미분석) 배경을 칠하지 않는다 — 회색으로 칠하면 "정보 등급"과 섞인다.
+ *
+ * 다크에서는 950 배경 + 700~800 테두리로 뒤집는다. 어두운 화면에서 50 단계 배경은
+ * 행 전체가 하얗게 타서 본문 글자를 밀어낸다 — 옅은 톤이라는 성질을 유지하되 방향을
+ * 뒤집는 것이지, 색 자체를 바꾸지 않는다 (rose 는 다크에서도 rose 다).
  */
 const severityRowTone: Record<Severity, string> = {
-  critical: 'bg-rose-50 border-l-4 border-rose-400',
-  high: 'bg-rose-50 border-l-4 border-rose-300',
-  medium: 'bg-amber-50 border-l-4 border-amber-300',
-  low: 'bg-sky-50 border-l-4 border-sky-300',
-  info: 'bg-slate-50 border-l-4 border-slate-300',
+  critical: 'bg-rose-50 border-l-4 border-rose-400 dark:bg-rose-950/50 dark:border-rose-700',
+  high: 'bg-rose-50 border-l-4 border-rose-300 dark:bg-rose-950/40 dark:border-rose-800',
+  medium: 'bg-amber-50 border-l-4 border-amber-300 dark:bg-amber-950/40 dark:border-amber-800',
+  low: 'bg-sky-50 border-l-4 border-sky-300 dark:bg-sky-950/40 dark:border-sky-800',
+  info: 'bg-slate-50 border-l-4 border-slate-300 dark:bg-slate-800/40 dark:border-slate-700',
 };
 
 export function severityRowClass(severity: Severity | null | undefined): string {
@@ -86,7 +91,8 @@ export function severityRowClass(severity: Severity | null | undefined): string 
 
 /** 항상 "LLM 추정" 표기를 붙인다. 발생량 기반 심각도가 아니다. */
 export function SeverityBadge({ severity }: { severity: Severity | null | undefined }) {
-  if (!severity) return <span className="text-xs text-slate-400">-</span>;
+  // 값 없음은 **0 도 '정보 등급'도 아니다** — 배지 대신 '-' 로 비운다.
+  if (!severity) return <span className="text-xs text-faint">-</span>;
   return (
     <Badge
       tone={severityTone[severity]}
@@ -137,7 +143,7 @@ export function IngestAbsentBadge({
 }) {
   return (
     <Badge tone="danger" title={warning.message} className={compact ? undefined : 'max-w-full'}>
-      <span aria-hidden>⚠</span>
+      <WarningIcon aria-hidden className="size-3.5 shrink-0" />
       수집 중단 의심
       {warning.count != null && warning.count > 1 ? ` · ${warning.count}개 서비스` : ''}
     </Badge>

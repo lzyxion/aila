@@ -8,6 +8,31 @@
       name="description"
       content="Loki 오류 로그를 정책으로 조회하고 그룹으로 묶어 마스킹된 대표 로그만 LLM 에 넘겨 원인 가설을 받는 도구"
     />
+    <!--
+      다크 모드 첫 페인트 방어.
+
+      번들이 평가되기 전에 `html.dark` 가 붙어 있어야 한다 — React 안에서 붙이면 그 전에
+      흰 화면이 한 프레임 그려지고, 어두운 방에서 보는 사용자에게는 그게 가장 눈에 띈다.
+      키·판정 규칙은 `src/lib/theme.ts` 와 **같아야 한다**.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('aila-theme');
+          var mode =
+            stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+          var dark =
+            mode === 'dark' ||
+            (mode === 'system' &&
+              typeof window.matchMedia === 'function' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('dark', dark);
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (error) {
+          /* 저장소를 못 읽어도 앱은 떠야 한다 — 밝은 테마로 시작한다. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

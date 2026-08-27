@@ -32,6 +32,13 @@ import {
 } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
 import {
+  AddIcon,
+  ChevronRightIcon,
+  LlmConnectionIcon,
+  RefreshIcon,
+  SaveIcon,
+} from '../components/icons';
+import {
   Badge,
   Button,
   Card,
@@ -40,14 +47,16 @@ import {
   ErrorBlock,
   Field,
   Input,
-  LoadingBlock,
   Notice,
   OneLineCode,
   Select,
+  SkeletonText,
   Spinner,
   cx,
+  toneClass,
 } from '../components/ui';
 import { formatDateTime, providerLabel } from '../lib/format';
+import { ConfirmButton } from './adminConfirm';
 
 interface FormState {
   name: string;
@@ -242,23 +251,36 @@ export function LlmConnectionsPage() {
       <div className="xl:col-span-2">
         <Card
           title="LLM 연결"
-          description="하나를 눌러 오른쪽에서 상세를 보고 고칩니다. 비활성화는 실제 삭제가 아닙니다 — 분석 이력이 참조합니다."
+          description="하나를 눌러 오른쪽에서 상세를 보고 고칩니다."
+          info={
+            <>
+              비활성화는 <strong>실제 삭제가 아닙니다</strong> — 분석 이력이 이 연결을
+              참조합니다.
+            </>
+          }
           actions={
             write.allowed && (
-              <Button size="sm" variant={selected === null ? 'primary' : 'secondary'} onClick={startCreate}>
+              <Button
+                size="sm"
+                variant={selected === null ? 'primary' : 'secondary'}
+                onClick={startCreate}
+              >
+                <AddIcon aria-hidden className="size-4" />
                 새 연결
               </Button>
             )
           }
         >
-          {connectionsQuery.isPending && <LoadingBlock />}
+          {connectionsQuery.isPending && <SkeletonText lines={4} label="LLM 연결 목록을 불러오는 중" />}
           {connectionsQuery.isError && <ErrorBlock error={connectionsQuery.error} />}
           {connectionsQuery.data?.length === 0 && (
-            <EmptyBlock>등록된 LLM 연결이 없습니다. 먼저 하나를 만드십시오.</EmptyBlock>
+            <EmptyBlock icon={LlmConnectionIcon}>
+              등록된 LLM 연결이 없습니다. 먼저 하나를 만드십시오.
+            </EmptyBlock>
           )}
 
           {connections.length > 0 && (
-            <ul className="divide-y divide-slate-100">
+            <ul className="divide-y divide-line-soft">
               {connections.map((connection) => {
                 const active = selected === connection.id;
                 return (
@@ -269,22 +291,26 @@ export function LlmConnectionsPage() {
                       onClick={() => openConnection(connection)}
                       className={cx(
                         'w-full cursor-pointer rounded-lg px-2.5 py-2 text-left transition-colors',
-                        active ? 'bg-sky-50 ring-1 ring-sky-200 ring-inset' : 'hover:bg-slate-50',
+                        active
+                          ? 'bg-accent-soft ring-1 ring-line-strong ring-inset'
+                          : 'hover:bg-surface-2',
                         !connection.active && 'opacity-75',
                       )}
                     >
-                      <p className="flex flex-wrap items-center gap-2 font-medium text-slate-900">
+                      <p className="flex flex-wrap items-center gap-2 font-medium text-ink">
+                        {/* 선택 표시는 색만이 아니다 — 꺾쇠(모양)와 aria-pressed 를 함께 쓴다. */}
+                        {active && <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />}
                         {connection.name}
                         {connection.is_default && <Badge tone="accent">기본 연결</Badge>}
                         {!connection.active && <Badge tone="neutral">비활성</Badge>}
                       </p>
-                      <p className="mt-1 text-xs text-slate-500">
+                      <p className="mt-1 text-xs text-muted">
                         {providerLabel(connection.provider)} ·{' '}
                         <span className="font-mono">{connection.model}</span>
                       </p>
                       {connection.base_url && (
                         <p
-                          className="mt-0.5 truncate font-mono text-xs text-slate-400"
+                          className="mt-0.5 truncate font-mono text-xs text-faint"
                           title={connection.base_url}
                         >
                           {connection.base_url}
@@ -314,7 +340,7 @@ export function LlmConnectionsPage() {
               }
               actions={
                 isEditing && (
-                  <span className="text-xs text-slate-400">
+                  <span className="text-xs text-faint tabular-nums">
                     #{editing.id} · 수정 {formatDateTime(editing.updated_at)}
                   </span>
                 )
@@ -370,7 +396,7 @@ export function LlmConnectionsPage() {
                 )}
 
                 {/* -------------------------------- API 키 → 바로 아래 모델 조회 */}
-                <div className="rounded-lg border border-sky-200 bg-sky-50/60 px-3.5 py-3">
+                <div className={cx('rounded-lg px-3.5 py-3 ring-1 ring-inset', toneClass('info'))}>
                   <Field
                     label="API 키"
                     required={!isEditing}
@@ -410,7 +436,9 @@ export function LlmConnectionsPage() {
                     이어지는 순서다. 키가 없으면 버튼을 잠그되 **왜 잠겼는지**를 같은 자리에
                     적는다 (누르고 실패해서 알게 되는 것보다 낫다).
                   */}
-                  <div className="mt-3 border-t border-sky-200 pt-3">
+                  {/* 구분선은 색조 상자 안이라 불투명 색을 쓰지 않는다 — 어느 테마에서도
+                      한 단계만 어두워지게 반투명으로 둔다 (`Code` 와 같은 방식). */}
+                  <div className="mt-3 border-t border-black/10 pt-3 dark:border-white/10">
                     <div className="flex flex-wrap items-end gap-2">
                       <Button
                         variant="primary"
@@ -425,14 +453,17 @@ export function LlmConnectionsPage() {
                       >
                         {modelsQuery.isFetching ? (
                           <>
-                            <Spinner className="size-3.5 border-sky-200 border-t-white" />
+                            <Spinner className="size-3.5 border-accent-fg/30 border-t-accent-fg" />
                             조회 중…
                           </>
                         ) : (
-                          '모델 목록 조회'
+                          <>
+                            <RefreshIcon aria-hidden className="size-3.5" />
+                            모델 목록 조회
+                          </>
                         )}
                       </Button>
-                      <span className="text-xs text-slate-600">
+                      <span className="text-xs">
                         {canListModels
                           ? '조회 후 아래 드롭다운에서 고르십시오. 목록에 없으면 직접 입력해도 됩니다.'
                           : modelBlockedReason}
@@ -455,7 +486,7 @@ export function LlmConnectionsPage() {
                             없으면 <strong>직접 입력</strong>을 고르십시오.
                           </>
                         ) : modelsQuery.isError ? (
-                          <span className="text-amber-700">
+                          <span className="text-amber-700 dark:text-amber-300">
                             모델 목록을 불러오지 못해 직접 입력으로 전환했습니다 —{' '}
                             {/*
                               경로 자체가 없을 때(백엔드 미구현)와 프로바이더가 거절했을 때는
@@ -528,6 +559,7 @@ export function LlmConnectionsPage() {
 
               <div className="mt-5 flex flex-wrap gap-2">
                 <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+                  <SaveIcon aria-hidden className="size-4" />
                   {saving ? '저장 중…' : isEditing ? '연결 수정' : '연결 저장'}
                 </Button>
                 {isEditing && (
@@ -547,30 +579,38 @@ export function LlmConnectionsPage() {
                 연결 테스트도 <strong>실제 과금 호출</strong>입니다. 서버가 최소 토큰으로 보냅니다.
               </Notice>
 
-              <div className="mt-4 flex flex-wrap gap-2">
+              {/*
+                위험 동작 두 개는 같은 2단 확인을 쓴다 (`adminConfirm.tsx`) — 기본 지정은
+                기존 기본 연결을 **조용히 해제**하고, 비활성화는 이 연결을 쓰는 분석을 멈춘다.
+                둘 다 되돌릴 수 있지만 누른 순간 다른 곳이 움직인다.
+              */}
+              <div className="mt-4 flex flex-wrap items-center gap-2">
                 <Button onClick={handleTest} disabled={testConnection.isPending}>
                   {testConnection.isPending ? '테스트 중…' : '연결 테스트'}
                 </Button>
                 {isEditing && !editing.is_default && editing.active && (
-                  <Button
-                    disabled={updateConnection.isPending}
-                    title="기본 연결은 최대 하나입니다 — 지정하면 기존 기본 연결이 해제됩니다."
-                    onClick={() =>
+                  <ConfirmButton
+                    variant="secondary"
+                    size="md"
+                    pending={updateConnection.isPending}
+                    question="기존 기본 연결이 해제됩니다 (기본은 최대 하나)."
+                    onConfirm={() =>
                       updateConnection.mutate({ id: editing.id, payload: { is_default: true } })
                     }
                   >
                     기본 연결로 지정
-                  </Button>
+                  </ConfirmButton>
                 )}
                 {isEditing && editing.active && (
-                  <Button
+                  <ConfirmButton
                     variant="danger"
-                    disabled={deactivateConnection.isPending}
-                    title="실제 삭제가 아닙니다 — 분석 이력이 이 연결을 참조합니다."
-                    onClick={() => deactivateConnection.mutate(editing.id)}
+                    size="md"
+                    pending={deactivateConnection.isPending}
+                    question="삭제가 아니라 비활성입니다 — 분석 이력은 그대로 참조합니다."
+                    onConfirm={() => deactivateConnection.mutate(editing.id)}
                   >
                     비활성화
-                  </Button>
+                  </ConfirmButton>
                 )}
                 {isEditing && !editing.active && (
                   <Button
@@ -601,29 +641,31 @@ export function LlmConnectionsPage() {
 
               {isEditing && (
                 <dl className="mt-4 grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
-                  <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-                    <dt className="text-slate-500">상태</dt>
+                  <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+                    <dt className="text-muted">상태</dt>
                     <dd>
                       <Badge tone={editing.active ? 'success' : 'neutral'}>
                         {editing.active ? '활성' : '비활성'}
                       </Badge>
                     </dd>
                   </div>
-                  <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-                    <dt className="text-slate-500">기본 연결</dt>
-                    <dd className="text-slate-800">{editing.is_default ? '예' : '아니오'}</dd>
+                  <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+                    <dt className="text-muted">기본 연결</dt>
+                    <dd className="text-ink-soft">{editing.is_default ? '예' : '아니오'}</dd>
                   </div>
-                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 py-1">
-                    <dt className="text-slate-500">저장된 API 키</dt>
+                  <div className="flex items-center justify-between gap-3 border-b border-line-soft py-1">
+                    <dt className="text-muted">저장된 API 키</dt>
                     <dd>
                       <OneLineCode className="inline-block max-w-32">
                         {editing.api_key_masked ?? '(없음)'}
                       </OneLineCode>
                     </dd>
                   </div>
-                  <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-                    <dt className="text-slate-500">등록</dt>
-                    <dd className="text-slate-800">{formatDateTime(editing.created_at)}</dd>
+                  <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+                    <dt className="text-muted">등록</dt>
+                    <dd className="text-ink-soft tabular-nums">
+                      {formatDateTime(editing.created_at)}
+                    </dd>
                   </div>
                 </dl>
               )}
@@ -650,21 +692,21 @@ function ReadOnlyDetail({
       </Notice>
       {connection && (
         <dl className="mt-4 grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
-          <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-            <dt className="text-slate-500">프로바이더</dt>
-            <dd className="text-slate-800">{providerLabel(connection.provider)}</dd>
+          <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+            <dt className="text-muted">프로바이더</dt>
+            <dd className="text-ink-soft">{providerLabel(connection.provider)}</dd>
           </div>
-          <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-            <dt className="text-slate-500">모델</dt>
-            <dd className="font-mono text-slate-800">{connection.model}</dd>
+          <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+            <dt className="text-muted">모델</dt>
+            <dd className="font-mono text-ink-soft">{connection.model}</dd>
           </div>
-          <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-            <dt className="text-slate-500">기본 연결</dt>
-            <dd className="text-slate-800">{connection.is_default ? '예' : '아니오'}</dd>
+          <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+            <dt className="text-muted">기본 연결</dt>
+            <dd className="text-ink-soft">{connection.is_default ? '예' : '아니오'}</dd>
           </div>
-          <div className="flex justify-between gap-3 border-b border-slate-100 py-1">
-            <dt className="text-slate-500">상태</dt>
-            <dd className="text-slate-800">{connection.active ? '활성' : '비활성'}</dd>
+          <div className="flex justify-between gap-3 border-b border-line-soft py-1">
+            <dt className="text-muted">상태</dt>
+            <dd className="text-ink-soft">{connection.active ? '활성' : '비활성'}</dd>
           </div>
         </dl>
       )}

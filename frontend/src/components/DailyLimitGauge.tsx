@@ -19,13 +19,28 @@ import { isEndpointMissing } from '../api/client';
 import { useDailyLimit } from '../api/queries';
 import type { DailyLimitResponse } from '../api/types';
 import { formatNumber } from '../lib/format';
-import { Badge, Card, EmptyBlock, ErrorBlock, TableWrap, Td, Th, cx } from './ui';
+import { LimitIcon } from './icons';
+import {
+  Badge,
+  Card,
+  Code,
+  EmptyBlock,
+  ErrorBlock,
+  Skeleton,
+  SkeletonRegion,
+  TableWrap,
+  Td,
+  Th,
+  cx,
+} from './ui';
 
 /** 소진율에 따른 톤. 값과 문구는 호출부가 함께 적는다 (색만으로 구분하지 않는다). */
 function toneFor(ratio: number): { bar: string; text: string; label: string } {
-  if (ratio >= 1) return { bar: 'bg-rose-500', text: 'text-rose-700', label: '한도 소진' };
-  if (ratio >= 0.8) return { bar: 'bg-amber-500', text: 'text-amber-700', label: '한도 임박' };
-  return { bar: 'bg-sky-600', text: 'text-slate-700', label: '여유' };
+  if (ratio >= 1)
+    return { bar: 'bg-rose-500', text: 'text-rose-700 dark:text-rose-300', label: '한도 소진' };
+  if (ratio >= 0.8)
+    return { bar: 'bg-amber-500', text: 'text-amber-700 dark:text-amber-300', label: '한도 임박' };
+  return { bar: 'bg-accent', text: 'text-ink-soft', label: '여유' };
 }
 
 /**
@@ -57,7 +72,7 @@ export function LimitBar({
         aria-valuemax={limit}
         aria-valuenow={used}
         aria-label={`${label} — 한도 ${limit}회 중 ${used}회 사용`}
-        className="h-2 w-full overflow-hidden rounded-full bg-slate-200"
+        className="h-2 w-full overflow-hidden rounded-full bg-surface-3"
       >
         <div className={cx('h-full rounded-full transition-all', tone.bar)} style={{ width: `${ratio * 100}%` }} />
       </div>
@@ -87,7 +102,14 @@ export function DailyLimitGauge({ compact = false }: { compact?: boolean }) {
   // 아직 경로가 없는 백엔드에서는 조용히 사라진다 — 실패로 보여줄 일이 아니다.
   if (query.isError && isEndpointMissing(query.error)) return null;
   if (query.isPending) {
-    return compact ? null : <div className="h-2 w-full animate-pulse rounded-full bg-slate-200" />;
+    // compact 는 다른 요약과 한 줄에 놓이는 자리다 — 거기서는 자리만 비워 둔다.
+    return compact ? null : (
+      <SkeletonRegion label="오늘의 분석 한도를 불러오는 중">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="mt-2 h-2 w-full rounded-full" />
+        <Skeleton className="mt-2 h-3 w-52" />
+      </SkeletonRegion>
+    );
   }
   if (query.isError) {
     return compact ? null : <ErrorBlock error={query.error} hint="일일 한도 소진 현황을 읽지 못했습니다." />;
@@ -99,12 +121,12 @@ export function DailyLimitGauge({ compact = false }: { compact?: boolean }) {
   const body = (
     <div>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <p className="text-sm font-semibold text-slate-900">
+        <p className="text-sm font-semibold text-ink">
           오늘 분석{' '}
           <span className="tabular-nums">
             {formatNumber(data.global_used)} / {formatNumber(data.global_limit)}
           </span>
-          <span className="ml-2 text-xs font-normal text-slate-500">
+          <span className="ml-2 text-xs font-normal text-muted">
             남은 {formatNumber(remaining)}회
           </span>
         </p>
@@ -122,7 +144,7 @@ export function DailyLimitGauge({ compact = false }: { compact?: boolean }) {
         label="전역 일일 분석 한도"
       />
       {data.policies.length > 0 && (
-        <p className="mt-1.5 text-xs text-slate-500">
+        <p className="mt-1.5 text-xs text-muted">
           자체 한도를 가진 정책 {formatNumber(data.policies.length)}개는 이 한도와 <strong>따로</strong>{' '}
           더 낮은 상한을 받습니다.
         </p>
@@ -135,11 +157,15 @@ export function DailyLimitGauge({ compact = false }: { compact?: boolean }) {
   return (
     <Card
       title="오늘의 분석 한도"
-      description={
+      description="한도를 넘긴 요청은 서버가 429 로 거절합니다."
+      info={
         <>
-          하루 경계는 <code className="rounded bg-slate-200 px-1">app_settings.timezone</code> 의 로컬
-          자정이며, 한도를 넘긴 요청은 서버가 <strong>429</strong> 로 거절합니다 — 화면이 막는 것이
-          아닙니다.
+          하루 경계는 <Code>app_settings.timezone</Code> 의 <strong>로컬 자정</strong>입니다 —
+          429 를 내는 서버 검사와 같은 계산이라, 서버가 UTC 로 돌아도 기본값이면 KST 자정에
+          리셋됩니다.
+          <span className="mt-1.5 block">
+            거절은 <strong>서버가</strong> 합니다. 화면이 버튼을 막는 것이 아닙니다.
+          </span>
         </>
       }
     >
@@ -165,10 +191,19 @@ export function PolicyDailyLimitTable() {
   return (
     <Card
       title="정책별 일일 한도"
-      description="자체 한도(daily_analysis_limit)를 가진 정책만 표시합니다. 나머지 정책은 위의 전역 한도만 받습니다."
+      description="자체 한도를 가진 정책만 표시합니다."
+      info={
+        <>
+          <Code>daily_analysis_limit</Code> 이 설정된 정책만 여기 나옵니다. 나머지 정책은 위의
+          <strong> 전역 한도</strong>만 받습니다 — 목록이 비어 있다는 것은 "정책마다 별도 상한이
+          있다"가 아니라 <strong>아무도 자체 상한을 두지 않았다</strong>는 뜻입니다.
+        </>
+      }
     >
       {data.policies.length === 0 ? (
-        <EmptyBlock>자체 일일 한도를 설정한 정책이 없습니다 — 전부 전역 한도만 받습니다.</EmptyBlock>
+        <EmptyBlock icon={LimitIcon}>
+          자체 일일 한도를 설정한 정책이 없습니다 — 전부 전역 한도만 받습니다.
+        </EmptyBlock>
       ) : (
         <TableWrap minWidth="32rem">
           <thead>
@@ -181,10 +216,10 @@ export function PolicyDailyLimitTable() {
           </thead>
           <tbody>
             {data.policies.map((policy) => (
-              <tr key={policy.policy_id} className="hover:bg-slate-50">
+              <tr key={policy.policy_id} className="hover:bg-surface-2">
                 <Td>
-                  <p className="font-medium text-slate-900">{policy.name}</p>
-                  <p className="mt-0.5 font-mono text-xs text-slate-400">#{policy.policy_id}</p>
+                  <p className="font-medium text-ink">{policy.name}</p>
+                  <p className="mt-0.5 font-mono text-xs text-faint">#{policy.policy_id}</p>
                 </Td>
                 <Td align="right">{formatNumber(policy.used)}</Td>
                 <Td align="right">{formatNumber(policy.limit)}</Td>
