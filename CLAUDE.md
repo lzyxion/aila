@@ -10,7 +10,7 @@ Loki 에 쌓인 오류 로그를 정책으로 조회하고, 유사 오류를 그
 | `docs/DECISIONS.md` | 구현 중 내린 결정과 이유, 정합 리뷰 교훈, 운영 노트 |
 | `docs/KNOWN-GAPS.md` | **의도적 공백** — 보류 이유와 "다시 볼 조건". 여기 있는 항목을 구현하기 전에 조건을 먼저 확인한다 |
 | `infra/scenarios/*/expected-analysis.md` | 장애 시나리오 6종의 기대 분석 기준선 |
-| 설계 원문 | `~\Documents\Obsidian\Projects\AILA\AILA 설계.md` |
+| 설계 원문 | `~\Documents\Obsidian\Projects\AILA — AI 로그 분석기\AILA — AI 로그 분석기 설계.md` |
 
 ## 명령어
 
