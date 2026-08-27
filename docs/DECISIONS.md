@@ -7,16 +7,16 @@
 | 커밋 | 내용 | 검증 |
 | --- | --- | --- |
 | `52812bd` Phase 0 | 골격 + 공유 계약 고정 (스키마·모델·Provider ABC·라우터 스켈레톤) | 계약 테스트 32 |
-| `dbc6d0b` Phase 1 | 5트랙 병렬: 인프라 / 그룹화·마스킹 / Loki 어댑터 / 정책 API / 프론트 | pytest 201 |
-| `f2f5270` Phase 2 | 2트랙 병렬: LLM 어댑터 / 분석 플로우·usage·보고서 | pytest 307 |
-| `dc1cefc` Phase 3 | E2E 통합 (llm-mock·`scripts/e2e_demo.py`·프론트 라이브 연동) | E2E 9단계 ALL PASS |
-| `8fee831` Phase 3.5 | 정합 리뷰 반영 (high 3 · med 7 · low 8) | pytest 361 |
-| `8ddaf1b` Phase 4 | 1차 사용 피드백 (모델 목록 조회·실행 이력·타임존 한도·UI/UX 버그) | pytest 430 |
-| `222bff9` Phase 5 | 인증(세션 쿠키·RBAC) / 스케줄러 / 통합 대시보드 `summary` | pytest 496 |
-| `498b6e4` Phase 6 | 2차 사용 피드백: 계정 관리·이력 검색·usage 분해·관리 페이지·마스터-디테일·대시보드 강화 | pytest 556 |
-| `2615716` Phase 7 | 대시보드 지표 확장: 시리즈 접기 수정·회차 COUNT·일일 한도 게이지·유입량/오류 비율·수집 중단 경고 | pytest 596 · smoke 168 · 실서버 재현 |
-| `1c3af79` Phase 8 | UI 전면 다듬기 (프론트 전용): 밀도 정리·아이콘·사이드바·다크 모드 | build · smoke ALL PASS (API 무변경) |
-| `46ce599` Phase 9 | Loki 고정 이름 일반화: `logql`→`query`, `loki_connections`→`log_source_connections` (0006, 클린 브레이크) | pytest 596 · smoke · e2e 9단계 ALL PASS |
+| `e4fae0e` Phase 1 | 5트랙 병렬: 인프라 / 그룹화·마스킹 / Loki 어댑터 / 정책 API / 프론트 | pytest 201 |
+| `1dd62bc` Phase 2 | 2트랙 병렬: LLM 어댑터 / 분석 플로우·usage·보고서 | pytest 307 |
+| `fee4578` Phase 3 | E2E 통합 (llm-mock·`scripts/e2e_demo.py`·프론트 라이브 연동) | E2E 9단계 ALL PASS |
+| `854df5c` Phase 3.5 | 정합 리뷰 반영 (high 3 · med 7 · low 8) | pytest 361 |
+| `0f5b2d6` Phase 4 | 1차 사용 피드백 (모델 목록 조회·실행 이력·타임존 한도·UI/UX 버그) | pytest 430 |
+| `eedc71f` Phase 5 | 인증(세션 쿠키·RBAC) / 스케줄러 / 통합 대시보드 `summary` | pytest 496 |
+| `8ffc488` Phase 6 | 2차 사용 피드백: 계정 관리·이력 검색·usage 분해·관리 페이지·마스터-디테일·대시보드 강화 | pytest 556 |
+| `f5e7e06` Phase 7 | 대시보드 지표 확장: 시리즈 접기 수정·회차 COUNT·일일 한도 게이지·유입량/오류 비율·수집 중단 경고 | pytest 596 · smoke 168 · 실서버 재현 |
+| `3d43e77` Phase 8 | UI 전면 다듬기 (프론트 전용): 밀도 정리·아이콘·사이드바·다크 모드 | build · smoke ALL PASS (API 무변경) |
+| `07e7b83` Phase 9 | Loki 고정 이름 일반화: `logql`→`query`, `loki_connections`→`log_source_connections` (0006, 클린 브레이크) | pytest 596 · smoke · e2e 9단계 ALL PASS |
 
 병렬 구현은 두 장치로 가능했다: **계약 우선**(Phase 0 이 정규화 레코드·스키마·Provider 인터페이스를 먼저 고정, 트랙은 계약 시그니처만 보고 mock 으로 개발)과 **파일 소유권**(공유 파일 동결 + 트랙별 소유 디렉터리, 소유 밖 문제는 수정 대신 보고).
 
