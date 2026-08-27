@@ -14,7 +14,6 @@ Loki 에 이미 쌓여 있는 애플리케이션 오류 로그를 운영자가 �
 구조적으로 막는다. 되돌릴 수 없는 위험은 민감정보 유출 하나뿐이므로, 우선순위를 다툴 일이
 생기면 마스킹을 먼저 완성한다.
 
-> 설계 원문: `AILA — AI 로그 분석기 설계.md` (Obsidian vault, `Projects/AILA — AI 로그 분석기/`)
 > `/api/**` 는 세션 쿠키 인증으로 막혀 있지만(Phase 5), 기본 계정이 `admin/admin`
 > 이고 쿠키가 `secure=false` 다. 배포 대상은 여전히 **로컬·데모 환경으로 한정**한다.
 
@@ -26,7 +25,7 @@ Loki 에 이미 쌓여 있는 애플리케이션 오류 로그를 운영자가 �
 분석 단계는 `infra/llm-mock`(OpenAI 호환 스텁)이 받는다.
 
 ```powershell
-cd aila
+cd aila   # 저장소 루트
 
 # 1) 전체 스택 (postgres·loki·alloy·grafana·demo-api·llm-mock·backend·frontend)
 docker compose --profile app up -d --build
@@ -455,7 +454,7 @@ curl.exe -b admin.jar -X POST http://localhost:8000/api/auth/users `
 
 ## Phase 7 — 대시보드 지표 확장
 
-지표 공백 검증(옵시디언 "로그 모니터링 지표와 현재 대시보드의 공백" 문서)의 후속.
+표준 로그 모니터링 지표 3축(수집 건전성·오류의 변화·AI 레이어)과 구현을 대조한 지표 공백 검증의 후속.
 접기·COUNT 공용 규칙은 `backend/app/dashboard/counting.py` 한 곳에 있다.
 
 ### overview 확장 — `GET /api/dashboard/overview`

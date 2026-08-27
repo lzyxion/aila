@@ -66,7 +66,7 @@ infra/
 ## 기동
 
 ```powershell
-cd aila
+cd aila   # 저장소 루트
 
 docker compose up -d --build          # 데모 스택 (postgres·loki·alloy·grafana·demo-api)
 docker compose ps
