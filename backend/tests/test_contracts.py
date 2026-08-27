@@ -314,8 +314,10 @@ def _routes(api: FastAPI) -> set[tuple[str, str]]:
 
 
 #: 설계 문서 "API 초안" 의 13 행 전부. Phase 1 에서 이 목록이 줄어들면 안 된다.
+#: Phase 9 에서 `/api/loki-connections` 계열만 `/api/log-source-connections` 로 개명했다
+#: (별칭 없는 순수 rename — 설계 문서의 옛 경로와 대조할 때 이 한 줄을 보라).
 DESIGN_DOC_ROUTES: set[tuple[str, str]] = {
-    ("POST", "/api/loki-connections/test"),
+    ("POST", "/api/log-source-connections/test"),
     ("GET", "/api/llm-connections"),
     ("POST", "/api/llm-connections"),
     ("POST", "/api/llm-connections/test"),
@@ -336,12 +338,12 @@ DESIGN_DOC_ROUTES: set[tuple[str, str]] = {
 
 #: Phase 0 에서 추가한 라우트 (설계 문서 표에는 없으나 화면 구성·데이터 모델상 필요).
 ADDITIONAL_ROUTES: set[tuple[str, str]] = {
-    ("GET", "/api/loki-connections"),
-    ("POST", "/api/loki-connections"),
-    ("GET", "/api/loki-connections/{connection_id}"),
-    ("PATCH", "/api/loki-connections/{connection_id}"),
-    ("DELETE", "/api/loki-connections/{connection_id}"),
-    ("GET", "/api/loki-connections/{connection_id}/labels"),
+    ("GET", "/api/log-source-connections"),
+    ("POST", "/api/log-source-connections"),
+    ("GET", "/api/log-source-connections/{connection_id}"),
+    ("PATCH", "/api/log-source-connections/{connection_id}"),
+    ("DELETE", "/api/log-source-connections/{connection_id}"),
+    ("GET", "/api/log-source-connections/{connection_id}/labels"),
     ("GET", "/api/llm-connections/{connection_id}"),
     ("PATCH", "/api/llm-connections/{connection_id}"),
     ("DELETE", "/api/llm-connections/{connection_id}"),
@@ -407,7 +409,7 @@ def test_request_validation_still_applies(client: TestClient) -> None:
 
 def test_models_cover_design_doc_tables() -> None:
     expected = {
-        "loki_connections",
+        "log_source_connections",
         "llm_connections",
         "analysis_policies",
         "query_runs",

@@ -103,7 +103,7 @@ export function QueryRunPage() {
               sub="실제 조회 라인 수"
               info={
                 <>
-                  Loki 에서 <strong>실제로 읽어 온 로그 라인 수</strong>입니다 — 대시보드의{' '}
+                  로그 소스에서 <strong>실제로 읽어 온 로그 라인 수</strong>입니다 — 대시보드의{' '}
                   <Code>count_over_time</Code> metric 건수와 다른 값입니다.
                   <span className="mt-1.5 block">
                     라인 수 상한은 <strong>서버가</strong> 강제하므로 이 값은 정책의{' '}

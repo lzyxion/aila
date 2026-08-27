@@ -307,25 +307,25 @@ def step_preflight(api: Api, args: argparse.Namespace) -> None:
 
     # 마이그레이션이 안 돌았으면 여기서 명확히 죽는 편이 낫다.
     try:
-        api.get("/api/loki-connections")
+        api.get("/api/log-source-connections")
     except Fail as exc:
         raise Fail(
             "백엔드가 DB 를 읽지 못합니다. 마이그레이션을 먼저 적용하십시오.\n"
             "      docker compose --profile app exec backend alembic upgrade head\n"
             f"      원인: {exc}"
         ) from exc
-    ok("DB 스키마 적용 확인 (/api/loki-connections 응답)")
+    ok("DB 스키마 적용 확인 (/api/log-source-connections 응답)")
 
 
-def step_loki_connection(api: Api, args: argparse.Namespace) -> int:
+def step_log_source_connection(api: Api, args: argparse.Namespace) -> int:
     step("a. Loki 연결 등록 + 연결 테스트")
 
-    existing = api.get("/api/loki-connections")
+    existing = api.get("/api/log-source-connections")
     match = next((item for item in existing if item["name"] == LOKI_CONNECTION_NAME), None)
 
     if match is None:
         created = api.post(
-            "/api/loki-connections",
+            "/api/log-source-connections",
             {
                 "name": LOKI_CONNECTION_NAME,
                 "source_type": "loki",
@@ -342,21 +342,21 @@ def step_loki_connection(api: Api, args: argparse.Namespace) -> int:
         connection_id = int(match["id"])
         if match["base_url"] != args.loki_url or not match["active"]:
             api.patch(
-                f"/api/loki-connections/{connection_id}",
+                f"/api/log-source-connections/{connection_id}",
                 {"base_url": args.loki_url, "active": True},
             )
             ok(f"기존 연결 id={connection_id} 갱신 (base_url={args.loki_url})")
         else:
             ok(f"기존 연결 재사용 id={connection_id}")
 
-    result = api.post("/api/loki-connections/test", {"connection_id": connection_id})
+    result = api.post("/api/log-source-connections/test", {"connection_id": connection_id})
     check(
         result.get("ok") is True,
         f"연결 테스트 ok=True ({result.get('latency_ms')}ms) — {result.get('message', '')}",
         detail=_short(result),
     )
 
-    labels = api.get(f"/api/loki-connections/{connection_id}/labels")
+    labels = api.get(f"/api/log-source-connections/{connection_id}/labels")
     check(
         "service" in labels.get("labels", []),
         f"라벨 탐색에 service 존재 (총 {len(labels.get('labels', []))} 개)",
@@ -450,16 +450,16 @@ def step_policy(
     *,
     connection_id: int,
     name: str,
-    logql: str,
+    query: str,
     description: str,
 ) -> dict[str, Any]:
     existing = api.get("/api/policies")
     match = next((item for item in existing if item["name"] == name), None)
     body = {
-        "loki_connection_id": connection_id,
+        "log_source_connection_id": connection_id,
         "name": name,
         "description": description,
-        "logql": logql,
+        "query": query,
         "default_range_minutes": 60,
         "max_lines": 1000,
         "exclusions": [],
@@ -473,7 +473,7 @@ def step_policy(
     else:
         policy = api.patch(f"/api/policies/{match['id']}", {**body, "active": True})
         ok(f"정책 재사용/갱신 id={policy['id']} · {name}")
-    info(f"logql = {logql}")
+    info(f"query = {query}")
     return policy
 
 
@@ -488,8 +488,8 @@ def step_preview_and_run(
             api.post(
                 "/api/policies/preview",
                 {
-                    "loki_connection_id": connection_id,
-                    "logql": policy["logql"],
+                    "log_source_connection_id": connection_id,
+                    "query": policy["query"],
                     "range_minutes": 60,
                     "limit": 50,
                     "exclusions": [],
@@ -807,28 +807,28 @@ def main() -> int:
     started = time.monotonic()
     try:
         step_preflight(api, args)
-        loki_id = step_loki_connection(api, args)
+        connection_id = step_log_source_connection(api, args)
         step_llm_connection(api, args)
         step_trigger_scenarios(args)
 
         step("d. 정책 생성 → 미리보기 → 실행(query-run) → 오류 그룹")
         error_policy = step_policy(
             api,
-            connection_id=loki_id,
+            connection_id=connection_id,
             name=ERROR_POLICY_NAME,
-            logql=ERROR_LOGQL,
+            query=ERROR_LOGQL,
             description="payment-api 의 ERROR 로그. 시나리오 01·05 의 급증을 본다.",
         )
-        error_run = step_preview_and_run(api, policy=error_policy, connection_id=loki_id)
+        error_run = step_preview_and_run(api, policy=error_policy, connection_id=connection_id)
 
         secret_policy = step_policy(
             api,
-            connection_id=loki_id,
+            connection_id=connection_id,
             name=SECRET_POLICY_NAME,
-            logql=SECRET_LOGQL,
+            query=SECRET_LOGQL,
             description="시나리오 06. 마스킹이 화면·전송 두 경로 모두에서 걸리는지 본다.",
         )
-        secret_run = step_preview_and_run(api, policy=secret_policy, connection_id=loki_id)
+        secret_run = step_preview_and_run(api, policy=secret_policy, connection_id=connection_id)
 
         secret_group = step_masking_on_screen(api, run=secret_run, secrets=secrets)
 

@@ -49,7 +49,7 @@ class LogSourceProvider(ABC):
     #: (경고도 남기지 않는다 — 소스가 못 하는 일은 정책 설정의 문제가 아니다).
     supports_presence: bool = False
 
-    #: 소스 종류 식별자 (`loki_connections.source_type` 값과 같아야 한다).
+    #: 소스 종류 식별자 (`log_source_connections.source_type` 값과 같아야 한다).
     source_type: str = "loki"
 
     @abstractmethod

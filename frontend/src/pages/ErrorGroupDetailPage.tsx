@@ -70,7 +70,12 @@ import {
   formatTokens,
   jobStatusLabel,
 } from '../lib/format';
-import { copyToClipboard, downloadMarkdown, lokiSelector, renderReportMarkdown } from '../lib/report';
+import {
+  copyToClipboard,
+  downloadMarkdown,
+  renderReportMarkdown,
+  selectorFromLabels,
+} from '../lib/report';
 
 export function ErrorGroupDetailPage() {
   const params = useParams<{ groupId: string }>();
@@ -229,7 +234,7 @@ export function ErrorGroupDetailPage() {
                 규칙 <Code>{group.normalization_rule_version}</Code> 을 적용했습니다.
                 <span className="mt-1.5 block">
                   마스킹 전 원본은 <strong>저장하지 않습니다</strong> — 원본이 필요하면 아래{' '}
-                  <strong>원본 로그로 돌아가기</strong> 의 셀렉터로 Loki 에서 직접 재조회합니다.
+                  <strong>원본 로그로 돌아가기</strong> 의 셀렉터로 로그 소스에서 다시 조회합니다.
                 </span>
               </>
             }
@@ -447,16 +452,17 @@ function SampleBlock({ sample }: { sample: ErrorSampleRead }) {
 
 function OriginalLogCard({ group }: { group: ErrorGroupDetail }) {
   const [copied, setCopied] = useState(false);
-  const selector = lokiSelector(group);
+  const selector = selectorFromLabels(group);
 
   return (
     <Card
       title="원본 로그로 돌아가기"
-      description="아래 셀렉터와 시간 범위로 Loki 에서 직접 재조회하십시오."
+      description="아래 셀렉터와 시간 범위로 로그 소스에서 다시 조회하십시오."
       info={
         <>
-          마스킹 전 원본은 <strong>저장하지 않습니다</strong> — 이 도구는 Loki 를 읽기만 하므로,
-          원본이 필요하면 Loki(또는 Grafana)에서 같은 조건으로 다시 조회하는 것이 유일한 방법입니다.
+          마스킹 전 원본은 <strong>저장하지 않습니다</strong> — 이 도구는 로그 소스를 읽기만 하므로,
+          원본이 필요하면 로그 소스(Loki 면 Grafana)에서 같은 조건으로 다시 조회하는 것이 유일한
+          방법입니다.
         </>
       }
       actions={
@@ -470,7 +476,7 @@ function OriginalLogCard({ group }: { group: ErrorGroupDetail }) {
           }}
         >
           <CopyIcon aria-hidden className="size-3.5" />
-          {copied ? '복사됨' : 'LogQL 복사'}
+          {copied ? '복사됨' : '셀렉터 복사'}
         </Button>
       }
     >

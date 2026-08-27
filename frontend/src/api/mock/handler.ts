@@ -44,10 +44,10 @@ import type {
   LLMModelListResponse,
   LLMProviderName,
   LoginRequest,
-  LokiConnectionCreate,
-  LokiConnectionRead,
-  LokiConnectionTestRequest,
-  LokiConnectionUpdate,
+  LogSourceConnectionCreate,
+  LogSourceConnectionRead,
+  LogSourceConnectionTestRequest,
+  LogSourceConnectionUpdate,
   ModelPricingTable,
   PolicyCreate,
   PolicyPreviewRequest,
@@ -86,7 +86,7 @@ import {
   groupSeeds,
   iso,
   llmConnectionSeed,
-  lokiConnectionSeed,
+  logSourceConnectionSeed,
   makeSeries,
   policySeed,
   seriesShapes,
@@ -108,7 +108,7 @@ interface MockState {
   users: UserRead[];
   /** username -> 비밀번호. 실제 백엔드는 scrypt 해시만 갖지만 mock 은 로그인만 재현하면 된다. */
   passwords: Record<string, string>;
-  lokiConnections: LokiConnectionRead[];
+  logSourceConnections: LogSourceConnectionRead[];
   llmConnections: LLMConnectionRead[];
   policies: PolicyRead[];
   queryRuns: QueryRunRead[];
@@ -219,13 +219,13 @@ function ingestAbsentWarning(expected: string[] | undefined): FetchWarning | nul
 }
 
 /** 시드 회차(5001)의 수집 중단 경고. 연결 1 의 `expected_services` 에서 나온다. */
-const SEED_INGEST_ABSENT = ingestAbsentWarning(lokiConnectionSeed[0].expected_services);
+const SEED_INGEST_ABSENT = ingestAbsentWarning(logSourceConnectionSeed[0].expected_services);
 
 const state: MockState = {
   session: loadSession(),
   users: structuredClone(userSeed),
   passwords: { ...INITIAL_PASSWORDS },
-  lokiConnections: structuredClone(lokiConnectionSeed),
+  logSourceConnections: structuredClone(logSourceConnectionSeed),
   llmConnections: structuredClone(llmConnectionSeed),
   policies: structuredClone(policySeed),
   queryRuns: [
@@ -630,13 +630,13 @@ route('DELETE', /^\/api\/auth\/users\/(\d+)$/, ([id]) => {
   return undefined;
 });
 
-// --- loki connections -------------------------------------------------------
+// --- log source connections -------------------------------------------------
 
-route('GET', /^\/api\/loki-connections$/, () => state.lokiConnections);
+route('GET', /^\/api\/log-source-connections$/, () => state.logSourceConnections);
 
-route('POST', /^\/api\/loki-connections$/, (_p, { body }) => {
-  const payload = body as LokiConnectionCreate;
-  const created: LokiConnectionRead = {
+route('POST', /^\/api\/log-source-connections$/, (_p, { body }) => {
+  const payload = body as LogSourceConnectionCreate;
+  const created: LogSourceConnectionRead = {
     id: nextId(),
     name: payload.name,
     source_type: payload.source_type ?? 'loki',
@@ -651,15 +651,15 @@ route('POST', /^\/api\/loki-connections$/, (_p, { body }) => {
     created_at: nowIso(),
     updated_at: nowIso(),
   };
-  state.lokiConnections.push(created);
+  state.logSourceConnections.push(created);
   return created;
 });
 
-route('POST', /^\/api\/loki-connections\/test$/, (_p, { body }) => {
-  const payload = body as LokiConnectionTestRequest;
+route('POST', /^\/api\/log-source-connections\/test$/, (_p, { body }) => {
+  const payload = body as LogSourceConnectionTestRequest;
   const target =
     payload.base_url ??
-    state.lokiConnections.find((c) => c.id === payload.connection_id)?.base_url ??
+    state.logSourceConnections.find((c) => c.id === payload.connection_id)?.base_url ??
     '';
   const ok = /^https?:\/\//.test(target);
   const response: ConnectionTestResponse = ok
@@ -678,16 +678,16 @@ route('POST', /^\/api\/loki-connections\/test$/, (_p, { body }) => {
   return response;
 });
 
-route('GET', /^\/api\/loki-connections\/(\d+)$/, ([id]) => {
-  const found = state.lokiConnections.find((c) => c.id === Number(id));
+route('GET', /^\/api\/log-source-connections\/(\d+)$/, ([id]) => {
+  const found = state.logSourceConnections.find((c) => c.id === Number(id));
   if (!found) throw new ApiError(404, `연결 ${id} 을(를) 찾을 수 없습니다.`);
   return found;
 });
 
-route('PATCH', /^\/api\/loki-connections\/(\d+)$/, ([id], { body }) => {
-  const found = state.lokiConnections.find((c) => c.id === Number(id));
+route('PATCH', /^\/api\/log-source-connections\/(\d+)$/, ([id], { body }) => {
+  const found = state.logSourceConnections.find((c) => c.id === Number(id));
   if (!found) throw new ApiError(404, `연결 ${id} 을(를) 찾을 수 없습니다.`);
-  const payload = body as LokiConnectionUpdate;
+  const payload = body as LogSourceConnectionUpdate;
   if (payload.name != null) found.name = payload.name;
   if (payload.base_url != null) found.base_url = payload.base_url;
   if (payload.auth_type != null) found.auth_type = payload.auth_type;
@@ -701,13 +701,13 @@ route('PATCH', /^\/api\/loki-connections\/(\d+)$/, ([id], { body }) => {
   return found;
 });
 
-route('DELETE', /^\/api\/loki-connections\/(\d+)$/, ([id]) => {
-  const found = state.lokiConnections.find((c) => c.id === Number(id));
+route('DELETE', /^\/api\/log-source-connections\/(\d+)$/, ([id]) => {
+  const found = state.logSourceConnections.find((c) => c.id === Number(id));
   if (found) found.active = false;
   return undefined;
 });
 
-route('GET', /^\/api\/loki-connections\/(\d+)\/labels$/, () => {
+route('GET', /^\/api\/log-source-connections\/(\d+)\/labels$/, () => {
   const response: LabelValuesResponse = {
     labels: ['service', 'environment', 'level', 'release', 'pod', 'namespace'],
     values: {
@@ -856,10 +856,10 @@ route('POST', /^\/api\/policies$/, (_p, { body }) => {
   const payload = body as PolicyCreate;
   const created: PolicyRead = {
     id: nextId(),
-    loki_connection_id: payload.loki_connection_id,
+    log_source_connection_id: payload.log_source_connection_id,
     name: payload.name,
     description: payload.description ?? null,
-    logql: payload.logql,
+    query: payload.query,
     // 빈 문자열은 미설정과 같다 — 화면이 빈 입력을 null 로 보내지만, 다른 클라이언트가
     // 빈 문자열을 보내도 "설정했는데 아무것도 못 세는" 상태를 만들지 않는다.
     baseline_query: payload.baseline_query?.trim() || null,
@@ -885,20 +885,20 @@ route('POST', /^\/api\/policies$/, (_p, { body }) => {
 
 route('POST', /^\/api\/policies\/preview$/, (_p, { body }) => {
   const payload = body as PolicyPreviewRequest;
-  const logql = payload.logql.trim();
+  const query = payload.query.trim();
 
-  if (!logql.startsWith('{')) {
+  if (!query.startsWith('{')) {
     throw new ApiError(400, 'LogQL 은 스트림 셀렉터 `{...}` 로 시작해야 합니다.');
   }
 
-  const matchesNothing = /nonexistent|__none__/.test(logql);
-  const usesJson = logql.includes('| json');
-  const handlesParseError = logql.includes('__error__');
+  const matchesNothing = /nonexistent|__none__/.test(query);
+  const usesJson = query.includes('| json');
+  const handlesParseError = query.includes('__error__');
 
   const source = groupSeeds.flatMap((seed) =>
     seed.samples.map((sample) => ({ line: sample.masked_log, service: seed.service })),
   );
-  const serviceMatch = /service\s*=\s*"([^"]+)"/.exec(logql);
+  const serviceMatch = /service\s*=\s*"([^"]+)"/.exec(query);
   const filtered = source
     .filter((row) => (serviceMatch ? row.service === serviceMatch[1] : true))
     .filter((row) => !payload.exclusions.some((pattern) => safeMatch(pattern, row.line)));
@@ -965,10 +965,10 @@ route('PATCH', /^\/api\/policies\/(\d+)$/, ([id], { body }) => {
   const found = state.policies.find((p) => p.id === Number(id));
   if (!found) throw new ApiError(404, `정책 ${id} 을(를) 찾을 수 없습니다.`);
   const payload = body as PolicyUpdate;
-  if (payload.loki_connection_id != null) found.loki_connection_id = payload.loki_connection_id;
+  if (payload.log_source_connection_id != null) found.log_source_connection_id = payload.log_source_connection_id;
   if (payload.name != null) found.name = payload.name;
   if (payload.description !== undefined) found.description = payload.description;
-  if (payload.logql != null) found.logql = payload.logql;
+  if (payload.query != null) found.query = payload.query;
   // 명시적 null 이 분모 쿼리를 **지운다**. 생략은 변경 없음이다.
   if (payload.baseline_query !== undefined) {
     found.baseline_query = payload.baseline_query?.trim() || null;
@@ -1038,7 +1038,7 @@ route('POST', /^\/api\/policies\/(\d+)\/query-runs$/, ([id], { body }) => {
         실행하는 순간 홈 카드의 배지가 조용히 사라진다(가장 최근 회차가 기준이므로).
       */
       ...(() => {
-        const connection = state.lokiConnections.find((c) => c.id === policy.loki_connection_id);
+        const connection = state.logSourceConnections.find((c) => c.id === policy.log_source_connection_id);
         const warning = ingestAbsentWarning(connection?.expected_services);
         return warning ? [warning] : [];
       })(),

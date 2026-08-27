@@ -1,7 +1,7 @@
 /**
  * 관리 영역(`/admin`)의 껍데기 — 탭 + 권한 가드.
  *
- * 여기 모인 다섯 화면(LLM 연결·Loki 연결·분석 이력·사용량·사용자 관리)의 공통점은 "매일 보는 화면이
+ * 여기 모인 다섯 화면(LLM 연결·로그 소스 연결·분석 이력·사용량·사용자 관리)의 공통점은 "매일 보는 화면이
  * 아니고, 잘못 누르면 비용이나 접근 권한이 움직인다"는 것이다. 일반 영역과 섞어 두면
  * 매일 쓰는 대시보드와 한 달에 한 번 여는 계정 관리가 같은 무게로 보인다.
  *
@@ -20,7 +20,7 @@ import { useAuth } from '../auth/AuthContext';
 import {
   AnalysisJobIcon,
   LlmConnectionIcon,
-  LokiConnectionIcon,
+  LogSourceConnectionIcon,
   UsageIcon,
   UsersIcon,
   type LucideIcon,
@@ -36,10 +36,10 @@ const TABS: Array<{ to: string; label: string; hint: string; icon: LucideIcon }>
     icon: LlmConnectionIcon,
   },
   {
-    to: '/admin/loki-connections',
-    label: 'Loki 연결',
+    to: '/admin/log-source-connections',
+    label: '로그 소스 연결',
     hint: '로그 소스 주소·인증·라벨 매핑 · 수집 확인 대상 서비스',
-    icon: LokiConnectionIcon,
+    icon: LogSourceConnectionIcon,
   },
   {
     to: '/admin/analysis-jobs',
@@ -121,7 +121,7 @@ function AdminDenied() {
       <Card title="권한 없음">
         <Notice tone="neutral" title="읽기 전용(viewer) 계정입니다">
           <p>
-            관리 영역의 다섯 화면(LLM 연결·Loki 연결·분석 이력·사용량·사용자 관리)은 연결 설정·비용·계정을
+            관리 영역의 다섯 화면(LLM 연결·로그 소스 연결·분석 이력·사용량·사용자 관리)은 연결 설정·비용·계정을
             다루므로 <strong>admin 계정</strong>만 열 수 있습니다. 지금 계정은{' '}
             <strong>{user?.username ?? '알 수 없음'}</strong> 이고 역할은 <strong>viewer</strong>{' '}
             입니다.

@@ -188,9 +188,9 @@ export interface ConnectionTestResponse {
   details: Record<string, unknown>;
 }
 
-// =========================================================== loki connections
+// ===================================================== log source connections
 
-export interface LokiConnectionBase {
+export interface LogSourceConnectionBase {
   name: string;
   source_type: SourceType;
   base_url: string;
@@ -206,12 +206,12 @@ export interface LokiConnectionBase {
   expected_services: string[];
 }
 
-export interface LokiConnectionCreate extends LokiConnectionBase {
+export interface LogSourceConnectionCreate extends LogSourceConnectionBase {
   /** 평문 입력 전용. 응답에는 절대 포함되지 않는다. */
   secret?: string | null;
 }
 
-export interface LokiConnectionUpdate {
+export interface LogSourceConnectionUpdate {
   name?: string | null;
   base_url?: string | null;
   auth_type?: AuthType | null;
@@ -222,14 +222,14 @@ export interface LokiConnectionUpdate {
   expected_services?: string[] | null;
 }
 
-export interface LokiConnectionRead extends LokiConnectionBase {
+export interface LogSourceConnectionRead extends LogSourceConnectionBase {
   id: number;
   has_secret: boolean;
   created_at: string;
   updated_at: string;
 }
 
-export interface LokiConnectionTestRequest {
+export interface LogSourceConnectionTestRequest {
   connection_id?: number | null;
   base_url?: string | null;
   auth_type?: AuthType;
@@ -316,11 +316,11 @@ export interface LLMModelListResponse {
 // ================================================================== policies
 
 export interface PolicyBase {
-  loki_connection_id: number;
+  log_source_connection_id: number;
   name: string;
   description?: string | null;
   /** 소스 고유 문법 그대로 저장한다 (공통 DSL 로 번역하지 않는다). */
-  logql: string;
+  query: string;
   default_range_minutes: number;
   max_lines: number;
   /** 제외 정규식 목록 */
@@ -352,10 +352,10 @@ export interface PolicyBase {
 export type PolicyCreate = PolicyBase;
 
 export interface PolicyUpdate {
-  loki_connection_id?: number | null;
+  log_source_connection_id?: number | null;
   name?: string | null;
   description?: string | null;
-  logql?: string | null;
+  query?: string | null;
   default_range_minutes?: number | null;
   max_lines?: number | null;
   exclusions?: string[] | null;
@@ -401,8 +401,8 @@ export function policySchedule(policy: {
 
 /** 저장 전 실행 결과 미리보기. 잘못 쓴 쿼리가 정책으로 굳는 것을 막는다. */
 export interface PolicyPreviewRequest {
-  loki_connection_id: number;
-  logql: string;
+  log_source_connection_id: number;
+  query: string;
   range_minutes: number;
   limit: number;
   exclusions: string[];

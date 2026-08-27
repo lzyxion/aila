@@ -30,7 +30,7 @@ export {
 
   // ------------------------------------------------------ 관리 영역 하위 항목
   Cpu as LlmConnectionIcon,
-  Database as LokiConnectionIcon,
+  Database as LogSourceConnectionIcon,
   History as AnalysisJobIcon,
   Receipt as UsageIcon,
   Users as UsersIcon,

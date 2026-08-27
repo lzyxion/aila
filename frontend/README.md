@@ -54,7 +54,7 @@ Phase 1 시점에는 백엔드 대부분의 엔드포인트가 501 이라 기본
 | 경로 | 화면 | 핵심 요소 |
 | --- | --- | --- |
 | `/admin/llm-connections` | LLM 연결 | 좌측 연결 목록 + 우측 상세·수정. **API 키 바로 아래에 "모델 목록 조회" 버튼과 모델 드롭다운**(키를 넣은 손이 그대로 이어지는 순서). 키가 없으면 버튼을 잠그고 **사유를 같은 자리에 적는다.** 연결 테스트·기본 지정·비활성화는 상세 쪽 |
-| `/admin/loki-connections` | Loki 연결 | 좌측 연결 목록 + 우측 상세·수정(주소·인증·secret·라벨 매핑). **수집 확인 대상 서비스(`expected_services`)** 를 여기서 정한다 — 적힌 서비스가 조회 기간에 로그를 한 줄도 안 내면 `ingest_absent` 경고가 회차에 남는다(**경고 기록일 뿐 알림·자동 실행이 아니다**) |
+| `/admin/log-source-connections` | 로그 소스 연결 | 좌측 연결 목록 + 우측 상세·수정(주소·인증·secret·라벨 매핑). **수집 확인 대상 서비스(`expected_services`)** 를 여기서 정한다 — 적힌 서비스가 조회 기간에 로그를 한 줄도 안 내면 `ingest_absent` 경고가 회차에 남는다(**경고 기록일 뿐 알림·자동 실행이 아니다**) |
 | `/admin/analysis-jobs` | 분석 이력 | **검색(`q`)·기간 범위(`requested_from/to`)·상태 필터 + 페이지네이션.** 검색은 엔터·버튼에서만 보낸다(한 글자마다 DB 를 훑지 않는다) |
 | `/admin/usage` | 사용량 | **오늘의 분석 한도 게이지 + 정책별 한도 표**, 요약 타일, **일별 사용량**(토큰 스택 + 추정 비용) · **정책별 사용량**(가로 막대), 모델별 토큰·집계, **단가 미등록 모델의 인라인 단가 등록** |
 | `/admin/users` | 사용자 관리 | 목록(역할·활성 배지), 생성, 역할 변경·비밀번호 재설정·비활성/재활성. **자기 자신·마지막 admin 보호는 서버 409 를 그대로 표시한다** |
@@ -117,7 +117,7 @@ src/
 
 ## 대시보드 지표 · 수집 중단 · 일일 한도 (Phase 7)
 
-정책에 `baseline_query`(분모 쿼리), Loki 연결에 `expected_services`(수집 확인 대상)가 붙고,
+정책에 `baseline_query`(분모 쿼리), 로그 소스 연결에 `expected_services`(수집 확인 대상)가 붙고,
 `GET /api/dashboard/overview` 에 지표 다섯 개(`group_count` · `unanalyzed_group_count` ·
 `ingest_total` · `ingest_series` · `error_ratio`)가, `GET /api/usage/daily-limit` 에 한도
 게이지가 생겼다.

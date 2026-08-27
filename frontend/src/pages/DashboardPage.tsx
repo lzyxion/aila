@@ -258,7 +258,7 @@ export function DashboardPage() {
       */}
       <Card
         title="정책 실행"
-        description="선택한 정책의 LogQL 로 Loki 를 지금 조회하고 결과를 그룹으로 묶습니다."
+        description="선택한 정책의 쿼리로 로그 소스를 지금 조회하고 결과를 그룹으로 묶습니다."
         info={
           <>
             분석(LLM 호출)은 여기서 실행되지 않습니다 — <strong>그룹 상세</strong>에서 따로
@@ -324,7 +324,7 @@ export function DashboardPage() {
             title={
               write.reason ??
               (selectedPolicy
-                ? `${selectedPolicy.name} 정책으로 Loki 를 조회합니다.`
+                ? `${selectedPolicy.name} 정책으로 로그 소스를 조회합니다.`
                 : '실행할 정책을 먼저 고르십시오.')
             }
             onClick={() => {
@@ -353,7 +353,7 @@ export function DashboardPage() {
           </p>
         )}
 
-        {/* LogQL 은 길고 늘 볼 필요는 없다 — 접어 두되 한 번의 클릭으로 펼쳐진다. */}
+        {/* 쿼리는 길고 늘 볼 필요는 없다 — 접어 두되 한 번의 클릭으로 펼쳐진다. */}
         {selectedPolicy && (
           <details className="group mt-3">
             {/* `list-none` 만으로는 Safari 의 기본 삼각형이 남는다 — 웹킷 마커까지 지운다. */}
@@ -362,10 +362,10 @@ export function DashboardPage() {
                 aria-hidden
                 className="size-3.5 transition-transform group-open:rotate-90"
               />
-              LogQL 보기
+              쿼리 보기
             </summary>
             <div className="mt-2">
-              <LogLine>{selectedPolicy.logql}</LogLine>
+              <LogLine>{selectedPolicy.query}</LogLine>
             </div>
           </details>
         )}

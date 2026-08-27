@@ -23,7 +23,7 @@ import type {
   ErrorGroupDetail,
   ErrorGroupListResponse,
   LLMModelListResponse,
-  LokiConnectionRead,
+  LogSourceConnectionRead,
   PolicyPreviewResponse,
   PolicyRead,
   QueryRunListResponse,
@@ -110,9 +110,9 @@ async function main(): Promise<void> {
       () =>
         mockRequest('POST', '/api/policies', {
           body: {
-            loki_connection_id: 1,
+            log_source_connection_id: 1,
             name: 'viewer-should-fail',
-            logql: '{service="payment-api"}',
+            query: '{service="payment-api"}',
             default_range_minutes: 30,
             max_lines: 100,
             exclusions: [],
@@ -340,7 +340,7 @@ async function main(): Promise<void> {
       .series.length > 0,
   );
 
-  // 계약 5 — 카드 스파크라인. 추가 Loki 호출 없이 **같은 count_over_time 결과**를 재사용하므로
+  // 계약 5 — 카드 스파크라인. 추가 로그 소스 호출 없이 **같은 count_over_time 결과**를 재사용하므로
   // 시리즈 합계와 total_errors_24h 가 어긋나면 두 값이 다른 출처라는 뜻이다.
   check(
     'series_24h 가 실린다',
@@ -456,9 +456,9 @@ async function main(): Promise<void> {
   );
   const withSchedule = await mockRequest<PolicyRead>('POST', '/api/policies', {
     body: {
-      loki_connection_id: 1,
+      log_source_connection_id: 1,
       name: 'smoke-schedule',
-      logql: '{service="payment-api"}',
+      query: '{service="payment-api"}',
       default_range_minutes: 30,
       max_lines: 100,
       exclusions: [],
@@ -579,9 +579,9 @@ async function main(): Promise<void> {
   console.log('policies');
   const created = await mockRequest<PolicyRead>('POST', '/api/policies', {
     body: {
-      loki_connection_id: 1,
+      log_source_connection_id: 1,
       name: 'smoke',
-      logql: '{service="payment-api"}',
+      query: '{service="payment-api"}',
       default_range_minutes: 30,
       max_lines: 100,
       exclusions: [],
@@ -602,8 +602,8 @@ async function main(): Promise<void> {
 
   const preview = await mockRequest<PolicyPreviewResponse>('POST', '/api/policies/preview', {
     body: {
-      loki_connection_id: 1,
-      logql: '{service="payment-api"} | json | level="ERROR"',
+      log_source_connection_id: 1,
+      query: '{service="payment-api"} | json | level="ERROR"',
       range_minutes: 60,
       limit: 20,
       exclusions: [],
@@ -651,9 +651,9 @@ async function main(): Promise<void> {
   );
   const withBaseline = await mockRequest<PolicyRead>('POST', '/api/policies', {
     body: {
-      loki_connection_id: 1,
+      log_source_connection_id: 1,
       name: 'smoke-baseline',
-      logql: '{service="payment-api"} | json | level="ERROR"',
+      query: '{service="payment-api"} | json | level="ERROR"',
       baseline_query: '{service="payment-api"}',
       default_range_minutes: 30,
       max_lines: 100,
@@ -678,17 +678,17 @@ async function main(): Promise<void> {
   await mockRequest<void>('DELETE', `/api/policies/${withBaseline.id}`, {});
 
   console.log('수집 확인 대상 (계약 — expected_services)');
-  const lokiConns = await mockRequest<LokiConnectionRead[]>('GET', '/api/loki-connections', {});
+  const logSourceConns = await mockRequest<LogSourceConnectionRead[]>('GET', '/api/log-source-connections', {});
   check(
     '연결에 expected_services 가 실린다',
-    lokiConns.every((connection) => Array.isArray(connection.expected_services)),
+    logSourceConns.every((connection) => Array.isArray(connection.expected_services)),
   );
   check(
     '확인 대상이 있는 연결과 없는 연결이 둘 다 있다',
-    lokiConns.some((connection) => (connection.expected_services ?? []).length > 0) &&
-      lokiConns.some((connection) => (connection.expected_services ?? []).length === 0),
+    logSourceConns.some((connection) => (connection.expected_services ?? []).length > 0) &&
+      logSourceConns.some((connection) => (connection.expected_services ?? []).length === 0),
   );
-  const newConn = await mockRequest<LokiConnectionRead>('POST', '/api/loki-connections', {
+  const newConn = await mockRequest<LogSourceConnectionRead>('POST', '/api/log-source-connections', {
     body: {
       name: 'smoke-loki',
       source_type: 'loki',
@@ -705,19 +705,19 @@ async function main(): Promise<void> {
   );
   check('secret 은 응답에 평문으로 오지 않는다', !JSON.stringify(newConn).includes('secret":"'));
   // 빈 배열은 "확인을 끈다"는 명시적 값이다 — 생략(변경 없음)과 구분되어야 한다.
-  const offConn = await mockRequest<LokiConnectionRead>(
+  const offConn = await mockRequest<LogSourceConnectionRead>(
     'PATCH',
-    `/api/loki-connections/${newConn.id}`,
+    `/api/log-source-connections/${newConn.id}`,
     { body: { expected_services: [] } },
   );
   check('빈 배열로 수집 확인을 끌 수 있다', offConn.expected_services.length === 0);
-  const untouched = await mockRequest<LokiConnectionRead>(
+  const untouched = await mockRequest<LogSourceConnectionRead>(
     'PATCH',
-    `/api/loki-connections/${newConn.id}`,
+    `/api/log-source-connections/${newConn.id}`,
     { body: { name: 'smoke-loki-2' } },
   );
   check('생략은 변경 없음이다', untouched.expected_services.length === 0);
-  await mockRequest<void>('DELETE', `/api/loki-connections/${newConn.id}`, {});
+  await mockRequest<void>('DELETE', `/api/log-source-connections/${newConn.id}`, {});
 
   console.log('수집 중단 경고 (계약 — ingest_absent)');
   const badgeRuns = await mockRequest<QueryRunListResponse>('GET', '/api/policies/1/query-runs', {

@@ -25,10 +25,10 @@ from tests.test_policies_fixtures import (  # noqa: F401 - fixture 재수출
 
 def _payload(connection_id: int, **overrides) -> dict:
     payload = {
-        "loki_connection_id": connection_id,
+        "log_source_connection_id": connection_id,
         "name": "payment-api ERROR",
         "description": "결제 API 오류",
-        "logql": '{service="payment-api"} | json | level="ERROR"',
+        "query": '{service="payment-api"} | json | level="ERROR"',
         "default_range_minutes": 60,
         "max_lines": 1000,
         "exclusions": ["healthcheck"],
@@ -83,7 +83,7 @@ def test_update_policy(client, db) -> None:
     assert updated["description"] is None
     assert updated["daily_analysis_limit"] is None
     # 건드리지 않은 필드는 그대로다.
-    assert updated["logql"] == created["logql"]
+    assert updated["query"] == created["query"]
 
 
 # ------------------------------------------------ baseline_query (Phase 7)

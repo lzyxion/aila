@@ -28,7 +28,7 @@ from app.models import (
     AnalysisResult,
     ErrorGroup,
     ErrorSample,
-    LokiConnection,
+    LogSourceConnection,
     QueryRun,
 )
 from app.policies import integrations as policy_integrations
@@ -235,7 +235,7 @@ def group_trend(db: Session, group: ErrorGroup) -> tuple[list[CountPoint], list[
     run = db.get(QueryRun, group.query_run_id)
     policy = db.get(AnalysisPolicy, run.policy_id) if run is not None else None
     connection = (
-        db.get(LokiConnection, policy.loki_connection_id) if policy is not None else None
+        db.get(LogSourceConnection, policy.log_source_connection_id) if policy is not None else None
     )
     if connection is None or not connection.active:
         return [], [

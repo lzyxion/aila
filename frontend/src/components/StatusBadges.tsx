@@ -191,7 +191,7 @@ export function ScheduleBadge({
         tone="info"
         title={
           intervalMinutes
-            ? `${formatIntervalMinutes(intervalMinutes)}마다 이 정책으로 Loki 를 조회합니다.`
+            ? `${formatIntervalMinutes(intervalMinutes)}마다 이 정책으로 로그 소스를 조회합니다.`
             : '스케줄이 켜져 있지만 주기가 설정되지 않았습니다.'
         }
       >

@@ -1,9 +1,9 @@
 /**
- * Loki 연결 (`/admin/loki-connections`) — **좌측 목록 + 우측 상세·수정**.
+ * 로그 소스 연결 (`/admin/log-source-connections`) — **좌측 목록 + 우측 상세·수정**.
  *
  * 이 화면이 생긴 이유는 Phase 7 의 `expected_services` 다. 연결마다 "이 서비스들은 로그를
  * 내고 있어야 정상"이라고 적어 두면, 조회 실행이 그 목록과 실제 관측을 대조해 **수집 중단
- * 의심**(`ingest_absent`)을 회차 경고로 남긴다. 그전까지 Loki 연결은 정책 편집 화면의
+ * 의심**(`ingest_absent`)을 회차 경고로 남긴다. 그전까지 로그 소스 연결은 정책 편집 화면의
  * 드롭다운에서만 고를 수 있었고, 만들거나 고칠 자리는 없었다.
  *
  * 표기 규칙(계약):
@@ -16,15 +16,15 @@
 import { useEffect, useState } from 'react';
 
 import {
-  useCreateLokiConnection,
-  useDeactivateLokiConnection,
-  useLokiConnections,
-  useTestLokiConnection,
-  useUpdateLokiConnection,
+  useCreateLogSourceConnection,
+  useDeactivateLogSourceConnection,
+  useLogSourceConnections,
+  useTestLogSourceConnection,
+  useUpdateLogSourceConnection,
 } from '../api/queries';
-import { AUTH_TYPES, type AuthType, type LokiConnectionRead } from '../api/types';
+import { AUTH_TYPES, type AuthType, type LogSourceConnectionRead } from '../api/types';
 import { useWriteAccess } from '../auth/AuthContext';
-import { AddIcon, ChevronRightIcon, LokiConnectionIcon, SaveIcon } from '../components/icons';
+import { AddIcon, ChevronRightIcon, LogSourceConnectionIcon, SaveIcon } from '../components/icons';
 import {
   Badge,
   Button,
@@ -67,7 +67,7 @@ const EMPTY_FORM: FormState = {
   expectedServicesText: '',
 };
 
-function toForm(connection: LokiConnectionRead): FormState {
+function toForm(connection: LogSourceConnectionRead): FormState {
   return {
     name: connection.name,
     base_url: connection.base_url,
@@ -115,13 +115,13 @@ function parseServices(text: string): string[] {
 
 type Selection = number | null;
 
-export function LokiConnectionsPage() {
+export function LogSourceConnectionsPage() {
   const write = useWriteAccess();
-  const connectionsQuery = useLokiConnections();
-  const createConnection = useCreateLokiConnection();
-  const updateConnection = useUpdateLokiConnection();
-  const deactivateConnection = useDeactivateLokiConnection();
-  const testConnection = useTestLokiConnection();
+  const connectionsQuery = useLogSourceConnections();
+  const createConnection = useCreateLogSourceConnection();
+  const updateConnection = useUpdateLogSourceConnection();
+  const deactivateConnection = useDeactivateLogSourceConnection();
+  const testConnection = useTestLogSourceConnection();
 
   const connections = connectionsQuery.data ?? [];
   const [selected, setSelected] = useState<Selection>(null);
@@ -149,7 +149,7 @@ export function LokiConnectionsPage() {
     testConnection.reset();
   }
 
-  function openConnection(connection: LokiConnectionRead) {
+  function openConnection(connection: LogSourceConnectionRead) {
     setSelected(connection.id);
     setForm(toForm(connection));
     setFormError(null);
@@ -217,7 +217,7 @@ export function LokiConnectionsPage() {
       {/* ------------------------------------------------------------ 목록 */}
       <div className="xl:col-span-2">
         <Card
-          title="Loki 연결"
+          title="로그 소스 연결"
           description="하나를 눌러 오른쪽에서 상세를 보고 고칩니다."
           info={
             <>
@@ -239,12 +239,12 @@ export function LokiConnectionsPage() {
           }
         >
           {connectionsQuery.isPending && (
-            <SkeletonText lines={4} label="Loki 연결 목록을 불러오는 중" />
+            <SkeletonText lines={4} label="로그 소스 연결 목록을 불러오는 중" />
           )}
           {connectionsQuery.isError && <ErrorBlock error={connectionsQuery.error} />}
           {connectionsQuery.data?.length === 0 && (
-            <EmptyBlock icon={LokiConnectionIcon}>
-              등록된 Loki 연결이 없습니다. 먼저 하나를 만드십시오.
+            <EmptyBlock icon={LogSourceConnectionIcon}>
+              등록된 로그 소스 연결이 없습니다. 먼저 하나를 만드십시오.
             </EmptyBlock>
           )}
 
@@ -271,6 +271,7 @@ export function LokiConnectionsPage() {
                         {/* LLM 연결 목록과 같은 표시 — 선택은 색만이 아니라 모양으로도 알린다. */}
                         {active && <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />}
                         {connection.name}
+                        <Badge tone="neutral">{connection.source_type}</Badge>
                         {!connection.active && <Badge tone="neutral">비활성</Badge>}
                         {connection.has_secret && <Badge tone="info">secret 있음</Badge>}
                       </p>
@@ -322,7 +323,7 @@ export function LokiConnectionsPage() {
           </Card>
         ) : (
           <Card
-            title={isEditing ? `연결 수정 · ${editing.name}` : '새 Loki 연결'}
+            title={isEditing ? `연결 수정 · ${editing.name}` : '새 로그 소스 연결'}
             description={
               isEditing
                 ? '저장된 secret 은 어떤 응답에도 평문으로 오지 않습니다 — 있음/없음만 표시됩니다.'
@@ -400,7 +401,7 @@ export function LokiConnectionsPage() {
                     한 줄에 하나씩 <Code>소스라벨=표준필드</Code> (예: <Code>app=service</Code>).
                   </>
                 }
-                info="Loki 의 소스 라벨을 AILA 의 표준 필드(service·environment)로 옮깁니다. 매핑이 없으면 그룹화가 서비스를 알아보지 못합니다."
+                info="로그 소스의 라벨을 AILA 의 표준 필드(service·environment)로 옮깁니다. 매핑이 없으면 그룹화가 서비스를 알아보지 못합니다."
               >
                 <Textarea
                   rows={3}

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.dashboard.counting import fold_by_timestamp, group_count, unanalyzed_group_count
 from app.enums import QueryRunStatus
-from app.models import AnalysisPolicy, LokiConnection, QueryRun
+from app.models import AnalysisPolicy, LogSourceConnection, QueryRun
 from app.policies import integrations
 from app.schemas.api import (
     DashboardPolicySummary,
@@ -96,7 +96,7 @@ def _errors_24h(
         )
         return None, [], warnings
 
-    connection = db.get(LokiConnection, policy.loki_connection_id)
+    connection = db.get(LogSourceConnection, policy.log_source_connection_id)
     if connection is None or not connection.active:
         warnings.append(
             FetchWarning(
@@ -128,7 +128,7 @@ def _errors_24h(
         )
         return None, [], warnings
 
-    query = policy.logql
+    query = policy.query
 
     def _call() -> tuple[float, list[CountPoint], list[FetchWarning]]:
         series = provider.count_over_time(query, time_range, SUMMARY_STEP_SECONDS)

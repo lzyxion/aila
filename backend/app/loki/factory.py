@@ -1,4 +1,4 @@
-"""`LokiConnection` ORM 행 -> `LogSourceProvider` 인스턴스.
+"""`LogSourceConnection` ORM 행 -> `LogSourceProvider` 인스턴스.
 
 쿼리 실행 경로를 한 곳으로 모으기 위해, 다른 트랙(정책·대시보드)은 프로바이더를
 직접 만들지 말고 **반드시 이 팩토리**를 통한다. secret 복호화 책임도 여기에 있다
@@ -20,7 +20,7 @@ from app.providers.logsource import LogSourceProvider
 
 
 def build_provider(connection: Any) -> LogSourceProvider:
-    """`LokiConnection` 을 받아 `LokiProvider` 를 만든다.
+    """`LogSourceConnection` 을 받아 `LokiProvider` 를 만든다.
 
     `source_type` 이 `loki` 가 아니면 `ValueError` 를 던진다 — MVP 에 두 번째
     어댑터는 없고, 조용히 Loki 로 대체하면 잘못된 소스를 조회하게 된다.

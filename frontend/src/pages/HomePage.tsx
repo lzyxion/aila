@@ -545,7 +545,7 @@ function PolicyCard({ policy }: { policy: DashboardSummaryPolicy }) {
           title={
             write.reason ??
             (policy.active
-              ? '이 정책의 LogQL 로 Loki 를 지금 조회합니다.'
+              ? '이 정책의 쿼리로 로그 소스를 지금 조회합니다.'
               : '비활성 정책은 실행할 수 없습니다.')
           }
           onClick={() => runPolicy.mutate({ id: policy.policy_id, payload: {} })}
@@ -638,7 +638,7 @@ function FallbackCard({ policy }: { policy: PolicyRead }) {
       }
       description={policy.description ?? '설명이 없습니다.'}
     >
-      <p className="font-mono text-xs break-all text-muted">{policy.logql}</p>
+      <p className="font-mono text-xs break-all text-muted">{policy.query}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         <ButtonLink to={`/dashboard/${policy.id}`} size="sm">
           <DashboardIcon aria-hidden className="size-3.5" />

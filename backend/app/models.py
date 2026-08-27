@@ -63,10 +63,15 @@ class TimestampMixin:
 # ---------------------------------------------------------------- connections
 
 
-class LokiConnection(TimestampMixin, Base):
-    """로그 소스 연결 정보. MVP 는 `source_type='loki'` 하나뿐이다."""
+class LogSourceConnection(TimestampMixin, Base):
+    """로그 소스 연결 정보. 현재 어댑터는 `source_type='loki'` 하나뿐이다.
 
-    __tablename__ = "loki_connections"
+    Phase 9 에서 `loki_connections` 에서 개명했다 (revision 0006) — 추상화 계층의
+    이름에 특정 소스가 박혀 있으면 두 번째 어댑터가 올 때 이름이 거짓말이 된다.
+    Loki 라는 이름은 어댑터(`app/loki/`)에만 남는다.
+    """
+
+    __tablename__ = "log_source_connections"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
@@ -90,7 +95,7 @@ class LokiConnection(TimestampMixin, Base):
     #: 실제 관측된 서비스를 대조해 `ingest_absent` 경고를 run.warnings 에 남긴다.
     expected_services: Mapped[list | None] = mapped_column(JSONType, nullable=True)
 
-    policies: Mapped[list[AnalysisPolicy]] = relationship(back_populates="loki_connection")
+    policies: Mapped[list[AnalysisPolicy]] = relationship(back_populates="log_source_connection")
 
 
 class LLMConnection(TimestampMixin, Base):
@@ -125,12 +130,13 @@ class AnalysisPolicy(TimestampMixin, Base):
     __tablename__ = "analysis_policies"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    loki_connection_id: Mapped[int] = mapped_column(
-        ForeignKey("loki_connections.id", ondelete="RESTRICT"), nullable=False
+    log_source_connection_id: Mapped[int] = mapped_column(
+        ForeignKey("log_source_connections.id", ondelete="RESTRICT"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    logql: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 소스 고유 문법 그대로 저장한다 (Loki 면 LogQL). 공통 DSL 로 번역하지 않는다.
+    query: Mapped[str] = mapped_column(Text, nullable=False)
 
     # --- 한도 (UI 가 아니라 서버가 강제한다) ---
     default_range_minutes: Mapped[int] = mapped_column(
@@ -172,7 +178,7 @@ class AnalysisPolicy(TimestampMixin, Base):
     #: DELETE 는 실제 삭제가 아니라 active=false 비활성화다.
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
 
-    loki_connection: Mapped[LokiConnection] = relationship(back_populates="policies")
+    log_source_connection: Mapped[LogSourceConnection] = relationship(back_populates="policies")
     query_runs: Mapped[list[QueryRun]] = relationship(back_populates="policy")
 
     __table_args__ = (
@@ -527,7 +533,7 @@ __all__ = [
     "ErrorGroup",
     "ErrorSample",
     "LLMConnection",
-    "LokiConnection",
+    "LogSourceConnection",
     "QueryRun",
     "SETTING_DAILY_ANALYSIS_LIMIT",
     "SETTING_MODEL_PRICING",

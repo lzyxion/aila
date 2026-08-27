@@ -12,7 +12,7 @@ import { ErrorGroupsPage } from './pages/ErrorGroupsPage';
 import { HomePage } from './pages/HomePage';
 import { LlmConnectionsPage } from './pages/LlmConnectionsPage';
 import { LoginPage } from './pages/LoginPage';
-import { LokiConnectionsPage } from './pages/LokiConnectionsPage';
+import { LogSourceConnectionsPage } from './pages/LogSourceConnectionsPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { PoliciesPage } from './pages/PoliciesPage';
 import { PolicyEditPage } from './pages/PolicyEditPage';
@@ -58,8 +58,8 @@ export function App() {
         <Route path="admin" element={<AdminLayout />}>
           <Route index element={<Navigate to="/admin/llm-connections" replace />} />
           <Route path="llm-connections" element={<LlmConnectionsPage />} />
-          {/* Loki 연결 — 수집 확인 대상(expected_services)을 여기서 정한다. */}
-          <Route path="loki-connections" element={<LokiConnectionsPage />} />
+          {/* 로그 소스 연결 — 수집 확인 대상(expected_services)을 여기서 정한다. */}
+          <Route path="log-source-connections" element={<LogSourceConnectionsPage />} />
           <Route path="analysis-jobs" element={<AnalysisJobsPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="users" element={<UsersPage />} />

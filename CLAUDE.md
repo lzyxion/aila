@@ -45,6 +45,7 @@ python scripts/e2e_demo.py    # 9단계 ALL PASS 가 정상
 - **스케줄러는 단일 uvicorn 워커 전제다.** 겹침 방지가 in-process 락이라 워커를 늘리면 같은 정책이 중복 실행된다(조용히 동작하는 것처럼 보인다).
 - **공유 계약 파일**(`schemas/**`, `providers/**`, `models.py`, `main.py`)을 고치면 파급을 확인한다: `tests/test_contracts.py` + 프론트 `frontend/src/api/types.ts` 는 스키마의 **손 사본**이라 함께 갱신해야 한다. 스키마는 추가·완화 위주로, 기존 필드 변경은 신중히.
 - **마스킹·정규화 규칙을 바꾸면 버전 상수를 올린다** (`MASKING_RULE_VERSION` / `NORMALIZATION_RULE_VERSION`). 규칙 변경 후 그룹 구성 변화를 추적하는 유일한 수단이다. 마스킹은 약화 금지 — 과잉만 줄인다(뒤 문맥 보존).
+- **이름 규칙 — 로그 소스 추상화 계층에 `loki` 를 넣지 않는다** (Phase 9 개명 스윕, revision 0006). 정본은 `LogSourceConnection`(테이블 `log_source_connections`) · `AnalysisPolicy.log_source_connection_id` · `AnalysisPolicy.query` · `/api/log-source-connections` 다. `Loki`/`LogQL` 이라는 이름이 남아도 되는 곳은 **어댑터**(`app/loki/**`, `LokiProvider`, `tests/test_loki_provider.py`)와 **쿼리 언어 자체를 가리키는 문장·코드 펜스**뿐이다 — 정책 쿼리를 가리키는 일반 라벨은 "쿼리"로 쓴다.
 - **DB 스키마 변경은 기존 revision 을 고치지 말고 새 Alembic revision** + `models.py` 동기화.
 - **완료 기준**: backend 전체 pytest + (프론트 변경 시) `npm run build`·`npm run smoke` 통과. 조회·분석 경로를 바꿨으면 `scripts/e2e_demo.py` 까지.
 - 테스트에서 실제 LLM·Loki 를 호출하지 않는다 — `integrations` mock 과 `tests/test_policies_fixtures.py` 의 `no_real_log_source`(모듈에서 이름으로 import 해야 적용됨)를 쓴다.

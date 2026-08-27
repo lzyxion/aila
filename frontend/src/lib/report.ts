@@ -151,11 +151,11 @@ export function renderReportMarkdown(job: AnalysisJobRead, group: ErrorGroupDeta
   push();
   push(
     '원본(마스킹 전) 로그는 저장하지 않습니다. 확인이 필요하면 아래 라벨과 시간 범위로 ' +
-      'Loki 에서 직접 재조회하십시오.',
+      '로그 소스에서 다시 조회하십시오.',
   );
   push();
   push('```logql');
-  push(lokiSelector(group));
+  push(selectorFromLabels(group));
   push('```');
   push();
   push(`- 조회 구간: ${formatDateTime(group.first_seen)} ~ ${formatDateTime(group.last_seen)}`);
@@ -171,8 +171,8 @@ export function renderReportMarkdown(job: AnalysisJobRead, group: ErrorGroupDeta
   return lines.join('\n');
 }
 
-/** 그룹 라벨로 원본 재조회용 LogQL selector 를 만든다. */
-export function lokiSelector(group: ErrorGroupDetail): string {
+/** 그룹 라벨로 원본 재조회용 selector 를 만든다 (Loki 면 LogQL 셀렉터 문법). */
+export function selectorFromLabels(group: ErrorGroupDetail): string {
   const keys = ['service', 'environment', 'level', 'release', 'pod'];
   const parts = keys
     .filter((key) => group.labels[key])

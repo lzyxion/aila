@@ -3,7 +3,7 @@
 `AILA_ENCRYPTION_KEY`(Fernet 키)로 암복호화한다. 평문 저장과 KMS 사이의
 MVP 수준 중간점이며, 키 자체는 환경변수로만 주입한다 — DB 나 코드에 두지 않는다.
 
-계약: `loki_connections.encrypted_secret`, `llm_connections.encrypted_api_key`
+계약: `log_source_connections.encrypted_secret`, `llm_connections.encrypted_api_key`
 컬럼에는 반드시 `encrypt()` 결과(문자열)만 넣는다. 평문을 직접 넣지 말 것.
 """
 

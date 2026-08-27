@@ -51,7 +51,7 @@ const ADMIN_NAV: NavItem[] = [
     to: '/admin',
     label: '관리',
     icon: AdminIcon,
-    title: 'LLM 연결·Loki 연결·분석 이력·사용량·사용자 관리 — admin 전용입니다.',
+    title: 'LLM 연결·로그 소스 연결·분석 이력·사용량·사용자 관리 — admin 전용입니다.',
   },
 ];
 
@@ -167,7 +167,7 @@ export function Layout() {
             </span>
             <InfoTip label="마스킹·LLM 고지 자세히 보기" title="이 화면이 보여주는 것" side="top">
               마스킹 전 원본 로그는 <strong>저장하지 않습니다</strong> — 필요하면 그룹의 라벨·시각으로
-              Loki 에서 다시 조회합니다.
+              로그 소스에서 다시 조회합니다.
               <span className="mt-1.5 block">
                 LLM 이 낸 원인·심각도는 대표 로그 몇 건에서 나온 <strong>가설</strong>이고, 토큰
                 단가가 등록되지 않은 구간의 비용은 0 이 아니라 <strong>알 수 없음(-)</strong> 입니다.

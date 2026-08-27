@@ -38,7 +38,7 @@ from app.config import get_settings
 from app.dashboard.counting import fold_by_timestamp, group_count, unanalyzed_group_count
 from app.enums import QueryRunStatus
 from app.error_groups import service as error_group_service
-from app.models import AnalysisPolicy, ErrorGroup, LokiConnection, QueryRun
+from app.models import AnalysisPolicy, ErrorGroup, LogSourceConnection, QueryRun
 from app.policies import integrations
 from app.policies.service import HTTP_422, as_utc
 from app.providers.logsource import LogSourceProvider
@@ -233,7 +233,7 @@ def _count_series(
         )
         return _MetricResult(step_seconds=step_seconds, warnings=warnings)
 
-    connection = db.get(LokiConnection, policy.loki_connection_id)
+    connection = db.get(LogSourceConnection, policy.log_source_connection_id)
     if connection is None or not connection.active:
         warnings.append(
             FetchWarning(
@@ -262,7 +262,7 @@ def _count_series(
                 warnings=warnings,
             )
         series = provider.count_over_time(
-            policy.logql, TimeRange(start=range_start, end=range_end), step_seconds
+            policy.query, TimeRange(start=range_start, end=range_end), step_seconds
         )
     except Exception as exc:  # noqa: BLE001 - 추이 실패로 대시보드 전체를 죽이지 않는다
         warnings.append(

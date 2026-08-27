@@ -181,7 +181,7 @@ def test_session_expiry_follows_the_configured_ttl(client, db) -> None:
 def test_every_api_route_requires_authentication(client) -> None:
     for method, path in (
         ("GET", "/api/policies"),
-        ("GET", "/api/loki-connections"),
+        ("GET", "/api/log-source-connections"),
         ("GET", "/api/llm-connections"),
         ("GET", "/api/usage"),
         ("GET", "/api/dashboard/summary"),
@@ -215,7 +215,7 @@ def test_viewer_may_not_write(client, db) -> None:
         ("POST", "/api/policies"),
         ("PATCH", "/api/policies/1"),
         ("DELETE", "/api/policies/1"),
-        ("POST", "/api/loki-connections"),
+        ("POST", "/api/log-source-connections"),
     ):
         response = client.request(method, path, json={} if method != "DELETE" else None)
         assert response.status_code == 403, f"{method} {path}"

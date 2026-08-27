@@ -34,7 +34,7 @@ from app.models import (
     AnalysisResult,
     ErrorGroup,
     ErrorSample,
-    LokiConnection,
+    LogSourceConnection,
     QueryRun,
 )
 from app.schemas.logrecord import CountPoint, CountSeries, FetchResult, FetchWarning, LogRecord
@@ -127,8 +127,8 @@ def make_connection(
     name: str = "loki-local",
     active: bool = True,
     expected_services: list[str] | None = None,
-) -> LokiConnection:
-    connection = LokiConnection(
+) -> LogSourceConnection:
+    connection = LogSourceConnection(
         name=name,
         source_type=SourceType.LOKI.value,
         base_url="http://loki:3100",
@@ -143,11 +143,11 @@ def make_connection(
     return connection
 
 
-def make_policy(db: Session, connection: LokiConnection, **overrides: Any) -> AnalysisPolicy:
+def make_policy(db: Session, connection: LogSourceConnection, **overrides: Any) -> AnalysisPolicy:
     values: dict[str, Any] = {
-        "loki_connection_id": connection.id,
+        "log_source_connection_id": connection.id,
         "name": "payment-api ERROR",
-        "logql": '{service="payment-api"} | json | level="ERROR"',
+        "query": '{service="payment-api"} | json | level="ERROR"',
         "default_range_minutes": 60,
         "max_lines": 1000,
         "exclusions": [],

@@ -14,7 +14,7 @@ import {
   dashboard,
   errorGroups,
   llmConnections,
-  lokiConnections,
+  logSourceConnections,
   policies,
   queryRuns,
   settings,
@@ -31,8 +31,8 @@ import type {
   LLMConnectionCreate,
   LLMConnectionUpdate,
   LLMModelListRequest,
-  LokiConnectionCreate,
-  LokiConnectionUpdate,
+  LogSourceConnectionCreate,
+  LogSourceConnectionUpdate,
   ModelPricingEntry,
   ModelPricingTable,
   PolicyCreate,
@@ -48,8 +48,8 @@ import { asModelPricingTable, isActiveJobStatus, SETTING_MODEL_PRICING } from '.
 export const queryKeys = {
   authMe: ['auth', 'me'] as const,
   users: ['auth', 'users'] as const,
-  lokiConnections: ['loki-connections'] as const,
-  lokiLabels: (id: number) => ['loki-connections', id, 'labels'] as const,
+  logSourceConnections: ['log-source-connections'] as const,
+  logSourceLabels: (id: number) => ['log-source-connections', id, 'labels'] as const,
   llmConnections: ['llm-connections'] as const,
   llmModels: (params: LLMModelListRequest) => ['llm-connections', 'models', params] as const,
   policies: ['policies'] as const,
@@ -158,47 +158,50 @@ export function useDeactivateUser() {
 
 // --------------------------------------------------------------- connections
 
-export function useLokiConnections() {
-  return useQuery({ queryKey: queryKeys.lokiConnections, queryFn: () => lokiConnections.list() });
+export function useLogSourceConnections() {
+  return useQuery({
+    queryKey: queryKeys.logSourceConnections,
+    queryFn: () => logSourceConnections.list(),
+  });
 }
 
-export function useLokiLabels(connectionId: number | null) {
+export function useLogSourceLabels(connectionId: number | null) {
   return useQuery({
-    queryKey: queryKeys.lokiLabels(connectionId ?? 0),
-    queryFn: () => lokiConnections.labels(connectionId as number),
+    queryKey: queryKeys.logSourceLabels(connectionId ?? 0),
+    queryFn: () => logSourceConnections.labels(connectionId as number),
     enabled: connectionId !== null,
     retry: false,
   });
 }
 
-export function useCreateLokiConnection() {
+export function useCreateLogSourceConnection() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (payload: LokiConnectionCreate) => lokiConnections.create(payload),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.lokiConnections }),
+    mutationFn: (payload: LogSourceConnectionCreate) => logSourceConnections.create(payload),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.logSourceConnections }),
   });
 }
 
-export function useUpdateLokiConnection() {
+export function useUpdateLogSourceConnection() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, payload }: { id: number; payload: LokiConnectionUpdate }) =>
-      lokiConnections.update(id, payload),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.lokiConnections }),
+    mutationFn: ({ id, payload }: { id: number; payload: LogSourceConnectionUpdate }) =>
+      logSourceConnections.update(id, payload),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.logSourceConnections }),
   });
 }
 
 /** 실제 삭제가 아니라 `active=false` 다 — 정책·조회 이력이 이 연결을 참조한다. */
-export function useDeactivateLokiConnection() {
+export function useDeactivateLogSourceConnection() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => lokiConnections.deactivate(id),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.lokiConnections }),
+    mutationFn: (id: number) => logSourceConnections.deactivate(id),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.logSourceConnections }),
   });
 }
 
-export function useTestLokiConnection() {
-  return useMutation({ mutationFn: lokiConnections.test });
+export function useTestLogSourceConnection() {
+  return useMutation({ mutationFn: logSourceConnections.test });
 }
 
 export function useLlmConnections() {

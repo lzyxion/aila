@@ -112,10 +112,10 @@ class ConnectionTestResponse(BaseModel):
     details: dict = Field(default_factory=dict)
 
 
-# ============================================================ loki connections
+# ===================================================== log source connections
 
 
-class LokiConnectionBase(BaseModel):
+class LogSourceConnectionBase(BaseModel):
     name: str = Field(max_length=128)
     source_type: SourceType = SourceType.LOKI
     base_url: str = Field(max_length=512)
@@ -137,12 +137,12 @@ class LokiConnectionBase(BaseModel):
         return [] if value is None else value
 
 
-class LokiConnectionCreate(LokiConnectionBase):
+class LogSourceConnectionCreate(LogSourceConnectionBase):
     #: 평문 입력 전용. 저장 시 암호화되며 응답에는 절대 포함되지 않는다.
     secret: str | None = None
 
 
-class LokiConnectionUpdate(BaseModel):
+class LogSourceConnectionUpdate(BaseModel):
     name: str | None = None
     base_url: str | None = None
     auth_type: AuthType | None = None
@@ -153,7 +153,7 @@ class LokiConnectionUpdate(BaseModel):
     expected_services: list[str] | None = None
 
 
-class LokiConnectionRead(LokiConnectionBase):
+class LogSourceConnectionRead(LogSourceConnectionBase):
     model_config = ORM
 
     id: int
@@ -162,7 +162,7 @@ class LokiConnectionRead(LokiConnectionBase):
     updated_at: datetime
 
 
-class LokiConnectionTestRequest(BaseModel):
+class LogSourceConnectionTestRequest(BaseModel):
     """저장된 연결(`connection_id`) 또는 아직 저장하지 않은 입력값으로 테스트한다."""
 
     connection_id: int | None = None
@@ -264,11 +264,11 @@ class LLMModelListResponse(BaseModel):
 
 
 class PolicyBase(BaseModel):
-    loki_connection_id: int
+    log_source_connection_id: int
     name: str = Field(max_length=128)
     description: str | None = None
     #: 소스 고유 문법 그대로 저장한다 (공통 DSL 로 번역하지 않는다).
-    logql: str = Field(min_length=1)
+    query: str = Field(min_length=1)
     default_range_minutes: int = Field(default=60, gt=0)
     max_lines: int = Field(default=1000, gt=0)
     #: 제외 정규식 목록
@@ -296,10 +296,10 @@ class PolicyCreate(PolicyBase):
 
 
 class PolicyUpdate(BaseModel):
-    loki_connection_id: int | None = None
+    log_source_connection_id: int | None = None
     name: str | None = None
     description: str | None = None
-    logql: str | None = None
+    query: str | None = None
     default_range_minutes: int | None = Field(default=None, gt=0)
     max_lines: int | None = Field(default=None, gt=0)
     exclusions: list[str] | None = None
@@ -326,8 +326,8 @@ class PolicyRead(PolicyBase):
 class PolicyPreviewRequest(BaseModel):
     """저장 전 실행 결과 미리보기. 잘못 쓴 쿼리가 정책으로 굳는 것을 막는다."""
 
-    loki_connection_id: int
-    logql: str = Field(min_length=1)
+    log_source_connection_id: int
+    query: str = Field(min_length=1)
     range_minutes: int = Field(default=60, gt=0)
     #: 미리보기는 "쿼리가 무엇을 잡는가"만 확인하면 된다. 상한을 두지 않으면
     #: 저장도 하지 않은 쿼리로 정책 실행과 같은 양을 읽게 된다.
@@ -794,10 +794,10 @@ __all__ = [
     "LLMModelListResponse",
     "LabelValuesResponse",
     "LoginRequest",
-    "LokiConnectionCreate",
-    "LokiConnectionRead",
-    "LokiConnectionTestRequest",
-    "LokiConnectionUpdate",
+    "LogSourceConnectionCreate",
+    "LogSourceConnectionRead",
+    "LogSourceConnectionTestRequest",
+    "LogSourceConnectionUpdate",
     "PolicyCreate",
     "PolicyPreviewRequest",
     "PolicyPreviewResponse",

@@ -34,7 +34,7 @@ LOGQL = '{service="payment-api"} | json | level="ERROR"'
 
 def _analyzed(client, db, *, sample_lines: list[str] | None = None):
     connection = make_connection(db)
-    policy = make_policy(db, connection, logql=LOGQL)
+    policy = make_policy(db, connection, query=LOGQL)
     run = make_query_run(db, policy)
     group = make_error_group(db, run, fingerprint="fp-timeout", count=11)
     make_llm_connection(db)

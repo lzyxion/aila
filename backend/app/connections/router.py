@@ -1,4 +1,4 @@
-"""`/api/loki-connections` 라우터.
+"""`/api/log-source-connections` 라우터.
 
 Phase 1 담당 트랙: **Loki 어댑터**
 
@@ -21,28 +21,28 @@ from app.db import get_db
 from app.enums import AuthType, SourceType
 from app.loki.factory import build_provider
 from app.loki.provider import LokiProvider
-from app.models import LokiConnection
+from app.models import LogSourceConnection
 from app.providers.logsource import LogSourceError, LogSourceProvider
 from app.schemas.api import (
     ConnectionTestResponse,
     LabelValuesResponse,
-    LokiConnectionCreate,
-    LokiConnectionRead,
-    LokiConnectionTestRequest,
-    LokiConnectionUpdate,
+    LogSourceConnectionCreate,
+    LogSourceConnectionRead,
+    LogSourceConnectionTestRequest,
+    LogSourceConnectionUpdate,
 )
 
 TRACK = "Loki 어댑터"
 
-router = APIRouter(prefix="/loki-connections", tags=["loki-connections"])
+router = APIRouter(prefix="/log-source-connections", tags=["log-source-connections"])
 
 
 # ------------------------------------------------------------------ 내부 헬퍼
 
 
-def _to_read(connection: LokiConnection) -> LokiConnectionRead:
+def _to_read(connection: LogSourceConnection) -> LogSourceConnectionRead:
     """ORM 행 -> 응답 모델. `encrypted_secret` 은 존재 여부로만 나간다."""
-    return LokiConnectionRead(
+    return LogSourceConnectionRead(
         id=connection.id,
         name=connection.name,
         source_type=SourceType(connection.source_type),
@@ -58,8 +58,8 @@ def _to_read(connection: LokiConnection) -> LokiConnectionRead:
     )
 
 
-def _get_or_404(db: Session, connection_id: int) -> LokiConnection:
-    connection = db.get(LokiConnection, connection_id)
+def _get_or_404(db: Session, connection_id: int) -> LogSourceConnection:
+    connection = db.get(LogSourceConnection, connection_id)
     if connection is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -80,13 +80,13 @@ def _encrypt_secret(secret: str | None) -> str | None:
 
 
 def _name_taken(db: Session, name: str, *, exclude_id: int | None = None) -> bool:
-    statement = select(LokiConnection.id).where(LokiConnection.name == name)
+    statement = select(LogSourceConnection.id).where(LogSourceConnection.name == name)
     if exclude_id is not None:
-        statement = statement.where(LokiConnection.id != exclude_id)
+        statement = statement.where(LogSourceConnection.id != exclude_id)
     return db.execute(statement).first() is not None
 
 
-def _provider_for(connection: LokiConnection) -> LogSourceProvider:
+def _provider_for(connection: LogSourceConnection) -> LogSourceProvider:
     """저장된 연결로 프로바이더를 만든다. 복호화·source_type 오류는 400 으로 바꾼다."""
     try:
         return build_provider(connection)
@@ -109,16 +109,17 @@ def _provider_for(connection: LokiConnection) -> LogSourceProvider:
 # --------------------------------------------------------------------- CRUD
 
 
-@router.get("", response_model=list[LokiConnectionRead])
-def list_loki_connections(db: Session = Depends(get_db)) -> list[LokiConnectionRead]:
-    connections = db.execute(select(LokiConnection).order_by(LokiConnection.id)).scalars().all()
+@router.get("", response_model=list[LogSourceConnectionRead])
+def list_log_source_connections(db: Session = Depends(get_db)) -> list[LogSourceConnectionRead]:
+    statement = select(LogSourceConnection).order_by(LogSourceConnection.id)
+    connections = db.execute(statement).scalars().all()
     return [_to_read(connection) for connection in connections]
 
 
-@router.post("", response_model=LokiConnectionRead, status_code=status.HTTP_201_CREATED)
-def create_loki_connection(
-    payload: LokiConnectionCreate, db: Session = Depends(get_db)
-) -> LokiConnectionRead:
+@router.post("", response_model=LogSourceConnectionRead, status_code=status.HTTP_201_CREATED)
+def create_log_source_connection(
+    payload: LogSourceConnectionCreate, db: Session = Depends(get_db)
+) -> LogSourceConnectionRead:
     """secret 은 `app.crypto.encrypt()` 로 암호화해 저장한다. 평문 저장 금지."""
     if _name_taken(db, payload.name):
         raise HTTPException(
@@ -126,7 +127,7 @@ def create_loki_connection(
             detail=f"이미 같은 이름의 연결이 있습니다: {payload.name!r}",
         )
 
-    connection = LokiConnection(
+    connection = LogSourceConnection(
         name=payload.name,
         source_type=SourceType(payload.source_type).value,
         base_url=payload.base_url,
@@ -143,8 +144,8 @@ def create_loki_connection(
 
 
 @router.post("/test", response_model=ConnectionTestResponse)
-def test_loki_connection(
-    payload: LokiConnectionTestRequest, db: Session = Depends(get_db)
+def test_log_source_connection(
+    payload: LogSourceConnectionTestRequest, db: Session = Depends(get_db)
 ) -> ConnectionTestResponse:
     """저장된 연결 또는 미저장 입력값으로 연결·인증을 테스트한다.
 
@@ -194,15 +195,17 @@ def test_loki_connection(
     )
 
 
-@router.get("/{connection_id}", response_model=LokiConnectionRead)
-def get_loki_connection(connection_id: int, db: Session = Depends(get_db)) -> LokiConnectionRead:
+@router.get("/{connection_id}", response_model=LogSourceConnectionRead)
+def get_log_source_connection(
+    connection_id: int, db: Session = Depends(get_db)
+) -> LogSourceConnectionRead:
     return _to_read(_get_or_404(db, connection_id))
 
 
-@router.patch("/{connection_id}", response_model=LokiConnectionRead)
-def update_loki_connection(
-    connection_id: int, payload: LokiConnectionUpdate, db: Session = Depends(get_db)
-) -> LokiConnectionRead:
+@router.patch("/{connection_id}", response_model=LogSourceConnectionRead)
+def update_log_source_connection(
+    connection_id: int, payload: LogSourceConnectionUpdate, db: Session = Depends(get_db)
+) -> LogSourceConnectionRead:
     connection = _get_or_404(db, connection_id)
     changes = payload.model_dump(exclude_unset=True)
 
@@ -235,7 +238,7 @@ def update_loki_connection(
 
 
 @router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
-def deactivate_loki_connection(connection_id: int, db: Session = Depends(get_db)) -> None:
+def deactivate_log_source_connection(connection_id: int, db: Session = Depends(get_db)) -> None:
     """정책이 참조 중일 수 있으므로 실제 삭제가 아니라 `active=false` 비활성화다."""
     connection = _get_or_404(db, connection_id)
     connection.active = False

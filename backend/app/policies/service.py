@@ -40,7 +40,7 @@ from app.models import (
     AppSetting,
     ErrorGroup,
     ErrorSample,
-    LokiConnection,
+    LogSourceConnection,
     QueryRun,
 )
 from app.policies import integrations
@@ -334,10 +334,10 @@ def validate_schedule(
         )
 
 
-def _require_connection(db: Session, connection_id: int) -> LokiConnection:
-    connection = db.get(LokiConnection, connection_id)
+def _require_connection(db: Session, connection_id: int) -> LogSourceConnection:
+    connection = db.get(LogSourceConnection, connection_id)
     if connection is None:
-        raise _unprocessable(f"loki_connection_id={connection_id} 인 연결이 없습니다.")
+        raise _unprocessable(f"log_source_connection_id={connection_id} 인 연결이 없습니다.")
     return connection
 
 
@@ -375,7 +375,7 @@ def get_policy(db: Session, policy_id: int) -> PolicyRead:
 
 
 def create_policy(db: Session, payload: PolicyCreate) -> PolicyRead:
-    _require_connection(db, payload.loki_connection_id)
+    _require_connection(db, payload.log_source_connection_id)
     validate_exclusions(payload.exclusions)
     validate_limits(
         db,
@@ -403,8 +403,8 @@ def update_policy(db: Session, policy_id: int, payload: PolicyUpdate) -> PolicyR
     policy = _require_policy(db, policy_id)
     changes = payload.model_dump(exclude_unset=True)
 
-    if "loki_connection_id" in changes and changes["loki_connection_id"] is not None:
-        _require_connection(db, changes["loki_connection_id"])
+    if "log_source_connection_id" in changes and changes["log_source_connection_id"] is not None:
+        _require_connection(db, changes["log_source_connection_id"])
     if changes.get("exclusions") is not None:
         validate_exclusions(changes["exclusions"])
     validate_limits(
@@ -701,7 +701,7 @@ def create_query_run(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"정책 {policy_id} 은(는) 비활성 상태라 실행할 수 없습니다.",
         )
-    connection = db.get(LokiConnection, policy.loki_connection_id)
+    connection = db.get(LogSourceConnection, policy.log_source_connection_id)
     if connection is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -758,7 +758,7 @@ def create_query_run(
 
 
 def check_service_presence(
-    connection: LokiConnection, provider: object, time_range: TimeRange
+    connection: LogSourceConnection, provider: object, time_range: TimeRange
 ) -> list[FetchWarning]:
     """연결의 `expected_services` 중 이 기간에 로그가 없는 서비스를 경고로 만든다.
 
@@ -812,7 +812,7 @@ def _execute_query_run(
     db: Session,
     *,
     policy: AnalysisPolicy,
-    connection: LokiConnection,
+    connection: LogSourceConnection,
     run: QueryRun,
     range_start: datetime,
     range_end: datetime,
@@ -822,7 +822,7 @@ def _execute_query_run(
     """쿼리 실행 경로의 단일 진입점 (selector 범위 검사를 끼워 넣을 지점)."""
     provider = integrations.build_provider(connection)
     result = provider.fetch_logs(
-        policy.logql, TimeRange(start=range_start, end=range_end), limit
+        policy.query, TimeRange(start=range_start, end=range_end), limit
     )
 
     records, excluded = apply_exclusions(result.records, policy.exclusions or [])
@@ -876,7 +876,7 @@ def preview_policy(db: Session, payload: PolicyPreviewRequest) -> PolicyPreviewR
 
     화면에 나가는 `sample_lines` 는 **마스킹을 거친 값**이다 (계약: 화면 표시 전 마스킹).
     """
-    connection = _require_connection(db, payload.loki_connection_id)
+    connection = _require_connection(db, payload.log_source_connection_id)
     if not connection.active:
         raise _unprocessable(f"로그 소스 연결 '{connection.name}' 이(가) 비활성 상태입니다.")
     validate_exclusions(payload.exclusions)
@@ -904,7 +904,7 @@ def preview_policy(db: Session, payload: PolicyPreviewRequest) -> PolicyPreviewR
         )
 
     provider = integrations.build_provider(connection)
-    result = provider.fetch_logs(payload.logql, time_range, limit)
+    result = provider.fetch_logs(payload.query, time_range, limit)
     records, excluded = apply_exclusions(result.records, payload.exclusions)
     if excluded:
         warnings.append(

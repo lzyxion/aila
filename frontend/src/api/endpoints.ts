@@ -29,10 +29,10 @@ import type {
   LLMConnectionUpdate,
   LLMModelListRequest,
   LLMModelListResponse,
-  LokiConnectionCreate,
-  LokiConnectionRead,
-  LokiConnectionTestRequest,
-  LokiConnectionUpdate,
+  LogSourceConnectionCreate,
+  LogSourceConnectionRead,
+  LogSourceConnectionTestRequest,
+  LogSourceConnectionUpdate,
   PolicyCreate,
   PolicyPreviewRequest,
   PolicyPreviewResponse,
@@ -89,20 +89,20 @@ export const users = {
   deactivate: (id: number) => api.delete(`${P}/auth/users/${id}`),
 };
 
-// --------------------------------------------------------- loki connections
+// --------------------------------------------------- log source connections
 
-export const lokiConnections = {
-  list: () => api.get<LokiConnectionRead[]>(`${P}/loki-connections`),
-  get: (id: number) => api.get<LokiConnectionRead>(`${P}/loki-connections/${id}`),
-  create: (payload: LokiConnectionCreate) =>
-    api.post<LokiConnectionRead>(`${P}/loki-connections`, payload),
-  update: (id: number, payload: LokiConnectionUpdate) =>
-    api.patch<LokiConnectionRead>(`${P}/loki-connections/${id}`, payload),
+export const logSourceConnections = {
+  list: () => api.get<LogSourceConnectionRead[]>(`${P}/log-source-connections`),
+  get: (id: number) => api.get<LogSourceConnectionRead>(`${P}/log-source-connections/${id}`),
+  create: (payload: LogSourceConnectionCreate) =>
+    api.post<LogSourceConnectionRead>(`${P}/log-source-connections`, payload),
+  update: (id: number, payload: LogSourceConnectionUpdate) =>
+    api.patch<LogSourceConnectionRead>(`${P}/log-source-connections/${id}`, payload),
   /** 실제 삭제가 아니라 active=false 비활성화다. */
-  deactivate: (id: number) => api.delete(`${P}/loki-connections/${id}`),
-  test: (payload: LokiConnectionTestRequest) =>
-    api.post<ConnectionTestResponse>(`${P}/loki-connections/test`, payload),
-  labels: (id: number) => api.get<LabelValuesResponse>(`${P}/loki-connections/${id}/labels`),
+  deactivate: (id: number) => api.delete(`${P}/log-source-connections/${id}`),
+  test: (payload: LogSourceConnectionTestRequest) =>
+    api.post<ConnectionTestResponse>(`${P}/log-source-connections/test`, payload),
+  labels: (id: number) => api.get<LabelValuesResponse>(`${P}/log-source-connections/${id}/labels`),
 };
 
 // ---------------------------------------------------------- llm connections

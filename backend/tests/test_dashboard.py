@@ -63,7 +63,7 @@ def test_overview_uses_count_over_time_for_the_series(client, db) -> None:
     }
 
     query, time_range, step = provider.count_calls[0]
-    assert query == policy.logql
+    assert query == policy.query
     assert step == 300
     assert time_range.duration == timedelta(minutes=60)
 
@@ -429,7 +429,7 @@ def test_baseline_query_yields_ingest_total_and_ratio(client, db) -> None:
     ]
 
     # 오류 쿼리와 **같은 기간·step** 으로 정확히 한 번 더 부른다.
-    assert [call[0] for call in provider.count_calls] == [policy.logql, BASELINE_QUERY]
+    assert [call[0] for call in provider.count_calls] == [policy.query, BASELINE_QUERY]
     assert provider.count_calls[0][1] == provider.count_calls[1][1]
     assert provider.count_calls[0][2] == provider.count_calls[1][2]
 
@@ -458,7 +458,7 @@ def test_baseline_failure_degrades_to_a_warning(client, db) -> None:
     make_error_group(db, run, fingerprint="fp-1", count=4)
     provider = FakeLogSource(count_error=LogSourceError("Loki 503"))
     # 오류 쿼리만 성공시키고 분모 쿼리는 count_error 로 떨어뜨린다.
-    provider.count_series_by_query = {policy.logql: count_series(("payment-api", 6.0))}
+    provider.count_series_by_query = {policy.query: count_series(("payment-api", 6.0))}
 
     body = _overview(client, provider, query_run_id=run.id).json()
 

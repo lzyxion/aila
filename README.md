@@ -155,7 +155,7 @@ aila/
     │   ├── providers/            # [freeze]
     │   │   ├── logsource.py      #   LogSourceProvider ABC
     │   │   └── llm.py            #   LLMProvider ABC
-    │   ├── connections/router.py     # /api/loki-connections
+    │   ├── connections/router.py     # /api/log-source-connections
     │   ├── llm_connections/router.py # /api/llm-connections
     │   ├── policies/router.py        # /api/policies, /api/query-runs
     │   ├── error_groups/router.py    # /api/query-runs/{id}/error-groups, /api/error-groups
@@ -487,7 +487,7 @@ curl.exe -b admin.jar -X POST http://localhost:8000/api/auth/users `
 - 확인 자체의 실패는 `presence_check_failed` 로 강등하고 조회는 성공으로 남긴다.
   `supports_presence=False` 어댑터(capability 플래그)는 경고 없이 건너뛴다.
 - 화면: 정책 상세와 홈 카드에 "수집 중단 의심" 배지. 연결 관리는 신설된
-  `/admin/loki-connections` 에서 한다.
+  `/admin/log-source-connections` 에서 한다.
 
 ### 일일 한도 게이지 — `GET /api/usage/daily-limit`
 

@@ -90,7 +90,7 @@ def test_query_run_persists_groups_and_samples(client, db) -> None:
         # exclusions 는 마스킹 추가 패턴이 아니라 라인 제거 필터다.
         "extra_mask_patterns": (),
     }
-    assert provider.fetch_calls[0][0] == policy.logql
+    assert provider.fetch_calls[0][0] == policy.query
 
     stored = db.query(ErrorGroup).filter_by(query_run_id=body["id"]).all()
     assert {group_row.fingerprint for group_row in stored} == {"fp-timeout", "fp-db"}
@@ -410,8 +410,8 @@ def test_group_columns_are_clipped_to_the_column_width(client, db) -> None:
 def test_preview_limit_is_capped_by_the_schema(client, db) -> None:
     connection = make_connection(db)
     payload = {
-        "loki_connection_id": connection.id,
-        "logql": '{service="payment-api"}',
+        "log_source_connection_id": connection.id,
+        "query": '{service="payment-api"}',
         "range_minutes": 60,
         "limit": 201,
         "exclusions": [],
@@ -433,8 +433,8 @@ def test_preview_returns_at_most_fifty_sample_lines(client, db) -> None:
         body = client.post(
             "/api/policies/preview",
             json={
-                "loki_connection_id": connection.id,
-                "logql": '{service="payment-api"}',
+                "log_source_connection_id": connection.id,
+                "query": '{service="payment-api"}',
                 "range_minutes": 60,
                 "limit": 200,
                 "exclusions": [],

@@ -359,9 +359,9 @@ def test_a_failed_query_run_does_not_trigger_analysis(db, session_factory) -> No
 
 def _policy_body(connection_id: int, **overrides) -> dict:
     body = {
-        "loki_connection_id": connection_id,
+        "log_source_connection_id": connection_id,
         "name": "scheduled",
-        "logql": '{service="payment-api"} | json | level="ERROR"',
+        "query": '{service="payment-api"} | json | level="ERROR"',
     }
     body.update(overrides)
     return body
@@ -457,9 +457,9 @@ def test_scheduled_policies_are_listed_by_the_planner(db) -> None:
 def test_policy_orm_defaults_are_off(db) -> None:
     connection = make_connection(db)
     policy = AnalysisPolicy(
-        loki_connection_id=connection.id,
+        log_source_connection_id=connection.id,
         name="plain",
-        logql="{}",
+        query="{}",
     )
     db.add(policy)
     db.commit()

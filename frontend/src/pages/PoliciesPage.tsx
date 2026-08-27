@@ -108,7 +108,7 @@ export function PoliciesPage() {
     <div>
       <PageHeader
         title="분석 정책"
-        description="정책은 LogQL 한 줄이 아니라 실행 한도를 포함한 묶음입니다."
+        description="정책은 쿼리 한 줄이 아니라 실행 한도를 포함한 묶음입니다."
         info={
           <>
             이 화면은 <strong>조회 전용</strong>입니다 — 추가·수정은 전용 페이지에서 하고,
@@ -201,9 +201,9 @@ export function PoliciesPage() {
                           </span>
                           <span
                             className="mt-1 block truncate font-mono text-xs text-faint"
-                            title={policy.logql}
+                            title={policy.query}
                           >
-                            {truncate(policy.logql, 70)}
+                            {truncate(policy.query, 70)}
                           </span>
                           <span className="mt-1 block text-xs text-muted tabular-nums">
                             {policy.default_range_minutes}분 · 최대{' '}
@@ -346,9 +346,9 @@ function PolicyDetailCard({ policy, canEdit }: { policy: PolicyRead; canEdit: bo
       >
         <div className="space-y-4">
           <div>
-            <SectionLabel>LogQL</SectionLabel>
+            <SectionLabel>쿼리 (LogQL)</SectionLabel>
             <div className="mt-1.5">
-              <LogLine>{policy.logql}</LogLine>
+              <LogLine>{policy.query}</LogLine>
             </div>
           </div>
 

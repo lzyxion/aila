@@ -1,14 +1,14 @@
 /**
  * 정책 추가·수정 전용 페이지 (`/policies/new`, `/policies/:policyId/edit`).
  *
- * 목록 화면에서 폼을 분리한 이유는 하나다 — 정책은 LogQL 한 줄이 아니라 **실행 한도를
+ * 목록 화면에서 폼을 분리한 이유는 하나다 — 정책은 쿼리 한 줄이 아니라 **실행 한도를
  * 포함한 묶음**이라 입력 항목이 열 개가 넘는다. 목록 옆에 붙여 두면 "지금 무엇을 고치는
  * 중인가"가 스크롤 밖으로 밀리고, 미리보기 결과가 들어갈 자리도 없다.
  *
  * 저장하면 목록으로 돌아간다. 편집 중 이탈은 막지 않는다(저장 전 값은 서버에 없다).
  *
  * 미리보기는 여기 있다 — **저장 전에** 쿼리가 실제로 무엇을 가져오는지 보는 장치이므로
- * 조회 전용 화면에 둘 이유가 없다. 잘못 쓴 LogQL 이 정책으로 굳으면 이후 모든 조회가
+ * 조회 전용 화면에 둘 이유가 없다. 잘못 쓴 쿼리가 정책으로 굳으면 이후 모든 조회가
  * 조용히 빈 결과를 낸다.
  *
  * 폼은 네 덩어리다 (Phase 8): **기본 정보**(무엇을 어디서 잡나) · **조회 한도**(한 번에
@@ -22,11 +22,11 @@ import { useNavigate, useParams } from 'react-router';
 
 import {
   useCreatePolicy,
-  useLokiConnections,
-  useLokiLabels,
+  useLogSourceConnections,
+  useLogSourceLabels,
   usePolicies,
   usePreviewPolicy,
-  useTestLokiConnection,
+  useTestLogSourceConnection,
   useUpdatePolicy,
 } from '../api/queries';
 import { policySchedule, type PolicyPreviewResponse, type PolicyRead } from '../api/types';
@@ -68,10 +68,10 @@ export const AUTO_ANALYZE_COST_NOTE =
   '자동 분석은 처음 보는 오류에만 실행되고 일일 한도의 제한을 받습니다.';
 
 interface FormState {
-  loki_connection_id: number | '';
+  log_source_connection_id: number | '';
   name: string;
   description: string;
-  logql: string;
+  query: string;
   /** 빈 문자열이면 저장 시 `null` 로 보낸다 — "지운다"와 "안 건드린다"를 구분해야 한다. */
   baseline_query: string;
   default_range_minutes: number;
@@ -89,10 +89,10 @@ interface FormState {
 }
 
 const EMPTY_FORM: FormState = {
-  loki_connection_id: '',
+  log_source_connection_id: '',
   name: '',
   description: '',
-  logql: '{service="", environment="staging"} | json | level="ERROR"',
+  query: '{service="", environment="staging"} | json | level="ERROR"',
   baseline_query: '',
   default_range_minutes: 60,
   max_lines: 1000,
@@ -109,10 +109,10 @@ const EMPTY_FORM: FormState = {
 function toForm(policy: PolicyRead): FormState {
   const schedule = policySchedule(policy);
   return {
-    loki_connection_id: policy.loki_connection_id,
+    log_source_connection_id: policy.log_source_connection_id,
     name: policy.name,
     description: policy.description ?? '',
-    logql: policy.logql,
+    query: policy.query,
     baseline_query: policy.baseline_query ?? '',
     default_range_minutes: policy.default_range_minutes,
     max_lines: policy.max_lines,
@@ -146,11 +146,11 @@ export function PolicyEditPage() {
   const isEditing = editingId !== null;
 
   const policiesQuery = usePolicies();
-  const connectionsQuery = useLokiConnections();
+  const connectionsQuery = useLogSourceConnections();
   const createPolicy = useCreatePolicy();
   const updatePolicy = useUpdatePolicy();
   const preview = usePreviewPolicy();
-  const testConnection = useTestLokiConnection();
+  const testConnection = useTestLogSourceConnection();
 
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
@@ -172,19 +172,19 @@ export function PolicyEditPage() {
   // 새 정책이면 첫 활성 연결을 기본 선택으로 채운다.
   useEffect(() => {
     if (isEditing) return;
-    if (form.loki_connection_id === '' && activeConnections.length > 0) {
-      setForm((prev) => ({ ...prev, loki_connection_id: activeConnections[0].id }));
+    if (form.log_source_connection_id === '' && activeConnections.length > 0) {
+      setForm((prev) => ({ ...prev, log_source_connection_id: activeConnections[0].id }));
     }
-  }, [activeConnections, form.loki_connection_id, isEditing]);
+  }, [activeConnections, form.log_source_connection_id, isEditing]);
 
-  const connectionId = form.loki_connection_id === '' ? null : Number(form.loki_connection_id);
-  const labelsQuery = useLokiLabels(connectionId);
+  const connectionId = form.log_source_connection_id === '' ? null : Number(form.log_source_connection_id);
+  const labelsQuery = useLogSourceLabels(connectionId);
   const saving = createPolicy.isPending || updatePolicy.isPending;
 
   function validate(): string | null {
-    if (form.loki_connection_id === '') return 'Loki 연결을 선택하십시오.';
+    if (form.log_source_connection_id === '') return '로그 소스 연결을 선택하십시오.';
     if (!form.name.trim()) return '정책 이름을 입력하십시오.';
-    if (!form.logql.trim()) return 'LogQL 을 입력하십시오.';
+    if (!form.query.trim()) return '쿼리를 입력하십시오.';
     if (form.default_range_minutes <= 0) return '기본 기간은 1분 이상이어야 합니다.';
     if (form.max_lines <= 0) return '최대 조회 수는 1 이상이어야 합니다.';
     if (form.max_samples_per_group <= 0) return '대표 로그 수는 1 이상이어야 합니다.';
@@ -213,10 +213,10 @@ export function PolicyEditPage() {
     if (message) return;
 
     const payload = {
-      loki_connection_id: Number(form.loki_connection_id),
+      log_source_connection_id: Number(form.log_source_connection_id),
       name: form.name.trim(),
       description: form.description.trim() || null,
-      logql: form.logql.trim(),
+      query: form.query.trim(),
       // 빈 입력은 **null** 이다 — 빈 문자열을 보내면 "쿼리를 설정했는데 아무것도 세지
       // 못하는" 상태가 되고, 화면은 그걸 "분모 쿼리 실패"로 읽는다.
       baseline_query: form.baseline_query.trim() || null,
@@ -256,8 +256,8 @@ export function PolicyEditPage() {
     setFormError(message);
     if (message) return;
     preview.mutate({
-      loki_connection_id: Number(form.loki_connection_id),
-      logql: form.logql.trim(),
+      log_source_connection_id: Number(form.log_source_connection_id),
+      query: form.query.trim(),
       range_minutes: form.default_range_minutes,
       limit: Math.min(form.max_lines, 50),
       exclusions: parseExclusions(form.exclusionsText),
@@ -272,7 +272,7 @@ export function PolicyEditPage() {
         <PageHeader title={isEditing ? '정책 수정' : '새 정책'} />
         <Card title="권한 없음">
           <Notice tone="neutral" title="읽기 전용 계정입니다">
-            {write.reason} 정책의 LogQL·한도·스케줄은 <TextLink to="/policies">분석 정책</TextLink>{' '}
+            {write.reason} 정책의 쿼리·한도·스케줄은 <TextLink to="/policies">분석 정책</TextLink>{' '}
             목록에서 볼 수 있습니다.
           </Notice>
         </Card>
@@ -310,7 +310,7 @@ export function PolicyEditPage() {
         description="저장 전 미리보기로 이 쿼리가 실제로 무엇을 가져오는지 확인하십시오."
         info={
           <>
-            잘못 쓴 LogQL 이 정책으로 굳으면 이후 모든 조회가 <strong>조용히 빈 결과</strong>를
+            잘못 쓴 쿼리가 정책으로 굳으면 이후 모든 조회가 <strong>조용히 빈 결과</strong>를
             냅니다 — 미리보기는 그걸 저장 전에 잡는 장치입니다.
             <span className="mt-1.5 block">
               미리보기에 나오는 로그도 <strong>마스킹된 값</strong>이며, 마스킹 전 원본은
@@ -335,20 +335,20 @@ export function PolicyEditPage() {
               <div className="mb-4">
                 <ErrorBlock
                   error={connectionsQuery.error}
-                  hint="Loki 연결 목록을 불러오지 못했습니다."
+                  hint="로그 소스 연결 목록을 불러오지 못했습니다."
                 />
               </div>
             )}
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Loki 연결" required>
+              <Field label="로그 소스 연결" required>
                 <div className="flex gap-2">
                   <Select
-                    value={form.loki_connection_id}
+                    value={form.log_source_connection_id}
                     onChange={(event) =>
                       setForm({
                         ...form,
-                        loki_connection_id:
+                        log_source_connection_id:
                           event.target.value === '' ? '' : Number(event.target.value),
                       })
                     }
@@ -388,7 +388,7 @@ export function PolicyEditPage() {
               </Field>
 
               <Field
-                label="LogQL"
+                label="쿼리 (LogQL)"
                 required
                 className="sm:col-span-2"
                 hint="소스 고유 문법 그대로 저장됩니다."
@@ -406,8 +406,8 @@ export function PolicyEditPage() {
               >
                 <Textarea
                   rows={3}
-                  value={form.logql}
-                  onChange={(event) => setForm({ ...form, logql: event.target.value })}
+                  value={form.query}
+                  onChange={(event) => setForm({ ...form, query: event.target.value })}
                 />
               </Field>
 
@@ -543,7 +543,7 @@ export function PolicyEditPage() {
             }
           >
             <Field
-              label="분모 LogQL"
+              label="분모 쿼리 (LogQL)"
               hint="비워 두면 대시보드가 유입량과 비율을 계산하지 않습니다."
             >
               <Textarea
@@ -603,7 +603,7 @@ export function PolicyEditPage() {
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <Checkbox
                     label="스케줄 조회"
-                    hint="켜면 사람이 누르지 않아도 주기마다 이 정책으로 Loki 를 조회합니다. 조회 자체는 LLM 비용이 들지 않습니다."
+                    hint="켜면 사람이 누르지 않아도 주기마다 이 정책으로 로그 소스를 조회합니다. 조회 자체는 LLM 비용이 들지 않습니다."
                     checked={form.schedule_enabled}
                     onChange={(event) =>
                       setForm({ ...form, schedule_enabled: event.target.checked })
@@ -732,7 +732,7 @@ function PreviewPanel({
   if (error) {
     return (
       <Card title="미리보기">
-        <ErrorBlock error={error} hint="LogQL 문법과 셀렉터 라벨을 확인하십시오." />
+        <ErrorBlock error={error} hint="쿼리 문법과 셀렉터 라벨을 확인하십시오." />
       </Card>
     );
   }

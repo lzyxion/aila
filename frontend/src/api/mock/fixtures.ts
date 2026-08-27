@@ -16,7 +16,7 @@ import type {
   ErrorGroupDetail,
   ErrorSampleRead,
   LLMConnectionRead,
-  LokiConnectionRead,
+  LogSourceConnectionRead,
   PolicyRead,
   UserRead,
 } from '../types';
@@ -100,7 +100,7 @@ export const userSeed: UserRead[] = [
 
 // ------------------------------------------------------------- connections
 
-export const lokiConnectionSeed: LokiConnectionRead[] = [
+export const logSourceConnectionSeed: LogSourceConnectionRead[] = [
   {
     id: 1,
     name: 'local-loki',
@@ -179,10 +179,10 @@ export const llmConnectionSeed: LLMConnectionRead[] = [
 export const policySeed: PolicyRead[] = [
   {
     id: 1,
-    loki_connection_id: 1,
+    log_source_connection_id: 1,
     name: 'payment-api 오류 (staging)',
     description: '결제 게이트웨이 관련 ERROR 전량. 외부 API 타임아웃 감지가 주 목적.',
-    logql: '{service="payment-api", environment="staging"} | json | level="ERROR"',
+    query: '{service="payment-api", environment="staging"} | json | level="ERROR"',
     /*
       분모 쿼리 (Phase 7). 오류 셀렉터와 **같은 라벨 범위**이되 level 필터가 없다 — 이게
       유입량이고, 오류 ÷ 유입량이 오류 비율이다. 정책 2·3 은 비워 둬서 "미설정이면 0 이
@@ -206,10 +206,10 @@ export const policySeed: PolicyRead[] = [
   },
   {
     id: 2,
-    loki_connection_id: 1,
+    log_source_connection_id: 1,
     name: '전체 서비스 ERROR/FATAL',
     description: '넓게 훑는 정책. 라인 상한을 낮게 잡아 비용을 막는다.',
-    logql: '{environment="staging"} | json | level=~"ERROR|FATAL"',
+    query: '{environment="staging"} | json | level=~"ERROR|FATAL"',
     baseline_query: null,
     default_range_minutes: 180,
     max_lines: 500,
@@ -227,10 +227,10 @@ export const policySeed: PolicyRead[] = [
   },
   {
     id: 3,
-    loki_connection_id: 2,
+    log_source_connection_id: 2,
     name: 'auth-api 인증 실패 (보관)',
     description: '토큰 만료 급증 조사용. 지금은 비활성.',
-    logql: '{service="auth-api"} | json | level="ERROR" | line_format "{{.msg}}"',
+    query: '{service="auth-api"} | json | level="ERROR" | line_format "{{.msg}}"',
     baseline_query: null,
     default_range_minutes: 360,
     max_lines: 2000,
@@ -764,7 +764,7 @@ export const fallbackAnalysisResult: AnalysisResultSchema = {
   investigation_steps: [
     '해당 release 의 변경 목록 확인',
     '같은 시간대 의존 서비스의 오류율 확인',
-    'Loki 에서 이 그룹의 라벨·시각으로 원본 로그 재조회',
+    '로그 소스에서 이 그룹의 라벨·시각으로 원본 로그 재조회',
   ],
   mitigation: ['재시도·타임아웃 설정 점검', '실패 입력에 대한 방어적 검증 추가'],
   limitations: [

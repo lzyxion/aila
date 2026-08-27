@@ -11,10 +11,10 @@ from app.config import get_settings
 from app.crypto import encrypt
 from app.loki.factory import build_provider
 from app.loki.provider import LokiProvider
-from app.models import LokiConnection
+from app.models import LogSourceConnection
 
 
-def make_connection(**overrides) -> LokiConnection:
+def make_connection(**overrides) -> LogSourceConnection:
     kwargs = {
         "name": "loki-local",
         "source_type": "loki",
@@ -25,7 +25,7 @@ def make_connection(**overrides) -> LokiConnection:
         "active": True,
     }
     kwargs.update(overrides)
-    return LokiConnection(**kwargs)
+    return LogSourceConnection(**kwargs)
 
 
 def test_build_provider_decrypts_secret_and_uses_settings_timeout() -> None:
